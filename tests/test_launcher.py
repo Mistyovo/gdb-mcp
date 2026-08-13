@@ -1,0 +1,150 @@
+"""Tests for gdb_mcp.launcher pure helpers (no wsl.exe needed)."""
+
+import pytest
+
+from gdb_mcp.launcher import (
+    bash_quote,
+    build_bash_command,
+    build_gdb_argv,
+    build_pkill_command,
+    parse_distro_list,
+    win_to_wsl,
+)
+
+
+class TestWinToWsl:
+    def test_drive_path(self):
+        assert win_to_wsl(r"C:\Users\x\y") == "/mnt/c/Users/x/y"
+
+    def test_drive_letter_lowercased(self):
+        assert win_to_wsl(r"D:\data\bin") == "/mnt/d/data/bin"
+
+    def test_forward_slashes(self):
+        assert win_to_wsl("C:/Users/x") == "/mnt/c/Users/x"
+
+    def test_wsl_path_passthrough(self):
+        assert win_to_wsl("/home/user/bin") == "/home/user/bin"
+
+    def test_relative_path_raises(self):
+        with pytest.raises(ValueError):
+            win_to_wsl("relative/path")
+
+    def test_unc_path_raises(self):
+        with pytest.raises(ValueError):
+            win_to_wsl(r"\\server\share")
+
+
+class TestParseDistroList:
+    def test_basic(self):
+        raw = "kali-linux\r\ndocker-desktop\r\nUbuntu\r\n".encode("utf-16-le")
+        assert parse_distro_list(raw) == ["kali-linux", "Ubuntu"]
+
+    def test_docker_prefixes_filtered(self):
+        raw = "docker-desktop-data\ndocker-desktop\nkali-linux\n".encode("utf-16-le")
+        assert parse_distro_list(raw) == ["kali-linux"]
+
+    def test_empty_and_dupes(self):
+        raw = "\n\nkali-linux\nkali-linux\n\n".encode("utf-16-le")
+        assert parse_distro_list(raw) == ["kali-linux"]
+
+    def test_garbage_decodes_to_empty(self):
+        assert parse_distro_list(b"") == []
+
+
+class TestBashQuote:
+    def test_plain(self):
+        assert bash_quote("hello") == "'hello'"
+
+    def test_single_quote_escaped(self):
+        assert bash_quote("it's") == "'it'\\''s'"
+
+    def test_spaces(self):
+        assert bash_quote("a b") == "'a b'"
+
+
+class TestBuildBashCommand:
+    def test_full(self):
+        cmd = build_bash_command(
+            ["python3", "-u", "/home/u/exploit.py", "arg with space"],
+            env={"GDB_MCP_PORT": "3939", "A": "b c"},
+            cwd="/home/u",
+            marker="gdbmcp_s-001",
+        )
+        assert "export GDB_MCP_PORT='3939'" in cmd
+        assert "export A='b c'" in cmd
+        assert "cd '/home/u'" in cmd
+        assert "exec -a 'gdbmcp_s-001'" in cmd
+        assert "'arg with space'" in cmd
+
+    def test_minimal(self):
+        cmd = build_bash_command(["gdb", "-q"])
+        assert cmd == "'gdb' '-q'"
+
+    def test_no_env_no_cwd_no_marker(self):
+        assert build_bash_command(["x"], env=None, cwd=None, marker=None) == "'x'"
+
+
+class TestBuildPkillCommand:
+    def test_graceful(self):
+        cmd = build_pkill_command("s-001", force=False)
+        assert "pkill -TERM -f 'gdbmcp_s-001'" in cmd
+        assert "sleep 3" in cmd
+        assert "pkill -9 -f 'gdbmcp_s-001'" in cmd
+
+    def test_force(self):
+        cmd = build_pkill_command("s-001", force=True)
+        assert cmd.startswith("pkill -9 -f 'gdbmcp_s-001'")
+
+
+class TestBuildGdbArgv:
+    def test_with_program(self):
+        argv = build_gdb_argv(
+            "/mnt/c/plugin.py", "/tmp/vuln", ["arg1"], None, run=False
+        )
+        assert argv == [
+            "gdb",
+            "-q",
+            "-x",
+            "/mnt/c/plugin.py",
+            "--args",
+            "/tmp/vuln",
+            "arg1",
+        ]
+
+    def test_gdb_args_and_run(self):
+        argv = build_gdb_argv(
+            "/mnt/c/plugin.py", None, None, ["-nh"], run=True
+        )
+        assert argv == [
+            "gdb",
+            "-q",
+            "-nh",
+            "-x",
+            "/mnt/c/plugin.py",
+            "-ex",
+            "run",
+        ]
+
+    def test_no_program(self):
+        argv = build_gdb_argv("/mnt/c/plugin.py", None, None, None, run=False)
+        assert argv == ["gdb", "-q", "-x", "/mnt/c/plugin.py"]
+
+
+class TestLogTail:
+    def test_tail(self, tmp_path):
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.config import Config
+        from gdb_mcp.sessions import SessionRegistry
+
+        log = tmp_path / "x.log"
+        log.write_text("a\nb\nc\nd\n")
+        launcher = Launcher(Config(), SessionRegistry(Config()))
+        assert launcher.log_tail(str(log), lines=2) == "c\nd\n"
+
+    def test_missing_file(self):
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.config import Config
+        from gdb_mcp.sessions import SessionRegistry
+
+        launcher = Launcher(Config(), SessionRegistry(Config()))
+        assert launcher.log_tail("nope.log") == ""

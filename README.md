@@ -1,0 +1,158 @@
+# gdb-mcp
+
+MCP 服务器，让大模型（Claude Code 等）驱动 Linux 下的 **gdb 进程本身**（可带 pwndbg 插件），用于用户态二进制漏洞挖掘与 exploit 开发中的动态调试与崩溃快速定位。
+
+- 目标是 **gdb 前端**，不是 gdbserver——即使 pwntools 的 `gdb.debug()` 内部用 gdbserver + `target remote`，MCP 统一通过 gdb 控制一切。
+- **原生支持 pwntools 拉起的 gdb**（`gdb.debug()` / `gdb.attach()`），无需改造 pwntools 代码。
+- 服务器跑在 **Windows**（Claude Code），gdb 跑在 **WSL2 / Linux**：gdb 内插件通过 TCP 回连服务器，多会话注册表自动管理。
+- 结构化工具（内存/寄存器/回溯/断点/线程/反汇编）+ **pwndbg 命令透传**（`vmmap`/`heap`/`got`/`checksec`/`ropgadget`…）+ 一键崩溃定位（`crash_report`）。
+
+## 架构
+
+```
+Claude Code (Windows) ──stdio/MCP──► gdb-mcp server (FastMCP, Windows)
+                                          │ TCP listener 0.0.0.0:3939（会话注册表）
+                                          ▼ 插件从 WSL2 回连（JSON-lines 协议 v1）
+                    WSL2: gdb (+pwndbg) ── gdb_mcp_plugin.py（stdlib-only 单文件）
+                          ▲
+                          └── pwntools 经 gdb_args=['-x', plugin] 注入；或 MCP 经 wsl.exe 自启动
+```
+
+- 插件是 TCP **客户端**：谁先启动都无所谓，断线自动退避重连。
+- gdb 非线程安全：插件内所有 `gdb.*` 调用经 `gdb.post_event` 派发到 gdb 主线程；`stop`/`running`/`exited`/`prompt` 等异步通知经 `gdb.events` 推送。
+- 打断运行中的 inferior：`post_event(execute("interrupt"))`（gdb 17.2 实测唯一可靠机制；`gdb.interrupt()` 与进程 SIGINT 均不可靠）。
+
+## 安装
+
+**Windows 侧（MCP 服务器）**（在仓库根目录执行）
+
+```powershell
+pip install -e .
+```
+
+**WSL2 侧（kali-linux）**
+
+```bash
+sudo apt install gdb python3 python3-pip gcc   # pwndbg 可选
+```
+
+无需在 WSL 内安装任何 gdb-mcp 组件——插件文件直接经 `/mnt/c/...` 由 gdb 的 `-x` 加载。若 `/mnt/c` 不可用，把 `src/gdb_mcp/plugin/gdb_mcp_plugin.py` 复制进 WSL 并设置 `GDB_MCP_PLUGIN` 指向它。
+
+## WSL2 网络（重要）
+
+插件从 WSL2 **回连** Windows 侧服务器，依次尝试：`GDB_MCP_HOST` → `127.0.0.1` → `/etc/resolv.conf` 的 nameserver IP。
+
+| 模式 | 配置（`%USERPROFILE%\.wslconfig`） | 插件应连 |
+|---|---|---|
+| **Mirrored**（推荐） | `[wsl2] networkingMode=Mirrored` | `127.0.0.1`（共享 localhost） |
+| NAT（默认） | 无配置 | nameserver IP（Windows 宿主），首次需放行防火墙 |
+
+排查：`wsl.exe -l -q` 报 `0x8007054f` / VM 内 `ip route` 为空 → mirrored 网络未生效，`wsl --shutdown` 重启或改回 NAT。NAT 下若 `GDB_MCP_HOST` 解析失败，显式设置：
+
+```bash
+export GDB_MCP_HOST=$(ip route show default | awk '{print $3}')
+```
+
+服务器绑定 `0.0.0.0:3939`（可配置），首次监听 Windows 会弹防火墙授权。端口暴露于局域网：默认无鉴权，可选共享 token（`GDB_MCP_TOKEN`，服务端与 gdb 进程两侧设置）。
+
+## Claude Code 配置
+
+项目根目录 `.mcp.json`（或 Claude Code 的 MCP 设置）：
+
+```json
+{
+  "mcpServers": {
+    "gdb-mcp": {
+      "command": "gdb-mcp",
+      "env": { "GDB_MCP_PORT": "3939" }
+    }
+  }
+}
+```
+
+## 用法
+
+### 方式 1：pwntools 脚本拉起 gdb（核心场景）
+
+```python
+from pwn import *
+
+# 插件路径：examples 脚本会自动定位仓库内的插件文件（也可用 GDB_MCP_PLUGIN 覆盖）
+import os
+PLUGIN = os.environ.get("GDB_MCP_PLUGIN") or "<repo>/src/gdb_mcp/plugin/gdb_mcp_plugin.py"
+
+io = gdb.debug("./vuln", gdb_args=["-x", PLUGIN])     # 或 gdb.attach(io, gdb_args=["-x", PLUGIN])
+io.interactive()
+```
+
+gdb 在新终端（tmux 窗格）中打开、pwndbg 照常加载、插件自动回连 → MCP 里 `list_sessions` 即可看到会话。完整示例见 `examples/pwntools_debug.py`、`examples/pwntools_attach.py`。
+
+### 方式 2：MCP 自启动（headless）
+
+- `launch_gdb(program="/mnt/c/.../vuln", run=True)` —— wsl.exe 后台拉起 gdb + 插件
+- `launch_script(script="C:\\...\\exploit.py")` —— 后台跑 pwntools 脚本并等待其 gdb 注册
+- `kill_session(force=True)` / `quit_gdb(kill_gdb=False)` —— 结束
+
+### 方式 3：手动 gdb
+
+```bash
+bash examples/bare_gdb.sh ./vuln        # 等价于 gdb -q -x plugin.py --args ./vuln
+```
+
+gdb 内还有 `mcp status|reconnect|detach` 命令。
+
+## 崩溃定位流程（LLM 视角）
+
+```
+continue_execution → wait_for_stop → crash_report（一次调用返回：
+  signal / fault_addr / pc / thread / registers / backtrace /
+  disasm(PC±) / memory@PC / memory@SP / memory@fault / 内存映射头部）
+→ evaluate / read_memory / write_memory 验证利用思路
+→ execute_command("vmmap") 拿 libc/PIE 基址
+→ set_reg / write_memory 现场修补
+→ continue_execution 复跑
+```
+
+## 工具一览（27 个）
+
+| 类别 | 工具 |
+|---|---|
+| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` |
+| 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容）`continue_execution` `interrupt` `wait_for_stop` `get_stop_reason` |
+| 崩溃定位 | `crash_report` |
+| 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` `load_target` |
+| 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程）`list_breakpoints` `manage_breakpoint` |
+
+所有工具带可选 `session_id`（唯一会话自动选中；多会话时报错并列出）。地址参数均支持 gdb 表达式（`main+0x20`、`&puts@got`，PIE 按实时基址解析）。
+
+## 环境变量
+
+| 变量 | 位置 | 说明 |
+|---|---|---|
+| `GDB_MCP_PORT` | 两侧 | 端口（默认 3939） |
+| `GDB_MCP_HOST_BIND` | 服务器 | 监听地址（默认 0.0.0.0） |
+| `GDB_MCP_TOKEN` | 两侧 | 可选共享 token |
+| `GDB_MCP_HOST` | gdb 进程 | 强制指定服务器地址 |
+| `GDB_MCP_SESSION_ID` | gdb 进程 | launch_gdb 内部使用 |
+| `GDB_MCP_AUTOSTART` | gdb 进程 | `0` = 仅加载不连接 |
+| `GDB_MCP_DEBUG` | gdb 进程 | `1` = 插件调试输出（stderr） |
+| `GDB_MCP_WSL_DISTRO` / `GDB_MCP_LOG_DIR` | 服务器 | launch 工具配置 |
+
+## 与 pwndbg / pwntools 共存
+
+- 插件只 `connect` 自己的 `gdb.events` 处理器，绝不接管 `gdb.prompt_hook`、不抓 prompt；在 pwndbg 前后加载均可。
+- 对 pwntools 的 gdbscript（含 `target remote`）完全惰性，inferior 如何被接管与插件无关。
+- 已知事实（gdb 17.2 实测）：`gdb.execute("continue")` 从 post_event 回调中执行时**异步返回**；`gdb.events.stop` 在 execute 返回之后触发；`StopEvent.details` 不含 fault addr（插件用 `$_siginfo._sifields._sigfault.si_addr` 兜底）；`gdb.interrupt()` 无法中断异步运行的 inferior（插件用 `post_event(execute("interrupt"))`）。
+
+## 测试
+
+```bash
+python -m pytest tests/                 # 单元测试（Windows 直接跑，无需 gdb）
+bash tests/integration/run_wsl_integration.sh   # WSL2 内真实 gdb 端到端
+```
+
+集成测试覆盖：握手 → 断点 → SIGSEGV 崩溃定位 → 寄存器/回溯/反汇编/内存读写 → 表达式求值 → interrupt 中断死循环 → 优雅退出。
+
+## 安全说明
+
+TCP 端口上的任意连接者都能执行任意 gdb 命令（等价于本机任意代码执行）。默认仅面向本机开发环境；如需加固：设置 `GDB_MCP_TOKEN`、用防火墙限制 3939 端口来源。

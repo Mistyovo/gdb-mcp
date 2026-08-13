@@ -1,0 +1,435 @@
+"""Tests for the plugin's verb handlers (driven with mock_gdb)."""
+
+import json
+import queue
+
+import pytest
+
+import mock_gdb
+from mock_gdb import MockBreakpoint, set_inferior
+
+
+def drain(plugin):
+    out = []
+    while True:
+        try:
+            line = plugin.out_q.get_nowait()
+        except queue.Empty:
+            return out
+        msg = json.loads(line.decode("utf-8"))
+        if "msg" in msg:  # token wrapper
+            msg = msg["msg"]
+        out.append(msg)
+
+
+def call(plugin, verb, params, req_id=1):
+    """Run a request through the main-thread dispatch path."""
+    plugin._handle_request(
+        {"type": "request", "id": req_id, "verb": verb, "params": params}
+    )
+    return drain(plugin)[-1]
+
+
+class TestEval:
+    def test_ok_strips_ansi(self, plugin):
+        mock_gdb.state.output_map["vmmap"] = "\x1b[31mred\x1b[0m output"
+        resp = call(plugin, "eval", {"command": "vmmap"})
+        assert resp["ok"] is True
+        assert resp["result"]["output"] == "red output"
+        assert resp["result"]["truncated"] is False
+
+    def test_keep_ansi(self, plugin):
+        mock_gdb.state.output_map["x"] = "\x1b[31mred\x1b[0m"
+        resp = call(plugin, "eval", {"command": "x", "keep_ansi": True})
+        assert "\x1b[31m" in resp["result"]["output"]
+
+    def test_truncation(self, plugin):
+        mock_gdb.state.output_map["big"] = "A" * (300 * 1024)
+        resp = call(plugin, "eval", {"command": "big"})
+        assert resp["result"]["truncated"] is True
+        assert len(resp["result"]["output"]) <= 200 * 1024 + 32
+
+    def test_missing_command(self, plugin):
+        assert call(plugin, "eval", {})["error"]["code"] == "BAD_PARAMS"
+
+
+class TestReadMem:
+    def test_whole_read(self, plugin):
+        inf = set_inferior()
+        inf.memory[0x100 : 0x110] = b"ABCDEFGHIJKLMNOP"
+        resp = call(plugin, "read_mem", {"addr": "0x100", "length": 16})
+        assert resp["ok"] is True
+        r = resp["result"]
+        assert r["addr"] == 0x100
+        assert r["hex"] == "4142434445464748494a4b4c4d4e4f50"
+        assert r["ascii"] == "ABCDEFGHIJKLMNOP"
+        assert r["unreadable"] == [] and r["partial"] is False
+
+    def test_expression_addr(self, plugin):
+        mock_gdb.state.expr_map["main"] = 0x401000
+        set_inferior()
+        resp = call(plugin, "read_mem", {"addr": "main", "length": 4})
+        assert resp["result"]["addr"] == 0x401000
+
+    def test_chunk_fallback(self, plugin):
+        inf = set_inferior()
+        inf.memory[0x1000 : 0x4000] = b"\x41" * 0x3000
+        inf.read_fail = [(0x2000, 0x1000)]  # one bad 4K chunk
+        resp = call(plugin, "read_mem", {"addr": 0x1000, "length": 0x3000})
+        r = resp["result"]
+        assert r["partial"] is True
+        assert r["unreadable"] == [{"addr": 0x2000, "length": 0x1000}]
+        assert len(r["hex"]) == 2 * 0x2000  # two readable chunks
+
+    def test_bad_length(self, plugin):
+        set_inferior()
+        assert call(plugin, "read_mem", {"addr": 0, "length": 0})["error"]["code"] == "BAD_PARAMS"
+        assert call(plugin, "read_mem", {"addr": 0, "length": 1 << 22})["error"]["code"] == "BAD_PARAMS"
+
+    def test_bad_addr(self, plugin):
+        set_inferior()
+        assert call(plugin, "read_mem", {"addr": "nosuchsym"})["error"]["code"] == "BAD_PARAMS"
+
+    def test_no_inferior(self, plugin):
+        resp = call(plugin, "read_mem", {"addr": 0x1000, "length": 16})
+        assert resp["error"]["code"] == "NO_INFERIOR"
+
+
+class TestWriteMem:
+    def test_write(self, plugin):
+        inf = set_inferior()
+        resp = call(plugin, "write_mem", {"addr": 0x2000, "hex": "41 42 43"})
+        assert resp["result"] == {"addr": 0x2000, "bytes_written": 3}
+        assert inf.writes == [(0x2000, b"ABC")]
+
+    def test_bad_hex(self, plugin):
+        set_inferior()
+        assert call(plugin, "write_mem", {"addr": 0x2000, "hex": "zz"})["error"]["code"] == "BAD_PARAMS"
+
+
+class TestRegs:
+    def test_full_listing_skips_unavailable(self, plugin):
+        set_inferior()
+        resp = call(plugin, "regs", {})
+        regs = resp["result"]["regs"]
+        assert regs["rax"] == "0x1"
+        assert regs["rip"] == "0x401000"
+        assert "rsp" not in regs  # unavailable in the mock frame
+
+    def test_names_subset(self, plugin):
+        set_inferior()
+        resp = call(plugin, "regs", {"names": ["rax", "rip"]})
+        assert set(resp["result"]["regs"]) == {"rax", "rip"}
+
+
+class TestSetReg:
+    def test_set(self, plugin):
+        set_inferior()
+        resp = call(plugin, "set_reg", {"name": "rip", "value": "0xdead"})
+        assert resp["result"] == {"name": "rip", "old": "0x401000", "new": "0xdead"}
+
+    def test_missing_params(self, plugin):
+        set_inferior()
+        assert call(plugin, "set_reg", {})["error"]["code"] == "BAD_PARAMS"
+
+
+class TestBacktrace:
+    def test_walk_frames(self, plugin):
+        set_inferior()
+        f1 = mock_gdb.state.newest_frame
+        f2 = mock_gdb.MockFrame(0x402000, "helper", filename="b.c", line=42)
+        f1._older = f2
+        resp = call(plugin, "backtrace", {"max_frames": 64})
+        frames = resp["result"]["frames"]
+        assert len(frames) == 2
+        assert frames[0]["function"] == "main"
+        assert frames[0]["file"] == "a.c" and frames[0]["line"] == 10
+        assert frames[1]["function"] == "helper"
+        assert frames[1]["line"] == 42
+
+    def test_max_frames_cap(self, plugin):
+        set_inferior()
+        f = mock_gdb.state.newest_frame
+        for i in range(10):
+            nxt = mock_gdb.MockFrame(0x402000 + 0x10 * i, "f%d" % i)
+            f._older = nxt
+            f = nxt
+        resp = call(plugin, "backtrace", {"max_frames": 3})
+        assert len(resp["result"]["frames"]) == 3
+
+    def test_no_frame(self, plugin):
+        set_inferior()
+        mock_gdb.state.newest_frame = None
+        assert call(plugin, "backtrace", {})["error"]["code"] == "NO_FRAME"
+
+
+class TestDisasm:
+    def test_with_start(self, plugin):
+        set_inferior()
+        resp = call(plugin, "disasm", {"start": "0x401000", "count": 5})
+        r = resp["result"]
+        assert r["start"] == "0x401000"
+        assert len(r["instructions"]) == 5
+        assert r["instructions"][0] == {"addr": "0x401000", "size": 4, "asm": "nop"}
+        assert mock_gdb.state.arch.disasm_calls == [(0x401000, 5)]
+
+    def test_default_pc(self, plugin):
+        set_inferior()
+        resp = call(plugin, "disasm", {})
+        assert resp["result"]["start"] == "0x401000"
+        assert len(resp["result"]["instructions"]) == 16
+
+
+class TestEvaluate:
+    def test_value(self, plugin):
+        mock_gdb.state.expr_map["$rax"] = 0x4040
+        set_inferior()
+        resp = call(plugin, "evaluate", {"expression": "$rax"})
+        r = resp["result"]
+        assert r["value"] == "16448"
+        assert r["address"] == "0x4040"
+        assert r["type"] == "long"
+
+    def test_unknown_expression(self, plugin):
+        set_inferior()
+        resp = call(plugin, "evaluate", {"expression": "nosuch"})
+        assert resp["error"]["code"] == "PLUGIN_ERROR"
+
+    def test_function_value_has_no_address_field(self, plugin):
+        # int(gdb.Value) raises gdb.error for function symbols; the
+        # evaluate result must still succeed without an address field
+        class FuncValue:
+            type = mock_gdb.MockType("void (void)")
+            _val = None
+
+            def __int__(self):
+                raise mock_gdb.error("Cannot convert value to long.")
+
+            def __str__(self):
+                return "{void (void)} 0x401000 <main>"
+
+        mock_gdb.state.expr_map["main"] = FuncValue()
+        set_inferior()
+        resp = call(plugin, "evaluate", {"expression": "main"})
+        assert resp["ok"] is True
+        assert "address" not in resp["result"]
+        assert "main" in resp["result"]["value"]
+
+
+class TestThreads:
+    def test_threads(self, plugin):
+        set_inferior()
+        mock_gdb.state.threads = [
+            mock_gdb.MockThread(1, "main"),
+            mock_gdb.MockThread(2, "worker"),
+        ]
+        mock_gdb.state.selected_thread = mock_gdb.state.threads[1]
+        resp = call(plugin, "threads", {})
+        r = resp["result"]
+        assert r["selected"] == 2
+        assert [t["state"] for t in r["threads"]] == ["stopped", "stopped"]
+        assert r["threads"][1]["selected"] is True
+
+
+class TestFrameSelect:
+    def test_select(self, plugin):
+        set_inferior()
+        f1 = mock_gdb.state.newest_frame
+        f2 = mock_gdb.MockFrame(0x402000, "helper")
+        f1._older = f2
+        resp = call(plugin, "frame_select", {"level": 1})
+        assert resp["result"]["frame"]["function"] == "helper"
+
+    def test_out_of_range(self, plugin):
+        set_inferior()
+        assert call(plugin, "frame_select", {"level": 99})["error"]["code"] == "NO_FRAME"
+
+    def test_bad_level(self, plugin):
+        set_inferior()
+        assert call(plugin, "frame_select", {"level": "x"})["error"]["code"] == "BAD_PARAMS"
+
+
+class TestBreakpoints:
+    def test_list(self, plugin):
+        bp = MockBreakpoint("0x401000")
+        bp.hit_count = 3
+        mock_gdb.state.breakpoints = [bp]
+        resp = call(plugin, "breakpoints", {})
+        r = resp["result"]["breakpoints"][0]
+        assert r["number"] == bp.number
+        assert r["enabled"] is True
+        assert r["location"] == "0x401000"
+        assert r["addr"] == "0x401000"
+        assert r["hit_count"] == 3
+
+    def test_break_with_options(self, plugin):
+        set_inferior()
+        resp = call(
+            plugin,
+            "break",
+            {
+                "location": "main",
+                "type": "hw",
+                "condition": "i > 5",
+                "thread": 2,
+                "temporary": True,
+                "pending": True,
+            },
+        )
+        assert resp["result"]["type"] == "hw"
+        bp = mock_gdb.state.breakpoints[0]
+        assert bp.location == "main"
+        assert bp.condition == "i > 5"
+        assert bp.thread == 2
+        assert bp.temporary is True
+        # pending is implemented via the global gdb setting
+        executed = mock_gdb.state.executed
+        assert "set breakpoint pending on" in executed
+        assert executed[-1] == "set breakpoint pending auto"
+
+    def test_break_invalid_type(self, plugin):
+        set_inferior()
+        assert call(plugin, "break", {"location": "main", "type": "weird"})["error"]["code"] == "BAD_PARAMS"
+
+    def test_delete_enable_disable(self, plugin):
+        bp = MockBreakpoint("0x401000")
+        mock_gdb.state.breakpoints = [bp]
+        call(plugin, "bp_disable", {"number": bp.number})
+        assert bp.enabled is False
+        call(plugin, "bp_enable", {"number": bp.number})
+        assert bp.enabled is True
+        call(plugin, "bp_delete", {"number": bp.number})
+        assert mock_gdb.state.breakpoints == []
+
+    def test_missing_breakpoint(self, plugin):
+        assert call(plugin, "bp_delete", {"number": 999})["error"]["code"] == "BAD_PARAMS"
+
+
+class TestMemMapFileCore:
+    def test_mem_map(self, plugin):
+        mock_gdb.state.output_map["info proc mappings"] = "\x1b[32mmaps\x1b[0m"
+        resp = call(plugin, "mem_map", {})
+        assert resp["result"]["output"] == "maps"
+
+    def test_file_quotes_path(self, plugin):
+        resp = call(plugin, "file", {"path": "/tmp/my bin"})
+        assert resp["ok"] is True
+        assert mock_gdb.state.executed[-1] == "file '/tmp/my bin'"
+
+    def test_core(self, plugin):
+        call(plugin, "core", {"path": "/tmp/core.1"})
+        assert mock_gdb.state.executed[-1] == "core-file /tmp/core.1"
+
+
+class TestContinueFamily:
+    def test_continue_replies_before_execute(self, plugin):
+        set_inferior()
+        resp = call(plugin, "continue", {})
+        assert resp["ok"] is True
+        assert resp["result"] == {"state": "running"}
+        assert plugin.state == "running"
+        assert "continue" in mock_gdb.state.executed
+
+    def test_already_running(self, plugin):
+        set_inferior()
+        plugin.state = "running"
+        resp = call(plugin, "continue", {})
+        assert resp["error"]["code"] == "INFERIOR_RUNNING"
+
+    def test_no_inferior(self, plugin):
+        resp = call(plugin, "continue", {})
+        assert resp["error"]["code"] == "NO_INFERIOR"
+
+    def test_step_variants(self, plugin):
+        set_inferior()
+        for verb in ("step", "next", "stepi", "nexti", "finish"):
+            plugin.state = "stopped"
+            assert call(plugin, verb, {}, req_id=len(mock_gdb.state.executed) + 2)["ok"] is True
+            assert mock_gdb.state.executed[-1] == verb
+
+    def test_until_with_addr(self, plugin):
+        set_inferior()
+        resp = call(plugin, "until", {"until_addr": "0x401100"})
+        assert resp["ok"] is True
+        assert mock_gdb.state.executed[-1] == "until *0x401100"
+
+
+class TestGuards:
+    def test_gated_verb_rejected_while_running(self, plugin):
+        set_inferior()
+        plugin.state = "running"
+        resp = call(plugin, "read_mem", {"addr": 0x1000, "length": 4})
+        assert resp["error"]["code"] == "INFERIOR_RUNNING"
+
+    def test_eval_not_gated(self, plugin):
+        mock_gdb.state.output_map["x"] = "ok"
+        plugin.state = "running"
+        resp = call(plugin, "eval", {"command": "x"})
+        assert resp["ok"] is True
+
+    def test_unknown_verb(self, plugin):
+        resp = call(plugin, "frobnicate", {})
+        assert resp["error"]["code"] == "UNKNOWN_VERB"
+
+    def test_reader_side_gate(self, plugin):
+        set_inferior()
+        plugin.state = "running"
+        plugin._dispatch_request(
+            {"type": "request", "id": 5, "verb": "read_mem", "params": {"addr": 0, "length": 1}}
+        )
+        resp = drain(plugin)[-1]
+        assert resp["id"] == 5 and resp["error"]["code"] == "INFERIOR_RUNNING"
+
+
+class TestPump:
+    def test_pump_executes_queued(self, plugin):
+        set_inferior()
+        plugin._dispatch_request(
+            {"type": "request", "id": 9, "verb": "regs", "params": {"names": ["rax"]}}
+        )
+        assert len(mock_gdb.state.posted) == 1
+        mock_gdb.flush_posted()
+        resp = drain(plugin)[-1]
+        assert resp["id"] == 9 and resp["result"]["regs"]["rax"] == "0x1"
+
+
+class TestReaderVerbs:
+    def test_ping(self, plugin):
+        plugin._handle_reader_verb({"type": "request", "id": 3, "verb": "ping"})
+        assert drain(plugin)[-1]["result"] == {"pong": True}
+
+    def test_interrupt_posts_to_main_thread(self, plugin):
+        plugin._handle_reader_verb({"type": "request", "id": 3, "verb": "interrupt"})
+        assert drain(plugin)[-1]["result"] == {"state": "interrupt_requested"}
+        # the actual interrupt runs on the gdb main thread
+        assert len(mock_gdb.state.posted) == 1
+        mock_gdb.flush_posted()
+        assert "interrupt" in mock_gdb.state.executed
+
+    def test_do_interrupt_fallback_to_gdb_interrupt(self, plugin, monkeypatch):
+        # execute("interrupt") fails -> gdb.interrupt() (gdb>=15) fallback
+        def failing_execute(cmd, to_string=False):
+            if cmd == "interrupt":
+                raise mock_gdb.error("cannot interrupt")
+            return ""
+
+        monkeypatch.setattr(mock_gdb, "execute", failing_execute)
+        plugin._do_interrupt()
+        assert mock_gdb.state.interrupt_calls == 1
+
+    def test_quit_posts_shutdown(self, plugin):
+        plugin._connect_events()
+        plugin._handle_reader_verb(
+            {"type": "request", "id": 3, "verb": "quit", "params": {"kill_gdb": False}}
+        )
+        mock_gdb.flush_posted()
+        assert plugin._shutdown_done is True
+        assert plugin.state == "disconnected"
+
+    def test_interrupt_post_event_failure_reported(self, plugin, monkeypatch):
+        def boom(cb):
+            raise RuntimeError("post_event failed")
+
+        monkeypatch.setattr(mock_gdb, "post_event", boom)
+        plugin._handle_reader_verb({"type": "request", "id": 3, "verb": "interrupt"})
+        assert drain(plugin)[-1]["error"]["code"] == "INTERRUPT_FAILED"

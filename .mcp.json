@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gdb-mcp": {
+      "command": "gdb-mcp",
+      "env": {
+        "GDB_MCP_PORT": "3939"
+      }
+    }
+  }
+}
