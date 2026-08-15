@@ -169,8 +169,28 @@ async def test_token_auth(listener):
     # wrapped hello accepted
     wrapped = encode({"token": "sekret", "msg": json.loads(HELLO)})
     reader2, writer2 = await _connect(port, wrapped)
-    ack = json.loads(await asyncio.wait_for(reader2.readline(), 5))
+    envelope = json.loads(await asyncio.wait_for(reader2.readline(), 5))
+    assert envelope["token"] == "sekret"
+    ack = envelope["msg"]
     assert ack["type"] == "hello_ack"
+    session = registry.get(ack["session_id"])
+    request_task = asyncio.create_task(session.request("eval", {}, timeout=5))
+    request_envelope = json.loads(await asyncio.wait_for(reader2.readline(), 5))
+    assert request_envelope["token"] == "sekret"
+    request = request_envelope["msg"]
+    writer2.write(
+        encode(
+            {
+                "type": "response",
+                "id": request["id"],
+                "ok": True,
+                "result": {"output": "secured"},
+            },
+            "sekret",
+        )
+    )
+    await writer2.drain()
+    assert await request_task == {"output": "secured"}
     writer2.close()
 
 

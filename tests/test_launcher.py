@@ -1,5 +1,7 @@
 """Tests for gdb_mcp.launcher pure helpers (no wsl.exe needed)."""
 
+import asyncio
+
 import pytest
 
 from gdb_mcp.launcher import (
@@ -148,3 +150,101 @@ class TestLogTail:
 
         launcher = Launcher(Config(), SessionRegistry(Config()))
         assert launcher.log_tail("nope.log") == ""
+
+
+class TestLauncherLifecycle:
+    @pytest.mark.asyncio
+    async def test_session_reserved_before_process_spawn(self, monkeypatch, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import RESERVED, SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+        wait_forever = asyncio.Event()
+
+        class Proc:
+            returncode = None
+
+            async def wait(self):
+                await wait_forever.wait()
+
+        async def fake_spawn(*args, **kwargs):
+            assert registry.get("s-race").state == RESERVED
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+            return Proc()
+
+        async def fake_distro(override=None):
+            return "kali-linux"
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        monkeypatch.setattr(launcher, "distro", fake_distro)
+        session = await launcher._spawn(
+            ["gdb"],
+            {},
+            None,
+            "s-race",
+            tmp_path / "race.log",
+            "gdb",
+            True,
+        )
+        assert registry.get("s-race") is session
+        registry.remove("s-race")
+        session.proc_task.cancel()
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_launch_script_uses_explicit_gdb_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import RUNNING, SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+        captured = {}
+
+        class Writer:
+            def close(self):
+                pass
+
+        async def fake_spawn(
+            argv,
+            env,
+            cwd_wsl,
+            session_id,
+            log_file,
+            kind,
+            marker,
+            distro_override=None,
+        ):
+            captured.update(env)
+            script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
+            script.state = RUNNING
+            registry.register_hello(
+                {
+                    "type": "hello",
+                    "proto": 1,
+                    "session_id": env["GDB_MCP_SESSION_ID"],
+                    "pid": 4242,
+                },
+                Writer(),
+            )
+            return script
+
+        monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+        script, gdb = await launcher.launch_script(
+            script=r"C:\work\exploit.py",
+            python="python3",
+            args=None,
+            cwd=None,
+            env={"GDB_MCP_SESSION_ID": "attacker-controlled"},
+            timeout_ms=1000,
+        )
+        assert script.kind == "script"
+        assert gdb is not None
+        assert gdb.session_id == captured["GDB_MCP_SESSION_ID"]
+        assert gdb.session_id != "attacker-controlled"

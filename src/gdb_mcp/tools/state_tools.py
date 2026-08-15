@@ -9,6 +9,9 @@ from gdb_mcp.output import hex_to_bytes
 
 from ._common import check_stopped, config_from, resolve_gdb
 
+_MAX_FRAMES = 4096
+_MAX_DISASM = 4096
+
 
 def register(app, registry, config) -> None:
     @app.tool()
@@ -42,15 +45,21 @@ def register(app, registry, config) -> None:
         """Write raw bytes (given as a hex string, e.g. '9090c3' or
         '90 90 c3') to the inferior's memory."""
         try:
-            hex_to_bytes(hex)  # validate early for a clean error
+            data = hex_to_bytes(hex)  # validate early for a clean error
         except ValueError as exc:
             raise GdbMcpError("BAD_PARAMS", str(exc)) from None
+        cfg = config_from(ctx)
+        if not data or len(data) > cfg.max_mem_read:
+            raise GdbMcpError(
+                "BAD_PARAMS",
+                "write length must be between 1 and %d bytes" % cfg.max_mem_read,
+            )
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         return await session.request(
             "write_mem",
             {"addr": address, "hex": hex},
-            timeout=config_from(ctx).request_timeout,
+            timeout=cfg.request_timeout,
         )
 
     @app.tool()
@@ -92,6 +101,14 @@ def register(app, registry, config) -> None:
         ctx: Context = None,
     ) -> dict:
         """Stack backtrace: pc, function name, source file/line per frame."""
+        if (
+            not isinstance(max_frames, int)
+            or isinstance(max_frames, bool)
+            or not (1 <= max_frames <= _MAX_FRAMES)
+        ):
+            raise GdbMcpError(
+                "BAD_PARAMS", "max_frames must be between 1 and %d" % _MAX_FRAMES
+            )
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         return await session.request(
@@ -109,6 +126,14 @@ def register(app, registry, config) -> None:
     ) -> dict:
         """Disassemble `count` instructions at `start` (address, gdb
         expression, function name — or the current PC when omitted)."""
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or not (1 <= count <= _MAX_DISASM)
+        ):
+            raise GdbMcpError(
+                "BAD_PARAMS", "count must be between 1 and %d" % _MAX_DISASM
+            )
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         params = {"count": count}

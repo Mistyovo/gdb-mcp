@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from mcp.server.fastmcp import FastMCP
 
@@ -68,4 +68,6 @@ async def serve(config: Config) -> None:
             await asyncio.Event().wait()
     finally:
         gc_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await gc_task
         await listener.stop()

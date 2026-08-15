@@ -1,7 +1,6 @@
 """Tests for gdb_mcp.config environment assembly."""
 
-import os
-from pathlib import Path
+import pytest
 
 from gdb_mcp.config import Config, DEFAULTS
 
@@ -24,6 +23,14 @@ class TestDefaults:
         cfg.ensure_dirs()
         assert cfg.log_dir.is_dir()
 
+    def test_remote_bind_requires_token(self):
+        cfg = Config(host_bind="0.0.0.0")
+        with pytest.raises(ValueError, match="token is required"):
+            cfg.validate()
+
+    def test_remote_bind_with_token_is_valid(self):
+        Config(host_bind="0.0.0.0", token="sekret").validate()
+
 
 class TestFromEnv:
     def test_empty_env_yields_defaults(self, monkeypatch):
@@ -39,7 +46,7 @@ class TestFromEnv:
             monkeypatch.delenv(f"GDB_MCP_{name}", raising=False)
         cfg = Config.from_env()
         assert cfg.port == 3939
-        assert cfg.host_bind == "0.0.0.0"
+        assert cfg.host_bind == "127.0.0.1"
         assert cfg.token is None
 
     def test_env_values_parsed(self, monkeypatch, tmp_path):

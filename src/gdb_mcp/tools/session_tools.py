@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.output import tail_text_file
 from gdb_mcp.sessions import DISCONNECTED, RESERVED
 
-from ._common import registry_from, resolve_any, resolve_gdb
+from ._common import resolve_any, resolve_gdb
 
 
 def register(app, registry, config) -> None:
@@ -19,14 +21,7 @@ def register(app, registry, config) -> None:
         processes) with their state."""
         sessions = []
         for session in registry.list_all():
-            info = session.info()
-            if session.kind == "gdb":
-                sessions.append(info)
-            else:
-                info["proc_running"] = (
-                    session.proc.returncode is None if session.proc else None
-                )
-                sessions.append(info)
+            sessions.append(session.info())
         return {"sessions": sessions}
 
     @app.tool()
@@ -80,14 +75,19 @@ def register(app, registry, config) -> None:
                 % session.session_id,
             )
         try:
-            with open(session.log_file, "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
+            output, truncated = await asyncio.to_thread(
+                tail_text_file, session.log_file, tail_lines
+            )
         except OSError as exc:
             raise GdbMcpError("NO_LOG", "cannot read log: %s" % exc)
-        output = "".join(lines[-max(1, tail_lines) :])
         return {
             "session_id": session.session_id,
             "log_file": session.log_file,
             "output": output,
-            "running": session.state != DISCONNECTED,
+            "truncated": truncated,
+            "running": (
+                getattr(session.proc, "returncode", None) is None
+                if session.proc is not None
+                else session.state != DISCONNECTED
+            ),
         }

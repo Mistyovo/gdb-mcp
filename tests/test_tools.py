@@ -139,6 +139,39 @@ class TestSessionTools:
         assert ei.value.code == "NO_LOG"
 
 
+class TestLaunchTools:
+    @pytest.mark.asyncio
+    async def test_non_force_gdb_kill_only_detaches(self, env, monkeypatch):
+        registry, _, tools = env
+        registry.reserve("s-launched")
+        session = registry.register_hello(
+            hello(session_id="s-launched"), FakeWriter()
+        )
+        pkill_calls = []
+
+        async def fake_pkill(self, session_id, force, distro=None):
+            pkill_calls.append((session_id, force, distro))
+
+        monkeypatch.setattr(
+            "gdb_mcp.tools.launch_tools.Launcher.pkill_marker", fake_pkill
+        )
+        task = asyncio.create_task(
+            run_tool(
+                tools["kill_session"],
+                {"session_id": session.session_id, "force": False},
+                ctx_for(env),
+            )
+        )
+        quit_message = await next_request(session, session.writer)
+        assert quit_message["type"] == "quit"
+        assert quit_message["kill_gdb"] is False
+        await session.on_disconnect()
+        result = await task
+        assert result["detached"] is True
+        assert result["killed"] is False
+        assert pkill_calls == []
+
+
 class TestExecTools:
     @pytest.mark.asyncio
     async def test_execute_command(self, env):

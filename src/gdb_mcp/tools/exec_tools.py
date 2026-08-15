@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import Context
 
-from gdb_mcp.sessions import EXITED, RUNNING, STOPPED_STATES
+from gdb_mcp.sessions import RUNNING
 
 from ._common import check_resumable, config_from, resolve_gdb
 

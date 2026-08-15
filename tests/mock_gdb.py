@@ -11,7 +11,7 @@ call plugin methods directly (as if on the main thread).
 from __future__ import annotations
 
 import contextlib
-from contextlib import nullcontext
+import re
 
 # --- exceptions -------------------------------------------------------------
 
@@ -99,9 +99,6 @@ class MockFrame:
             # mirrors gdb raising for unavailable vector registers
             raise ValueError("register %s unavailable" % name)
         return MockValue(self._regs[name], "long")
-
-    def write_register(self, name, value):
-        self._regs[name] = int(value)
 
     def find_sal(self):
         return MockSal(self._filename, self._line)
@@ -304,6 +301,16 @@ def reset():
 
 def execute(cmd, to_string=False):
     state.executed.append(cmd)
+    register_assignment = re.fullmatch(
+        r"set \$([A-Za-z][A-Za-z0-9_]*) = (.+)", cmd, re.DOTALL
+    )
+    if register_assignment is not None:
+        frame = selected_frame()
+        if frame is None:
+            raise error("No frame selected.")
+        name, expression = register_assignment.groups()
+        frame._regs[name] = int(parse_and_eval(expression))
+        return ""
     if cmd in state.output_map:
         return state.output_map[cmd]
     return ""

@@ -13,7 +13,7 @@ def drain(plugin):
     out = []
     while True:
         try:
-            line = plugin.out_q.get_nowait()
+            _, line = plugin.out_q.get_nowait()
         except queue.Empty:
             return out
         msg = json.loads(line.decode("utf-8"))
@@ -43,6 +43,7 @@ class TestStopEvent:
         assert payload["pc"] == "0x401000"
         assert payload["thread"] == "1"
         assert payload["details"]["stopped-threads"] == "all"
+        assert payload["reason"] == "signal-received"
         assert plugin.state == "stopped"
         assert plugin.stop_info == payload
 
@@ -63,6 +64,7 @@ class TestStopEvent:
         )
         payload = last_notification(plugin, "stop")
         assert "signal" not in payload
+        assert payload["reason"] == "breakpoint-hit"
         assert payload["details"]["reason"] == "breakpoint-hit"
 
     def test_fault_addr_from_siginfo(self, plugin):
@@ -121,7 +123,7 @@ class TestOtherEvents:
 class TestHelloAck:
     def test_ack_sets_session_and_ready(self, plugin):
         plugin._dispatch_line(
-            b'{"type":"hello_ack","server_version":"0.1.0",'
+            b'{"type":"hello_ack","proto":1,"server_version":"0.1.0",'
             b'"session_id":"s-abc","heartbeat_sec":30}'
         )
         assert plugin.session_id == "s-abc"
@@ -153,6 +155,48 @@ class TestResolveHosts:
         monkeypatch.setattr("builtins.open", fake_open)
         assert plugin._resolve_hosts() == ["127.0.0.1", "10.0.0.2"]
 
+    def test_wsl_nat_default_gateway_precedes_nameserver(self, plugin, monkeypatch):
+        monkeypatch.delenv("GDB_MCP_HOST", raising=False)
+
+        def fake_open(path, *args, **kwargs):
+            import io
+
+            if path == "/proc/net/route":
+                return io.StringIO(
+                    "Iface Destination Gateway Flags RefCnt Use Metric Mask\n"
+                    "eth0 00000000 01B01FAC 0003 0 0 0 00000000\n"
+                )
+            if path == "/etc/resolv.conf":
+                return io.StringIO("nameserver 10.255.255.254\n")
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert plugin._resolve_hosts() == [
+            "127.0.0.1",
+            "172.31.176.1",
+            "10.255.255.254",
+        ]
+
+    def test_invalid_routes_are_ignored(self, plugin, monkeypatch):
+        monkeypatch.delenv("GDB_MCP_HOST", raising=False)
+
+        def fake_open(path, *args, **kwargs):
+            import io
+
+            if path == "/proc/net/route":
+                return io.StringIO(
+                    "Iface Destination Gateway Flags RefCnt Use Metric Mask\n"
+                    "eth0 00000000 invalid 0003 0 0 0 00000000\n"
+                    "eth0 00000000 01B01FAC 0001 0 0 0 00000000\n"
+                    "eth0 0000FEA9 00000000 0001 0 0 0 0000FFFF\n"
+                )
+            if path == "/etc/resolv.conf":
+                return io.StringIO("")
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert plugin._resolve_hosts() == ["127.0.0.1"]
+
     def test_default_no_resolv_conf(self, plugin, monkeypatch):
         monkeypatch.delenv("GDB_MCP_HOST", raising=False)
         assert plugin._resolve_hosts()[0] == "127.0.0.1"
@@ -170,6 +214,14 @@ class TestTokenAuth:
         plugin.token = "sekret"
         plugin._dispatch_line(
             b'{"token":"sekret","msg":{"type":"request","id":1,"verb":"ping","params":{}}}'
+        )
+        assert drain(plugin)[-1]["result"] == {"pong": True}
+
+    def test_dispatch_accepts_unicode_token(self, plugin):
+        plugin.token = "密钥"
+        plugin._dispatch_line(
+            '{"token":"密钥","msg":{"type":"request","id":1,'
+            '"verb":"ping","params":{}}}'.encode()
         )
         assert drain(plugin)[-1]["result"] == {"pong": True}
 
@@ -215,7 +267,7 @@ class TestConnectionLoop:
 
         monkeypatch.setattr(mod, "BACKOFF", [0.01])
         fake = FakeSocket(
-            b'{"type":"hello_ack","server_version":"0.1.0",'
+            b'{"type":"hello_ack","proto":1,"server_version":"0.1.0",'
             b'"session_id":"s-x","heartbeat_sec":30}\n'
         )
         results = [fake, None]  # second connect attempt fails
@@ -245,8 +297,37 @@ class TestConnectionLoop:
             thread.join(5)
         assert not thread.is_alive()
 
+    def test_old_writer_does_not_send_new_generation(self, plugin):
+        plugin._wire_generation = 2
+        plugin.out_q.put((2, b'{"type":"notification"}\n'))
+        fake = FakeSocket()
+        stop_evt = threading.Event()
+        thread = threading.Thread(
+            target=plugin._writer_loop, args=(fake, stop_evt, 1)
+        )
+        thread.start()
+        time.sleep(0.05)
+        stop_evt.set()
+        thread.join(2)
+        assert fake.sent == b""
+
+    def test_protocol_mismatch_drops_connection(self, plugin):
+        fake = FakeSocket()
+        plugin.sock = fake
+        plugin._dispatch_line(
+            b'{"type":"hello_ack","proto":2,"session_id":"s-x"}'
+        )
+        assert fake.closed is True
+        assert plugin.state == "disconnected"
+
 
 class TestDoubleLoadGuard:
+    def test_embedded_versions_match_server(self, plugin_mod):
+        from gdb_mcp import PROTOCOL_VERSION, __version__
+
+        assert plugin_mod.PLUGIN_VERSION == __version__
+        assert plugin_mod.PROTO == PROTOCOL_VERSION
+
     def test_load_flag_set(self, plugin_mod, mock_env):
         import os
 

@@ -22,6 +22,8 @@ from gdb_mcp.protocol import (
     encode,
     parse_line,
     unwrap_token,
+    validate_hello,
+    validate_plugin_message,
 )
 from gdb_mcp.sessions import Session, SessionRegistry
 
@@ -37,6 +39,7 @@ class PluginTcpListener:
         self.server: asyncio.Server | None = None
 
     async def start(self) -> None:
+        self.config.validate()
         self.server = await asyncio.start_server(
             self._on_connect,
             self.config.host_bind,
@@ -53,6 +56,16 @@ class PluginTcpListener:
             self.server.close()
             await self.server.wait_closed()
             self.server = None
+        tasks = []
+        for session in self.registry.list_all():
+            if session.writer is not None:
+                session.writer.close()
+            for task in (session.reader_task, session.hb_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # -- connection handling ------------------------------------------------
 
@@ -69,7 +82,7 @@ class PluginTcpListener:
         session.reader_task = asyncio.create_task(
             self._reader_loop(session, reader, writer)
         )
-        session.hb_task = asyncio.create_task(self._heartbeat_loop(session))
+        session.hb_task = asyncio.create_task(self._heartbeat_loop(session, writer))
 
     async def _handshake(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -86,13 +99,12 @@ class PluginTcpListener:
         if len(raw) > self.config.max_async_line:
             raise ProtocolError("MALFORMED", "hello line too long")
         msg = unwrap_token(parse_line(raw), self.config.token)
-        if msg.get("type") != "hello":
-            raise ProtocolError("MALFORMED", "first message must be hello")
+        validate_hello(msg)
         session = self.registry.register_hello(msg, writer)
         ack = build_hello_ack(
             session.session_id, __version__, self.config.heartbeat_sec
         )
-        writer.write(encode(ack))
+        writer.write(encode(ack, self.config.token))
         await writer.drain()
         return session
 
@@ -128,24 +140,23 @@ class PluginTcpListener:
 
     async def _dispatch(self, session: Session, msg: dict) -> None:
         msg = unwrap_token(msg, self.config.token)
+        validate_plugin_message(msg)
         session.update_seen()
         mtype = msg.get("type")
         if mtype == "response":
             await session.complete_response(msg.get("id"), msg)
         elif mtype == "notification":
             await session.push_notification(msg.get("event"), msg.get("payload") or {})
-        else:
-            log.warning(
-                "session %s: unexpected message type %r", session.session_id, mtype
-            )
 
-    async def _heartbeat_loop(self, session: Session) -> None:
+    async def _heartbeat_loop(
+        self, session: Session, connection_writer: asyncio.StreamWriter
+    ) -> None:
         interval = self.config.heartbeat_sec
         try:
             while True:
                 await asyncio.sleep(interval)
                 writer = session.writer
-                if writer is None:
+                if writer is None or writer is not connection_writer:
                     return
                 if (
                     session.last_seen is not None
@@ -158,9 +169,11 @@ class PluginTcpListener:
                     return
                 async with session.lock:
                     if session.writer is writer and not writer.is_closing():
-                        writer.write(encode(build_ping()))
+                        writer.write(encode(build_ping(), self.config.token))
                         await writer.drain()
         except asyncio.CancelledError:
             pass
         except Exception:  # pragma: no cover - keep the listener alive
             log.exception("heartbeat loop for %s failed", session.session_id)
+            if session.writer is connection_writer:
+                connection_writer.close()

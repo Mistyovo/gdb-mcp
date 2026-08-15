@@ -72,3 +72,29 @@ def decode_with_fallback(data: bytes) -> str:
 def fmt_addr(value: int) -> str:
     """Format an integer address as lowercase hex (``0x401000``)."""
     return "0x%x" % value
+
+
+def tail_text_file(
+    path: str, lines: int = 200, max_bytes: int = 1024 * 1024
+) -> tuple[str, bool]:
+    """Read a bounded tail of a text file without loading the whole file."""
+    lines = max(1, min(int(lines), 10_000))
+    max_bytes = max(1, int(max_bytes))
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        position = fh.tell()
+        chunks = []
+        bytes_read = 0
+        newline_count = 0
+        while position > 0 and bytes_read < max_bytes and newline_count <= lines:
+            size = min(64 * 1024, position, max_bytes - bytes_read)
+            position -= size
+            fh.seek(position)
+            chunk = fh.read(size)
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            newline_count += chunk.count(b"\n")
+    data = b"".join(reversed(chunks))
+    selected = b"".join(data.splitlines(keepends=True)[-lines:])
+    text = decode_with_fallback(selected).replace("\r\n", "\n").replace("\r", "\n")
+    return text, position > 0

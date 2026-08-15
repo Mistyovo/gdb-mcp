@@ -14,7 +14,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="MCP server driving a local GDB (incl. pwndbg) for "
         "binary exploitation.",
     )
-    p.add_argument("--host-bind", default=None, help="TCP bind address (default 0.0.0.0)")
+    p.add_argument("--host-bind", default=None, help="TCP bind address (default 127.0.0.1)")
     p.add_argument("--port", type=int, default=None, help="TCP port (default 3939)")
     p.add_argument("--token", default=None, help="optional shared token for gdb plugins")
     p.add_argument("--log-dir", default=None, help="launched-process log directory")
@@ -28,20 +28,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
 
     # Lazy import so the scaffold stays importable before server.py exists.
     from gdb_mcp.config import Config
 
-    cfg = Config.from_env(
-        overrides={
-            "host_bind": args.host_bind,
-            "port": args.port,
-            "token": args.token,
-            "log_dir": Path(args.log_dir) if args.log_dir else None,
-            "mcp_transport": not args.no_mcp,
-        }
-    )
+    try:
+        cfg = Config.from_env(
+            overrides={
+                "host_bind": args.host_bind,
+                "port": args.port,
+                "token": args.token,
+                "log_dir": Path(args.log_dir) if args.log_dir else None,
+                "mcp_transport": not args.no_mcp,
+            }
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     from gdb_mcp.server import serve
 
     try:

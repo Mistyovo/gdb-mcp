@@ -69,20 +69,26 @@ class Session:
     reader_task: Any = None
     hb_task: Any = None
     proc: Any = None
+    proc_task: Any = None
+    proc_returncode: int | None = None
     launched: bool = False
     reserved: bool = False
     log_file: str | None = None
+    distro: str | None = None
+    token: str | None = None
     created_at: float = field(default_factory=time.monotonic)
     connected_at: float | None = None
     last_seen: float | None = None
 
-    #: one in-flight request per session
+    #: serialize socket writes and atomic composite operations
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: req_id -> future, completed by the tcp_listener dispatch
     pending: dict[int, asyncio.Future] = field(default_factory=dict)
     #: stop-notification generation + condition for wait_for_stop
     stop_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
     stop_gen: int = 0
+    #: incremented only by authoritative plugin/lifecycle events
+    state_gen: int = 0
 
     _next_id: int = field(default=1, init=False)
 
@@ -107,46 +113,55 @@ class Session:
         by composite tools like crash_report to keep a multi-request
         sequence atomic).
         """
-        writer = self.writer
-        if writer is None or self.state == DISCONNECTED:
-            raise GdbMcpError(
-                "DISCONNECTED",
-                f"session {self.session_id!r} is not connected",
-            )
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self.pending[req_id] = fut
+        previous_state = self.state
+        request_state_gen = self.state_gen
         try:
             if locked:
-                writer.write(encode(build_request(req_id, verb, params)))
+                writer = self._connected_writer()
+                if verb in ASYNC_VERBS:
+                    self.state = RUNNING
+                writer.write(encode(build_request(req_id, verb, params), self.token))
                 await writer.drain()
             else:
                 async with self.lock:
-                    writer.write(encode(build_request(req_id, verb, params)))
+                    writer = self._connected_writer()
+                    if verb in ASYNC_VERBS:
+                        self.state = RUNNING
+                    writer.write(encode(build_request(req_id, verb, params), self.token))
                     await writer.drain()
             result = await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
             raise RequestTimeoutError(verb, timeout or 0.0) from None
+        except (ConnectionError, OSError) as exc:
+            if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
+                self.state = previous_state
+            raise GdbMcpError("DISCONNECTED", "connection to gdb lost") from exc
+        except GdbMcpError:
+            if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
+                self.state = previous_state
+            raise
         finally:
             self.pending.pop(req_id, None)
-        # The plugin replies immediately for execution verbs; mark running
-        # optimistically (authoritative stop/prompt events correct it).
-        if verb in ASYNC_VERBS:
-            self.state = RUNNING
         return result
+
+    def _connected_writer(self) -> Any:
+        writer = self.writer
+        if writer is None or self.state == DISCONNECTED:
+            raise GdbMcpError(
+                "DISCONNECTED", f"session {self.session_id!r} is not connected"
+            )
+        return writer
 
     async def send_quit(self, kill_gdb: bool = False) -> None:
         """Send the one-way ``quit`` message (no response expected; the
         plugin closes the connection after shutting down)."""
-        writer = self.writer
-        if writer is None or self.state == DISCONNECTED:
-            raise GdbMcpError(
-                "DISCONNECTED",
-                f"session {self.session_id!r} is not connected",
-            )
         async with self.lock:
-            writer.write(encode(build_quit("server_quit", kill_gdb)))
+            writer = self._connected_writer()
+            writer.write(encode(build_quit("server_quit", kill_gdb), self.token))
             await writer.drain()
 
     async def complete_response(self, req_id: int, msg: dict) -> None:
@@ -170,6 +185,7 @@ class Session:
 
     async def push_notification(self, event: str, payload: dict) -> None:
         """Apply a plugin notification (called by the tcp_listener)."""
+        self.state_gen += 1
         if event == "running":
             self.state = RUNNING
         elif event == "stop":
@@ -223,6 +239,7 @@ class Session:
     async def on_disconnect(self) -> None:
         """Socket closed: fail pending requests, wake stop waiters."""
         self.state = DISCONNECTED
+        self.state_gen += 1
         self.writer = None
         for fut in self.pending.values():
             if not fut.done():
@@ -247,7 +264,12 @@ class Session:
             "gdb_version": hello.get("gdb_version"),
             "pwndbg": hello.get("pwndbg"),
             "log_file": self.log_file,
+            "distro": self.distro,
             "launched": self.launched,
+            "proc_running": (
+                getattr(self.proc, "returncode", None) is None if self.proc else None
+            ),
+            "proc_returncode": self.proc_returncode,
             "last_stop": self.stop_info,
         }
 
@@ -267,14 +289,20 @@ class SessionRegistry:
 
     # -- registration -------------------------------------------------------
 
-    def new_session_id(self) -> str:
+    def new_session_id(self, exclude: set[str] | None = None) -> str:
+        excluded = exclude or set()
         while True:
             sid = self._factory()
-            if sid not in self._sessions:
+            if sid not in self._sessions and sid not in excluded:
                 return sid
 
     def reserve(
-        self, session_id: str, kind: str = "gdb", log_file: str | None = None
+        self,
+        session_id: str,
+        kind: str = "gdb",
+        log_file: str | None = None,
+        *,
+        launched: bool = True,
     ) -> Session:
         """Create a session placeholder for a launch whose plugin will
         connect later (hello carries the same session id via env)."""
@@ -283,8 +311,9 @@ class SessionRegistry:
             kind=kind,
             state=RESERVED,
             reserved=True,
-            launched=True,
+            launched=launched,
             log_file=log_file,
+            token=self.config.token,
         )
         self._sessions[session_id] = session
         return session
@@ -310,10 +339,15 @@ class SessionRegistry:
                 session_id=self.new_session_id(),
                 kind="gdb",
                 launched=False,
+                token=self.config.token,
             )
             self._sessions[session.session_id] = session
+        old_pid = (session.hello or {}).get("pid")
+        if isinstance(old_pid, int) and self._by_pid.get(old_pid) == session.session_id:
+            self._by_pid.pop(old_pid, None)
         session.hello = hello
         session.writer = writer
+        session.token = self.config.token
         session.state = CONNECTING
         session.reserved = False
         session.connected_at = time.monotonic()
@@ -377,7 +411,7 @@ class SessionRegistry:
         session = self._sessions.pop(session_id, None)
         if session is not None and session.hello:
             pid = session.hello.get("pid")
-            if isinstance(pid, int):
+            if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
                 self._by_pid.pop(pid, None)
 
     async def gc_once(self) -> int:

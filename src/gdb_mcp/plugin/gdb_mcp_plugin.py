@@ -23,8 +23,8 @@ Design rules (see the gdb-mcp project docs):
 
 Environment variables:
 
-* ``GDB_MCP_HOST``    - server host (default: try 127.0.0.1, then the
-                        /etc/resolv.conf nameserver for WSL2 NAT mode)
+* ``GDB_MCP_HOST``    - server host (default: try 127.0.0.1, then WSL's
+                        default gateway, then /etc/resolv.conf nameservers)
 * ``GDB_MCP_PORT``    - server port (default 3939)
 * ``GDB_MCP_TOKEN``   - optional shared auth token
 * ``GDB_MCP_SESSION_ID`` - session id handed out by the server's launch tool
@@ -34,6 +34,7 @@ Environment variables:
 from __future__ import print_function
 
 import json
+import hmac
 import os
 import queue
 import re
@@ -42,7 +43,6 @@ import signal
 import socket
 import sys
 import threading
-import time
 
 import gdb
 
@@ -59,18 +59,29 @@ def _dbg(msg):
 PROTO = 1
 DEFAULT_PORT = 3939
 READ_BUF = 65536
-MAX_LINE = 32 * 1024 * 1024
 CONNECT_TIMEOUT = 3.0
 SOCK_TIMEOUT = 90.0
 BACKOFF = [1, 2, 4, 8, 15, 30]
 PUMP_BATCH = 100
-EVAL_OUTPUT_LIMIT = 200 * 1024
-MAX_MEM_READ = 1024 * 1024
+
+
+def _positive_env_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_LINE = _positive_env_int("GDB_MCP_MAX_ASYNC_LINE", 32 * 1024 * 1024)
+EVAL_OUTPUT_LIMIT = _positive_env_int("GDB_MCP_EVAL_OUTPUT_LIMIT", 200 * 1024)
+MAX_MEM_READ = _positive_env_int("GDB_MCP_MAX_MEM_READ", 1024 * 1024)
 CHUNK_PROBE = 4096
-MAX_PROBE_CHUNKS = 64
+MAX_BACKTRACE_FRAMES = 4096
+MAX_DISASM_INSTRUCTIONS = 4096
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_REGISTER_NAME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_]*\Z")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _TRUNC_MARKER = "\n...[truncated]"
 
@@ -257,6 +268,7 @@ class Plugin(object):
         self._shutdown_done = False
         self._event_handlers = []
         self._connection = None
+        self._wire_generation = 0
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -270,13 +282,13 @@ class Plugin(object):
         )
         self._connection.start()
 
-    def _thread_main(self, fn):
+    def _thread_main(self, fn, *args):
         """Thread entry: block SIGINT/SIGCHLD so those signals land on
         gdb's main thread (gdb installs its own handlers for them)."""
         try:
             if "blocked_signals" in self.features:
                 with gdb.blocked_signals():
-                    fn()
+                    fn(*args)
             else:
                 if hasattr(signal, "pthread_sigmask"):
                     try:
@@ -285,9 +297,9 @@ class Plugin(object):
                         )
                     except (ValueError, OSError):
                         pass
-                fn()
-        except Exception:
-            pass
+                fn(*args)
+        except Exception as exc:
+            _dbg("socket thread failed: %s" % exc)
 
     def request_reconnect(self):
         """Drop the current connection; the connect loop re-establishes it."""
@@ -329,6 +341,25 @@ class Plugin(object):
         if env:
             return [h.strip() for h in env.split(",") if h.strip()]
         hosts = ["127.0.0.1"]
+        try:
+            with open("/proc/net/route") as fh:
+                next(fh, None)  # column headings
+                for line in fh:
+                    fields = line.split()
+                    if len(fields) < 8 or fields[1] != "00000000":
+                        continue
+                    try:
+                        gateway_raw = bytes.fromhex(fields[2])
+                        flags = int(fields[3], 16)
+                    except (TypeError, ValueError):
+                        continue
+                    if len(gateway_raw) != 4 or flags & 0x3 != 0x3:
+                        continue
+                    gateway = socket.inet_ntoa(gateway_raw[::-1])
+                    if gateway != "0.0.0.0":
+                        hosts.append(gateway)
+        except OSError:
+            pass
         try:
             with open("/etc/resolv.conf") as fh:
                 for line in fh:
@@ -375,26 +406,34 @@ class Plugin(object):
                 continue
             warned = False
             backoff_idx = 0
+            self._wire_generation += 1
+            generation = self._wire_generation
+            stop_evt = threading.Event()
             self.sock = sock
             self.state = "connecting"
             self._send_hello(sock)
             reader = threading.Thread(
                 target=self._thread_main,
-                args=(self._reader_loop,),
+                args=(self._reader_loop, sock, stop_evt),
                 name="gdbmcp-reader",
                 daemon=True,
             )
             writer = threading.Thread(
                 target=self._thread_main,
-                args=(self._writer_loop,),
+                args=(self._writer_loop, sock, stop_evt, generation),
                 name="gdbmcp-writer",
                 daemon=True,
             )
             reader.start()
             writer.start()
             reader.join()
-            # connection lost (or shutdown requested)
-            self._on_socket_lost()
+            stop_evt.set()
+            try:
+                sock.close()
+            except OSError:
+                pass
+            writer.join(2.0)
+            self._on_socket_lost(sock)
 
     def _send_hello(self, sock):
         hello = {
@@ -416,9 +455,11 @@ class Plugin(object):
         except OSError:
             pass
 
-    def _on_socket_lost(self):
-        sock = self.sock
-        self.sock = None
+    def _on_socket_lost(self, sock=None):
+        if sock is None:
+            sock = self.sock
+        if self.sock is sock:
+            self.sock = None
         if sock is not None:
             try:
                 sock.close()
@@ -426,12 +467,9 @@ class Plugin(object):
                 pass
         self.state = "disconnected"
 
-    def _reader_loop(self):
+    def _reader_loop(self, sock, stop_evt):
         buf = b""
-        while not self.shutdown_evt.is_set():
-            sock = self.sock
-            if sock is None:
-                return
+        while not self.shutdown_evt.is_set() and not stop_evt.is_set():
             try:
                 data = sock.recv(READ_BUF)
             except OSError:
@@ -439,6 +477,8 @@ class Plugin(object):
             if not data:
                 return
             buf += data
+            if len(buf) > MAX_LINE and b"\n" not in buf:
+                return
             while True:
                 nl = buf.find(b"\n")
                 if nl == -1:
@@ -462,7 +502,14 @@ class Plugin(object):
         if not isinstance(msg, dict):
             return
         if "msg" in msg:
-            if self.token is None or msg.get("token") != self.token:
+            supplied = msg.get("token")
+            if (
+                self.token is None
+                or not isinstance(supplied, str)
+                or not hmac.compare_digest(
+                    supplied.encode("utf-8"), self.token.encode("utf-8")
+                )
+            ):
                 return
             msg = msg["msg"]
             if not isinstance(msg, dict):
@@ -476,7 +523,16 @@ class Plugin(object):
             kill = bool(msg.get("kill_gdb", False))
             gdb.post_event(lambda: self._shutdown(kill))
         elif mtype == "hello_ack":
+            if msg.get("proto") != PROTO:
+                self.request_reconnect()
+                return
             self.session_id = msg.get("session_id") or self.session_id
+            heartbeat = msg.get("heartbeat_sec")
+            if isinstance(heartbeat, (int, float)) and heartbeat > 0:
+                try:
+                    self.sock.settimeout(max(30.0, float(heartbeat) * 3.0))
+                except (AttributeError, OSError):
+                    pass
             self.state = "ready"
             self._notify("ready", {"session_id": self.session_id})
 
@@ -500,23 +556,20 @@ class Plugin(object):
         self.in_q.put(msg)
         self._post_pump()
 
-    def _writer_loop(self):
-        while not self.shutdown_evt.is_set():
+    def _writer_loop(self, sock, stop_evt, generation):
+        while not self.shutdown_evt.is_set() and not stop_evt.is_set():
             try:
-                line = self.out_q.get(timeout=0.5)
+                queued_generation, line = self.out_q.get(timeout=0.5)
             except queue.Empty:
-                if self.sock is None:
-                    return
                 continue
-            sock = self.sock
-            if sock is None:
-                return
+            if queued_generation != generation:
+                continue
             try:
                 sock.sendall(line)
                 _dbg("sent %d bytes" % len(line))
             except OSError:
                 _dbg("sendall failed")
-                self._on_socket_lost()
+                stop_evt.set()
                 return
 
     # -- reader-thread verbs -------------------------------------------------
@@ -763,31 +816,62 @@ class Plugin(object):
             data = bytes(inf.read_memory(addr, length))
             return {
                 "addr": addr,
+                "length": length,
                 "hex": data.hex(),
                 "ascii": _ascii_repr(data),
+                "segments": [
+                    {
+                        "addr": addr,
+                        "length": len(data),
+                        "hex": data.hex(),
+                        "ascii": _ascii_repr(data),
+                    }
+                ],
                 "unreadable": [],
                 "partial": False,
             }
         except gdb.MemoryError:
             pass
         # chunked fallback: report unreadable regions instead of failing
-        pieces = []
+        segments = []
         unreadable = []
         off = 0
-        probes = 0
-        while off < length and probes < MAX_PROBE_CHUNKS:
-            probes += 1
+        current_addr = None
+        current_data = bytearray()
+
+        def flush_segment():
+            if current_addr is None:
+                return
+            data = bytes(current_data)
+            segments.append(
+                {
+                    "addr": current_addr,
+                    "length": len(data),
+                    "hex": data.hex(),
+                    "ascii": _ascii_repr(data),
+                }
+            )
+
+        while off < length:
             size = min(CHUNK_PROBE, length - off)
             try:
-                pieces.append(bytes(inf.read_memory(addr + off, size)))
+                piece = bytes(inf.read_memory(addr + off, size))
+                if current_addr is None:
+                    current_addr = addr + off
+                current_data.extend(piece)
             except gdb.MemoryError:
+                flush_segment()
+                current_addr = None
+                current_data = bytearray()
                 unreadable.append({"addr": addr + off, "length": size})
             off += size
-        data = b"".join(pieces)
+        flush_segment()
         return {
             "addr": addr,
-            "hex": data.hex(),
-            "ascii": _ascii_repr(data),
+            "length": length,
+            "hex": None,
+            "ascii": None,
+            "segments": segments,
             "unreadable": unreadable,
             "partial": True,
         }
@@ -798,6 +882,11 @@ class Plugin(object):
             data = _hex_to_bytes(params.get("hex", ""))
         except ValueError as exc:
             raise PluginError("BAD_PARAMS", str(exc))
+        if not data or len(data) > MAX_MEM_READ:
+            raise PluginError(
+                "BAD_PARAMS",
+                "write length must be between 1 and %d bytes" % MAX_MEM_READ,
+            )
         inf = self._require_inferior()
         inf.write_memory(addr, data)
         return {"addr": addr, "bytes_written": len(data)}
@@ -833,15 +922,21 @@ class Plugin(object):
             raise PluginError("BAD_PARAMS", "name and value are required")
         frame = self._require_frame()
         name = str(name)
+        if _REGISTER_NAME_RE.fullmatch(name) is None:
+            raise PluginError("BAD_PARAMS", "invalid register name: %r" % name)
         old = self._fmt_value(frame.read_register(name))
         try:
-            val = gdb.parse_and_eval(str(value_expr))
+            gdb.parse_and_eval(str(value_expr))
         except gdb.error as exc:
             raise PluginError(
                 "BAD_PARAMS", "cannot evaluate %r: %s" % (value_expr, exc)
             )
         try:
-            frame.write_register(name, val)
+            # gdb.Frame exposes read_register but no write_register API.
+            gdb.execute(
+                "set $%s = %s" % (name, str(value_expr)),
+                to_string=True,
+            )
         except (gdb.error, ValueError) as exc:
             raise PluginError("PLUGIN_ERROR", "write_register failed: %s" % exc)
         new = self._fmt_value(frame.read_register(name))
@@ -849,8 +944,15 @@ class Plugin(object):
 
     def _handle_backtrace(self, params):
         max_frames = params.get("max_frames", 64)
-        if not isinstance(max_frames, int) or max_frames < 1:
-            raise PluginError("BAD_PARAMS", "max_frames must be a positive int")
+        if (
+            not isinstance(max_frames, int)
+            or isinstance(max_frames, bool)
+            or not (1 <= max_frames <= MAX_BACKTRACE_FRAMES)
+        ):
+            raise PluginError(
+                "BAD_PARAMS",
+                "max_frames must be between 1 and %d" % MAX_BACKTRACE_FRAMES,
+            )
         try:
             frame = gdb.newest_frame()
         except gdb.error:
@@ -867,8 +969,15 @@ class Plugin(object):
 
     def _handle_disasm(self, params):
         count = params.get("count", 16)
-        if not isinstance(count, int) or count < 1:
-            raise PluginError("BAD_PARAMS", "count must be a positive int")
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or not (1 <= count <= MAX_DISASM_INSTRUCTIONS)
+        ):
+            raise PluginError(
+                "BAD_PARAMS",
+                "count must be between 1 and %d" % MAX_DISASM_INSTRUCTIONS,
+            )
         start = params.get("start")
         if start is None:
             frame = self._require_frame()
@@ -1125,19 +1234,29 @@ class Plugin(object):
 
     def _on_stop(self, event):
         _dbg("on_stop fired")
-        payload = {"reason": "signal-received"}
+        payload = {"reason": "stopped"}
         try:
             sig = getattr(event, "stop_signal", None)
             if sig is not None:
                 payload["signal"] = str(sig)
+                payload["reason"] = "signal-received"
         except Exception:
             pass
         details = getattr(event, "details", None)
         if isinstance(details, dict):
             payload["details"] = _json_safe(details)
+            if isinstance(details.get("reason"), str):
+                payload["reason"] = details["reason"]
             addr = details.get("addr")
             if isinstance(addr, int):
                 payload["fault_addr"] = "0x%x" % addr
+        try:
+            breakpoints = getattr(event, "breakpoints", None)
+            if breakpoints:
+                payload["reason"] = "breakpoint-hit"
+                payload["breakpoints"] = [bp.number for bp in breakpoints]
+        except Exception:
+            pass
         # gdb >= 16 no longer puts the fault address in the MI details;
         # read it from the signal info instead (works for memory faults).
         if "fault_addr" not in payload and payload.get("signal") in (
@@ -1210,7 +1329,7 @@ class Plugin(object):
 
     def _send(self, msg):
         try:
-            self.out_q.put(self._encode_msg(msg))
+            self.out_q.put((self._wire_generation, self._encode_msg(msg)))
         except Exception:
             pass
 

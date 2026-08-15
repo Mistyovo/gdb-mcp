@@ -10,7 +10,7 @@ from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.launcher import Launcher
 from gdb_mcp.sessions import DISCONNECTED, RESERVED
 
-from ._common import config_from, registry_from, resolve_any, resolve_gdb
+from ._common import config_from, registry_from, resolve_any
 
 
 def register(app, registry, config) -> None:
@@ -25,7 +25,7 @@ def register(app, registry, config) -> None:
         env: dict[str, str] | None = None,
         run: bool = False,
         distro: str | None = None,
-        attach_timeout_ms: int = 30000,
+        attach_timeout_ms: int | None = None,
         ctx: Context = None,
     ) -> dict:
         """Launch gdb with the MCP plugin loaded inside WSL2 (background
@@ -34,8 +34,6 @@ def register(app, registry, config) -> None:
         `run=True`, the inferior is started immediately (equivalent to
         `gdb -ex run`)."""
         cfg = config_from(ctx)
-        if distro:
-            launcher.config.wsl_distro = distro
         session = await launcher.launch_gdb(
             program=program,
             args=args,
@@ -43,13 +41,18 @@ def register(app, registry, config) -> None:
             cwd=cwd,
             env=env,
             run=run,
-            timeout_ms=attach_timeout_ms or cfg.attach_timeout_ms,
+            timeout_ms=(
+                cfg.attach_timeout_ms
+                if attach_timeout_ms is None
+                else attach_timeout_ms
+            ),
+            distro=distro,
         )
         return {
             "session_id": session.session_id,
             "state": session.state,
             "log_file": session.log_file,
-            "distro": await launcher.distro(),
+            "distro": await launcher.distro(distro),
             "note": (
                 "plugin connected" if session.state != RESERVED
                 else "hello not received yet; the plugin retries in the background"
@@ -64,22 +67,25 @@ def register(app, registry, config) -> None:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         distro: str | None = None,
-        attach_timeout_ms: int = 30000,
+        attach_timeout_ms: int | None = None,
         ctx: Context = None,
     ) -> dict:
         """Launch a Python (typically pwntools) script inside WSL2. If the
         script starts gdb with the MCP plugin loaded (via gdb_args/gdbscript),
         the new gdb session id is returned once it registers."""
         cfg = config_from(ctx)
-        if distro:
-            launcher.config.wsl_distro = distro
         script_session, gdb_session = await launcher.launch_script(
             script=script,
             python=python,
             args=args,
             cwd=cwd,
             env=env,
-            timeout_ms=attach_timeout_ms or cfg.attach_timeout_ms,
+            timeout_ms=(
+                cfg.attach_timeout_ms
+                if attach_timeout_ms is None
+                else attach_timeout_ms
+            ),
+            distro=distro,
         )
         result = {
             "script_session_id": script_session.session_id,
@@ -99,8 +105,9 @@ def register(app, registry, config) -> None:
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
-        """Kill a session: detach the plugin (gdb stays alive) or, with
-        force=True, quit gdb / terminate the launched process tree."""
+        """End a session. For gdb, the default detaches the plugin and
+        leaves gdb running; force=True also terminates gdb. Script sessions
+        are terminated gracefully by default or killed with force=True."""
         registry = registry_from(ctx)
         session = resolve_any(ctx, session_id)
         if session.kind == "gdb":
@@ -110,8 +117,11 @@ def register(app, registry, config) -> None:
                     if session.state == DISCONNECTED:
                         break
                     await asyncio.sleep(0.1)
-        if session.launched:
-            await launcher.pkill_marker(session.session_id, force)
+        should_kill_process = session.kind == "script" or force
+        if session.launched and should_kill_process:
+            await launcher.pkill_marker(
+                session.session_id, force, distro=session.distro
+            )
         elif session.kind == "script":
             raise GdbMcpError(
                 "NOT_LAUNCHED",
@@ -121,7 +131,8 @@ def register(app, registry, config) -> None:
         registry.remove(session.session_id)
         return {
             "session_id": session.session_id,
-            "killed": True,
+            "detached": session.kind == "gdb",
+            "killed": should_kill_process,
             "force": force,
             "log_file": session.log_file,
         }

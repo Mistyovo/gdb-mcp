@@ -1,7 +1,5 @@
 """Tests for gdb_mcp.protocol framing and message helpers."""
 
-import json
-
 import pytest
 
 from gdb_mcp.errors import ProtocolError
@@ -20,6 +18,8 @@ from gdb_mcp.protocol import (
     parse_line,
     response_result,
     unwrap_token,
+    validate_hello,
+    validate_plugin_message,
     wrap_with_token,
 )
 
@@ -97,6 +97,7 @@ class TestBuilders:
     def test_build_hello_ack(self):
         msg = build_hello_ack("s-abc", "0.1.0", 30.0)
         assert msg["type"] == "hello_ack"
+        assert msg["proto"] == 1
         assert msg["session_id"] == "s-abc"
 
     def test_build_quit(self):
@@ -117,11 +118,19 @@ class TestBuilders:
         msg = {"type": "request", "id": 3, "verb": "eval", "params": {"command": "vmmap"}}
         assert parse_line(encode(msg)) == msg
 
+    def test_encode_with_token(self):
+        encoded = parse_line(encode({"type": "ping"}, "sekret"))
+        assert encoded == {"token": "sekret", "msg": {"type": "ping"}}
+
 
 class TestTokenAuth:
     def test_wrap_unwrap(self):
         wrapped = wrap_with_token("sekret", {"type": "hello"})
         assert unwrap_token(wrapped, "sekret") == {"type": "hello"}
+
+    def test_unicode_token(self):
+        wrapped = wrap_with_token("密钥", {"type": "hello"})
+        assert unwrap_token(wrapped, "密钥") == {"type": "hello"}
 
     def test_mismatch_raises(self):
         wrapped = wrap_with_token("sekret", {"type": "hello"})
@@ -136,13 +145,45 @@ class TestTokenAuth:
     def test_bare_message_passthrough_without_token(self):
         assert unwrap_token({"type": "hello"}, None) == {"type": "hello"}
 
-    def test_wrapped_message_accepted_without_token(self):
+    def test_wrapped_message_rejected_without_token(self):
         wrapped = wrap_with_token("anything", {"type": "hello"})
-        assert unwrap_token(wrapped, None) == {"type": "hello"}
+        with pytest.raises(ProtocolError):
+            unwrap_token(wrapped, None)
 
     def test_inner_must_be_object(self):
         with pytest.raises(ProtocolError):
             unwrap_token({"token": "t", "msg": [1]}, "t")
+
+
+class TestMessageValidation:
+    def test_valid_hello(self):
+        validate_hello({"type": "hello", "proto": 1, "pid": 123})
+
+    def test_protocol_mismatch(self):
+        with pytest.raises(ProtocolError) as exc:
+            validate_hello({"type": "hello", "proto": 2, "pid": 123})
+        assert exc.value.code == "PROTOCOL_MISMATCH"
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            {"type": "response", "id": [], "ok": True, "result": {}},
+            {"type": "response", "id": 1, "ok": "yes", "result": {}},
+            {"type": "notification", "event": "unknown", "payload": {}},
+            {"type": "notification", "event": "stop", "payload": []},
+        ],
+    )
+    def test_malformed_plugin_messages_rejected(self, message):
+        with pytest.raises(ProtocolError):
+            validate_plugin_message(message)
+
+    def test_valid_plugin_messages(self):
+        validate_plugin_message(
+            {"type": "response", "id": 1, "ok": True, "result": {}}
+        )
+        validate_plugin_message(
+            {"type": "notification", "event": "stop", "payload": {}}
+        )
 
 
 class TestVerbSets:

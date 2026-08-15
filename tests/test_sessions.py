@@ -20,7 +20,6 @@ from gdb_mcp.sessions import (
     RESERVED,
     RUNNING,
     STOPPED,
-    Session,
     SessionRegistry,
 )
 
@@ -187,9 +186,38 @@ class TestRequest:
         s = registry.register_hello(hello(), FakeWriter())
         task = asyncio.create_task(s.request("continue", {}, timeout=5))
         await asyncio.sleep(0)
+        assert s.state == RUNNING
         await s.complete_response(1, {"ok": True, "result": {"state": "running"}})
         assert await task == {"state": "running"}
         assert s.state == RUNNING
+
+    @pytest.mark.asyncio
+    async def test_stop_notification_wins_over_async_response(self, registry):
+        s = registry.register_hello(hello(), FakeWriter())
+        task = asyncio.create_task(s.request("continue", {}, timeout=5))
+        await asyncio.sleep(0)
+        await s.complete_response(1, {"ok": True, "result": {"state": "running"}})
+        await s.push_notification("stop", {"signal": "SIGTRAP"})
+        await task
+        assert s.state == STOPPED
+        assert s.stop_info == {"signal": "SIGTRAP"}
+
+    @pytest.mark.asyncio
+    async def test_async_error_restores_previous_state(self, registry):
+        s = registry.register_hello(hello(), FakeWriter())
+        s.state = READY
+        task = asyncio.create_task(s.request("continue", {}, timeout=5))
+        await asyncio.sleep(0)
+        await s.complete_response(
+            1,
+            {
+                "ok": False,
+                "error": {"code": "NO_INFERIOR", "message": "none"},
+            },
+        )
+        with pytest.raises(GdbMcpError):
+            await task
+        assert s.state == READY
 
     @pytest.mark.asyncio
     async def test_request_on_disconnected_raises(self, registry):

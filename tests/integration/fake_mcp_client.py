@@ -8,6 +8,7 @@ requests, collect responses and notifications.
 from __future__ import print_function
 
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -16,10 +17,11 @@ import threading
 import time
 
 DEBUG = os.environ.get("GDB_MCP_TEST_DEBUG") == "1"
+TOKEN = os.environ.get("GDB_MCP_TEST_TOKEN")
 
 
 class FakeServer(object):
-    def __init__(self, port):
+    def __init__(self, port, token=None):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", port))
@@ -30,6 +32,7 @@ class FakeServer(object):
         self.notifications = []
         self._notif_idx = 0
         self._next_id = 1000
+        self.token = token
 
     def accept(self):
         self.conn, addr = self.sock.accept()
@@ -53,7 +56,22 @@ class FakeServer(object):
         threading.Thread(target=watchdog, daemon=True).start()
 
     def send(self, msg):
+        if self.token:
+            msg = {"token": self.token, "msg": msg}
         self.conn.sendall(json.dumps(msg).encode("utf-8") + b"\n")
+
+    def _unwrap(self, envelope):
+        if not self.token:
+            return envelope
+        supplied = envelope.get("token")
+        if not isinstance(supplied, str) or not hmac.compare_digest(
+            supplied, self.token
+        ):
+            raise RuntimeError("plugin sent a missing or invalid token")
+        msg = envelope.get("msg")
+        if not isinstance(msg, dict):
+            raise RuntimeError("plugin sent an invalid token envelope")
+        return msg
 
     def recv_msg(self, timeout=60.0):
         deadline = time.time() + timeout
@@ -62,7 +80,7 @@ class FakeServer(object):
             # several messages into one chunk).
             if b"\n" in self.buf:
                 raw, self.buf = self.buf.split(b"\n", 1)
-                msg = json.loads(raw.decode("utf-8"))
+                msg = self._unwrap(json.loads(raw.decode("utf-8")))
                 if DEBUG:
                     print("  << %s" % msg, flush=True)
                 return msg
@@ -134,7 +152,7 @@ class FakeServer(object):
 
 
 def run(port, crasher):
-    srv = FakeServer(port)
+    srv = FakeServer(port, TOKEN)
     srv.accept()
 
     hello = srv.expect("hello")
@@ -146,6 +164,7 @@ def run(port, crasher):
     srv.send(
         {
             "type": "hello_ack",
+            "proto": 1,
             "server_version": "0.1.0",
             "session_id": "s-integration",
             "heartbeat_sec": 30,

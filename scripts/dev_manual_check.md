@@ -16,9 +16,12 @@ wsl.exe -d kali-linux -- bash -c "ip route show default; cat /etc/resolv.conf"
 ```
 
 - `ip route` 为空 / 启动报 `0x8007054f` → mirrored 未生效：`wsl --shutdown` 重启，或删掉 networkingMode 回到 NAT。
-- NAT 模式：插件自动尝试 `/etc/resolv.conf` 的 nameserver IP；失败则显式
+- NAT 模式：插件自动尝试 `/proc/net/route` 中的默认网关，并以
+  `/etc/resolv.conf` 的 nameserver IP 作为兼容回退；失败时显式设置
   `export GDB_MCP_HOST=<ip route show default 的网关>`。
-- 防火墙：服务器首次监听 0.0.0.0:3939 时放行。
+- mirrored 模式使用默认 `127.0.0.1:3939`。NAT 模式设置
+  `GDB_MCP_HOST_BIND=0.0.0.0` 和 `GDB_MCP_TOKEN=<随机值>`，并在 gdb
+  进程侧设置相同 token；首次监听时按需放行防火墙。
 
 ## 3. 注册 MCP 并启动
 

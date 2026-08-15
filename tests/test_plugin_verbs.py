@@ -3,8 +3,6 @@
 import json
 import queue
 
-import pytest
-
 import mock_gdb
 from mock_gdb import MockBreakpoint, set_inferior
 
@@ -13,7 +11,7 @@ def drain(plugin):
     out = []
     while True:
         try:
-            line = plugin.out_q.get_nowait()
+            _, line = plugin.out_q.get_nowait()
         except queue.Empty:
             return out
         msg = json.loads(line.decode("utf-8"))
@@ -79,7 +77,19 @@ class TestReadMem:
         r = resp["result"]
         assert r["partial"] is True
         assert r["unreadable"] == [{"addr": 0x2000, "length": 0x1000}]
-        assert len(r["hex"]) == 2 * 0x2000  # two readable chunks
+        assert r["hex"] is None
+        assert [(s["addr"], s["length"]) for s in r["segments"]] == [
+            (0x1000, 0x1000),
+            (0x3000, 0x1000),
+        ]
+
+    def test_chunk_fallback_covers_full_large_request(self, plugin):
+        inf = set_inferior()
+        inf.read_fail = [(0, 0x1000)]
+        resp = call(plugin, "read_mem", {"addr": 0, "length": 0x50000})
+        result = resp["result"]
+        assert result["unreadable"] == [{"addr": 0, "length": 0x1000}]
+        assert result["segments"][-1]["addr"] + result["segments"][-1]["length"] == 0x50000
 
     def test_bad_length(self, plugin):
         set_inferior()
@@ -106,6 +116,10 @@ class TestWriteMem:
         set_inferior()
         assert call(plugin, "write_mem", {"addr": 0x2000, "hex": "zz"})["error"]["code"] == "BAD_PARAMS"
 
+    def test_empty_write_rejected(self, plugin):
+        set_inferior()
+        assert call(plugin, "write_mem", {"addr": 0x2000, "hex": ""})["error"]["code"] == "BAD_PARAMS"
+
 
 class TestRegs:
     def test_full_listing_skips_unavailable(self, plugin):
@@ -127,10 +141,21 @@ class TestSetReg:
         set_inferior()
         resp = call(plugin, "set_reg", {"name": "rip", "value": "0xdead"})
         assert resp["result"] == {"name": "rip", "old": "0x401000", "new": "0xdead"}
+        assert mock_gdb.state.executed == ["set $rip = 0xdead"]
 
     def test_missing_params(self, plugin):
         set_inferior()
         assert call(plugin, "set_reg", {})["error"]["code"] == "BAD_PARAMS"
+
+    def test_rejects_invalid_register_name(self, plugin):
+        set_inferior()
+        resp = call(
+            plugin,
+            "set_reg",
+            {"name": "rax\nquit", "value": "0xdead"},
+        )
+        assert resp["error"]["code"] == "BAD_PARAMS"
+        assert mock_gdb.state.executed == []
 
 
 class TestBacktrace:

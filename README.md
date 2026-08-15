@@ -11,7 +11,7 @@ MCP 服务器，让大模型（Claude Code 等）驱动 Linux 下的 **gdb 进�
 
 ```
 Claude Code (Windows) ──stdio/MCP──► gdb-mcp server (FastMCP, Windows)
-                                          │ TCP listener 0.0.0.0:3939（会话注册表）
+                                          │ TCP listener 127.0.0.1:3939（会话注册表）
                                           ▼ 插件从 WSL2 回连（JSON-lines 协议 v1）
                     WSL2: gdb (+pwndbg) ── gdb_mcp_plugin.py（stdlib-only 单文件）
                           ▲
@@ -40,20 +40,23 @@ sudo apt install gdb python3 python3-pip gcc   # pwndbg 可选
 
 ## WSL2 网络（重要）
 
-插件从 WSL2 **回连** Windows 侧服务器，依次尝试：`GDB_MCP_HOST` → `127.0.0.1` → `/etc/resolv.conf` 的 nameserver IP。
+插件从 WSL2 **回连** Windows 侧服务器，依次尝试：`GDB_MCP_HOST` → `127.0.0.1` → WSL 默认网关 → `/etc/resolv.conf` 的 nameserver IP。
 
 | 模式 | 配置（`%USERPROFILE%\.wslconfig`） | 插件应连 |
 |---|---|---|
 | **Mirrored**（推荐） | `[wsl2] networkingMode=Mirrored` | `127.0.0.1`（共享 localhost） |
-| NAT（默认） | 无配置 | nameserver IP（Windows 宿主），首次需放行防火墙 |
+| NAT（默认） | 无配置 | 默认网关（自动发现）；服务端需非 loopback 监听并配置 token |
 
-排查：`wsl.exe -l -q` 报 `0x8007054f` / VM 内 `ip route` 为空 → mirrored 网络未生效，`wsl --shutdown` 重启或改回 NAT。NAT 下若 `GDB_MCP_HOST` 解析失败，显式设置：
+排查：`wsl.exe -l -q` 报 `0x8007054f` / VM 内 `ip route` 为空 → mirrored 网络未生效，`wsl --shutdown` 重启或改回 NAT。NAT 下若自动发现失败，显式设置：
 
 ```bash
 export GDB_MCP_HOST=$(ip route show default | awk '{print $3}')
 ```
 
-服务器绑定 `0.0.0.0:3939`（可配置），首次监听 Windows 会弹防火墙授权。端口暴露于局域网：默认无鉴权，可选共享 token（`GDB_MCP_TOKEN`，服务端与 gdb 进程两侧设置）。
+服务器默认只绑定 `127.0.0.1:3939`。NAT 模式需要设置
+`GDB_MCP_HOST_BIND=0.0.0.0`，此时服务端会强制要求同时设置
+`GDB_MCP_TOKEN`；gdb 进程侧必须使用相同 token。非 loopback 监听可能触发
+Windows 防火墙授权。
 
 ## Claude Code 配置
 
@@ -91,7 +94,8 @@ gdb 在新终端（tmux 窗格）中打开、pwndbg 照常加载、插件自动�
 
 - `launch_gdb(program="/mnt/c/.../vuln", run=True)` —— wsl.exe 后台拉起 gdb + 插件
 - `launch_script(script="C:\\...\\exploit.py")` —— 后台跑 pwntools 脚本并等待其 gdb 注册
-- `kill_session(force=True)` / `quit_gdb(kill_gdb=False)` —— 结束
+- `kill_session(force=False)` 仅断开插件、保留 gdb；`force=True` 终止 gdb
+- `quit_gdb(kill_gdb=False)` —— 断开外部启动的 gdb
 
 ### 方式 3：手动 gdb
 
@@ -130,13 +134,19 @@ continue_execution → wait_for_stop → crash_report（一次调用返回：
 | 变量 | 位置 | 说明 |
 |---|---|---|
 | `GDB_MCP_PORT` | 两侧 | 端口（默认 3939） |
-| `GDB_MCP_HOST_BIND` | 服务器 | 监听地址（默认 0.0.0.0） |
-| `GDB_MCP_TOKEN` | 两侧 | 可选共享 token |
+| `GDB_MCP_HOST_BIND` | 服务器 | 监听地址（默认 127.0.0.1） |
+| `GDB_MCP_TOKEN` | 两侧 | 共享 token；非 loopback 监听时必需 |
 | `GDB_MCP_HOST` | gdb 进程 | 强制指定服务器地址 |
 | `GDB_MCP_SESSION_ID` | gdb 进程 | launch_gdb 内部使用 |
 | `GDB_MCP_AUTOSTART` | gdb 进程 | `0` = 仅加载不连接 |
 | `GDB_MCP_DEBUG` | gdb 进程 | `1` = 插件调试输出（stderr） |
 | `GDB_MCP_WSL_DISTRO` / `GDB_MCP_LOG_DIR` | 服务器 | launch 工具配置 |
+| `GDB_MCP_REQUEST_TIMEOUT` / `GDB_MCP_HEARTBEAT_SEC` | 服务器 | 请求与心跳超时 |
+| `GDB_MCP_MAX_MEM_READ` / `GDB_MCP_MAX_ASYNC_LINE` | 两侧 | 内存读取与协议帧上限 |
+
+部分内存读取返回 `segments`（每段都含实际 `addr`、`length`、`hex` 和
+`ascii`）以及 `unreadable` 范围；存在缺口时顶层 `hex` / `ascii` 为 `null`，
+避免把不连续数据误当成连续内存。
 
 ## 与 pwndbg / pwntools 共存
 
@@ -155,4 +165,6 @@ bash tests/integration/run_wsl_integration.sh   # WSL2 内真实 gdb 端到端
 
 ## 安全说明
 
-TCP 端口上的任意连接者都能执行任意 gdb 命令（等价于本机任意代码执行）。默认仅面向本机开发环境；如需加固：设置 `GDB_MCP_TOKEN`、用防火墙限制 3939 端口来源。
+该 TCP 通道具备执行任意 gdb 命令的能力。默认仅监听 loopback；任何非
+loopback 监听都必须配置共享 token，并仍建议用防火墙限制 3939 端口来源。
+协议拒绝版本不匹配和结构不合法的消息。
