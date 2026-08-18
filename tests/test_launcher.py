@@ -248,3 +248,151 @@ class TestLauncherLifecycle:
         assert gdb is not None
         assert gdb.session_id == captured["GDB_MCP_SESSION_ID"]
         assert gdb.session_id != "attacker-controlled"
+        assert gdb.log_file is None
+
+    @pytest.mark.asyncio
+    async def test_launch_script_returns_when_script_exits_and_removes_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import EXITED, SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+
+        async def fake_spawn(
+            argv,
+            env,
+            cwd_wsl,
+            session_id,
+            log_file,
+            kind,
+            marker,
+            distro_override=None,
+        ):
+            script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
+            script.state = EXITED
+            script.proc_returncode = 0
+            return script
+
+        monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+        script, gdb = await asyncio.wait_for(
+            launcher.launch_script(
+                script=r"C:\work\pure_script.py",
+                python="python3",
+                args=None,
+                cwd=None,
+                env=None,
+                timeout_ms=60_000,
+            ),
+            timeout=0.5,
+        )
+
+        assert script.state == EXITED
+        assert gdb is None
+        assert registry.list_all() == [script]
+
+    @pytest.mark.asyncio
+    async def test_launch_script_timeout_removes_unused_gdb_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import RUNNING, SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+
+        async def fake_spawn(
+            argv,
+            env,
+            cwd_wsl,
+            session_id,
+            log_file,
+            kind,
+            marker,
+            distro_override=None,
+        ):
+            script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
+            script.state = RUNNING
+            return script
+
+        monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+        script, gdb = await launcher.launch_script(
+            script=r"C:\work\long_running.py",
+            python="python3",
+            args=None,
+            cwd=None,
+            env=None,
+            timeout_ms=1,
+        )
+
+        assert gdb is None
+        assert registry.list_all() == [script]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_launch_script_removes_unused_gdb_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import RUNNING, SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+
+        async def fake_spawn(
+            argv,
+            env,
+            cwd_wsl,
+            session_id,
+            log_file,
+            kind,
+            marker,
+            distro_override=None,
+        ):
+            script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
+            script.state = RUNNING
+            return script
+
+        monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+        task = asyncio.create_task(
+            launcher.launch_script(
+                script=r"C:\work\long_running.py",
+                python="python3",
+                args=None,
+                cwd=None,
+                env=None,
+                timeout_ms=60_000,
+            )
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(registry.list_all()) == 1
+        assert registry.list_all()[0].kind == "script"
+
+    @pytest.mark.asyncio
+    async def test_launch_script_rejects_inline_code_with_specific_message(self, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        launcher = Launcher(config, SessionRegistry(config))
+
+        with pytest.raises(ValueError, match="absolute file path.*inline Python code"):
+            await launcher.launch_script(
+                script="print('hello')",
+                python="python3",
+                args=None,
+                cwd=None,
+                env=None,
+                timeout_ms=100,
+            )

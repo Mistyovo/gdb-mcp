@@ -8,7 +8,7 @@ import pytest
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.server import build_app
-from gdb_mcp.sessions import RUNNING, SessionRegistry
+from gdb_mcp.sessions import EXITED, RUNNING, SessionRegistry
 
 from test_sessions import FakeWriter, hello
 
@@ -131,6 +131,21 @@ class TestSessionTools:
         assert result["output"] == "line2\nline3\n"
 
     @pytest.mark.asyncio
+    async def test_reserved_gdb_is_not_reported_as_running(self, env, tmp_path):
+        registry, _, _ = env
+        log = tmp_path / "out.log"
+        log.write_text("pending\n")
+        registry.reserve("s-pending", log_file=str(log), launched=False)
+
+        result = await run_tool(
+            env[2]["get_process_output"],
+            {"session_id": "s-pending"},
+            ctx_for(env),
+        )
+
+        assert result["running"] is False
+
+    @pytest.mark.asyncio
     async def test_get_process_output_no_log(self, env):
         registry, _, _ = env
         add_gdb_session(registry)
@@ -140,6 +155,37 @@ class TestSessionTools:
 
 
 class TestLaunchTools:
+    @pytest.mark.asyncio
+    async def test_launch_script_reports_completed_pure_script(
+        self, env, monkeypatch, tmp_path
+    ):
+        registry, _, tools = env
+        log = tmp_path / "pure.log"
+        log.write_text("done\n")
+
+        async def fake_launch_script(self, **kwargs):
+            script = registry.reserve(
+                "s-pure", kind="script", log_file=str(log)
+            )
+            script.state = EXITED
+            script.proc_returncode = 0
+            return script, None
+
+        monkeypatch.setattr(
+            "gdb_mcp.tools.launch_tools.Launcher.launch_script", fake_launch_script
+        )
+        result = await run_tool(
+            tools["launch_script"],
+            {"script": r"C:\work\pure.py"},
+            ctx_for(env),
+        )
+
+        assert result["script_state"] == EXITED
+        assert result["script_returncode"] == 0
+        assert result["gdb_session_id"] is None
+        assert "script exited (code 0)" in result["note"]
+        assert "done" in result["note"]
+
     @pytest.mark.asyncio
     async def test_non_force_gdb_kill_only_detaches(self, env, monkeypatch):
         registry, _, tools = env

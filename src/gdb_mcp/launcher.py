@@ -347,11 +347,18 @@ class Launcher:
     ) -> tuple[Session, Session | None]:
         """Launch a (typically pwntools) script and wait for a *new* gdb
         session to register itself (the script's own gdb carrying the
-        plugin). Returns (script_session, gdb_session_or_None)."""
+        plugin). Return as soon as either gdb registers or the script exits.
+        Returns (script_session, gdb_session_or_None)."""
         session_id = self.registry.new_session_id()
         gdb_session_id = self.registry.new_session_id(exclude={session_id})
         wsl_cwd = win_to_wsl(cwd) if cwd else None
-        script_wsl = win_to_wsl(script)
+        try:
+            script_wsl = win_to_wsl(script)
+        except ValueError:
+            raise ValueError(
+                "script must be an absolute file path (a Windows drive path "
+                "or a WSL path); inline Python code is not supported: %r" % script
+            ) from None
         env_vars = dict(env or {})
         for reserved_name in (
             "GDB_MCP_SESSION_ID",
@@ -378,7 +385,6 @@ class Launcher:
         gdb_session = self.registry.reserve(
             gdb_session_id,
             kind="gdb",
-            log_file=str(log_file),
             launched=False,
         )
         try:
@@ -392,15 +398,19 @@ class Launcher:
                 marker=True,
                 distro_override=distro,
             )
-        except Exception:
-            self.registry.remove(gdb_session_id)
-            raise
-        deadline = time.monotonic() + max(0.1, timeout_ms / 1000.0)
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.2)
-            if gdb_session.state != RESERVED:
-                return session, gdb_session
-        return session, None
+            deadline = time.monotonic() + max(0.1, timeout_ms / 1000.0)
+            while True:
+                if gdb_session.state != RESERVED:
+                    return session, gdb_session
+                if session.state == EXITED:
+                    return session, None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return session, None
+                await asyncio.sleep(min(0.2, remaining))
+        finally:
+            if gdb_session.state == RESERVED:
+                self.registry.remove(gdb_session_id)
 
     # -- kill ----------------------------------------------------------------
 

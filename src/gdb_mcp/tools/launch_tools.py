@@ -8,7 +8,7 @@ from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.launcher import Launcher
-from gdb_mcp.sessions import DISCONNECTED, RESERVED
+from gdb_mcp.sessions import DISCONNECTED, EXITED, RESERVED
 
 from ._common import config_from, registry_from, resolve_any
 
@@ -70,9 +70,12 @@ def register(app, registry, config) -> None:
         attach_timeout_ms: int | None = None,
         ctx: Context = None,
     ) -> dict:
-        """Launch a Python (typically pwntools) script inside WSL2. If the
-        script starts gdb with the MCP plugin loaded (via gdb_args/gdbscript),
-        the new gdb session id is returned once it registers."""
+        """Launch a Python (typically pwntools) script inside WSL2. `script`
+        must be an absolute Windows or WSL file path; inline code is not
+        supported. If the script starts gdb with the MCP plugin loaded (via
+        gdb_args/gdbscript), the new gdb session id is returned once it
+        registers. A script that exits without gdb returns immediately with
+        its state, return code, and log tail."""
         cfg = config_from(ctx)
         script_session, gdb_session = await launcher.launch_script(
             script=script,
@@ -89,13 +92,24 @@ def register(app, registry, config) -> None:
         )
         result = {
             "script_session_id": script_session.session_id,
+            "script_state": script_session.state,
+            "script_returncode": script_session.proc_returncode,
             "gdb_session_id": gdb_session.session_id if gdb_session else None,
             "log_file": script_session.log_file,
         }
         if gdb_session is None:
+            if script_session.state == EXITED:
+                status = "script exited (code %s) without starting gdb" % (
+                    script_session.proc_returncode,
+                )
+            else:
+                status = (
+                    "no gdb session appeared before the attach timeout; "
+                    "script is still running"
+                )
             result["note"] = (
-                "no gdb session appeared; script log tail: %s"
-                % launcher.log_tail(script_session.log_file)
+                "%s; script log tail: %s"
+                % (status, launcher.log_tail(script_session.log_file))
             )
         return result
 

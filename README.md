@@ -93,7 +93,7 @@ gdb 在新终端（tmux 窗格）中打开、pwndbg 照常加载、插件自动�
 ### 方式 2：MCP 自启动（headless）
 
 - `launch_gdb(program="/mnt/c/.../vuln", run=True)` —— wsl.exe 后台拉起 gdb + 插件
-- `launch_script(script="C:\\...\\exploit.py")` —— 后台跑 pwntools 脚本并等待其 gdb 注册
+- `launch_script(script="C:\\...\\exploit.py")` —— 后台跑脚本，等待其 gdb 注册；纯脚本退出时立即返回状态、退出码与日志尾
 - `kill_session(force=False)` 仅断开插件、保留 gdb；`force=True` 终止 gdb
 - `quit_gdb(kill_gdb=False)` —— 断开外部启动的 gdb
 

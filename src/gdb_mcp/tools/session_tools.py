@@ -88,6 +88,6 @@ def register(app, registry, config) -> None:
             "running": (
                 getattr(session.proc, "returncode", None) is None
                 if session.proc is not None
-                else session.state != DISCONNECTED
+                else session.state not in (DISCONNECTED, RESERVED)
             ),
         }
