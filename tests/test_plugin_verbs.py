@@ -50,6 +50,54 @@ class TestEval:
     def test_missing_command(self, plugin):
         assert call(plugin, "eval", {})["error"]["code"] == "BAD_PARAMS"
 
+    def test_total_lines_always_reported(self, plugin):
+        mock_gdb.state.output_map["vmmap"] = "a\nb\nc"
+        resp = call(plugin, "eval", {"command": "vmmap"})
+        r = resp["result"]
+        assert r["total_lines"] == 3
+        assert r["output"] == "a\nb\nc"
+        assert r["truncated"] is False
+        assert "offset" not in r
+
+    def test_pagination_window(self, plugin):
+        mock_gdb.state.output_map["heap"] = "l0\nl1\nl2\nl3\nl4\n"
+        resp = call(plugin, "eval", {"command": "heap", "offset": 1, "limit": 2})
+        r = resp["result"]
+        assert r["output"] == "l1\nl2"
+        assert r["total_lines"] == 5
+        assert r["offset"] == 1
+        assert r["truncated"] is True
+
+    def test_pagination_tail_not_truncated(self, plugin):
+        mock_gdb.state.output_map["heap"] = "l0\nl1\nl2"
+        resp = call(plugin, "eval", {"command": "heap", "offset": 1})
+        r = resp["result"]
+        assert r["output"] == "l1\nl2"
+        assert r["total_lines"] == 3
+        assert r["truncated"] is False
+        assert "offset" not in r
+
+    def test_pagination_beyond_end(self, plugin):
+        mock_gdb.state.output_map["heap"] = "l0\nl1"
+        resp = call(plugin, "eval", {"command": "heap", "offset": 5, "limit": 2})
+        r = resp["result"]
+        assert r["output"] == ""
+        assert r["total_lines"] == 2
+        assert r["truncated"] is False
+
+    def test_pagination_bad_offset(self, plugin):
+        resp = call(plugin, "eval", {"command": "x", "offset": -1})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_pagination_bad_limit(self, plugin):
+        resp = call(plugin, "eval", {"command": "x", "limit": 0})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_pagination_window_strips_ansi(self, plugin):
+        mock_gdb.state.output_map["heap"] = "\x1b[31ml0\x1b[0m\nl1"
+        resp = call(plugin, "eval", {"command": "heap", "offset": 0, "limit": 1})
+        assert resp["result"]["output"] == "l0"
+
 
 class TestReadMem:
     def test_whole_read(self, plugin):

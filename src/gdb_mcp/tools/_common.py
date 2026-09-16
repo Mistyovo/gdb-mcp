@@ -26,18 +26,8 @@ def resolve_any(ctx: Any, session_id: str | None) -> Session:
 
 
 def check_stopped(session: Session) -> None:
-    """Reject operations that require a stopped inferior."""
-    if session.state == RUNNING:
-        raise InferiorRunningError()
-    if session.state == EXITED:
-        raise SessionStateError(
-            "EXITED",
-            "inferior has exited; restart the inferior before debugging further",
-        )
-
-
-def check_resumable(session: Session) -> None:
-    """Reject resume operations that cannot be performed now."""
+    """Reject operations that require the inferior to be stopped (both
+    state queries and resume requests)."""
     if session.state == RUNNING:
         raise InferiorRunningError()
     if session.state == EXITED:

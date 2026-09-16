@@ -178,6 +178,51 @@ def _limited_output(text, strip=True):
     return {"output": text, "truncated": False}
 
 
+def _slice_index(value, name, minimum):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise PluginError(
+            "BAD_PARAMS", "%s must be an int >= %d" % (name, minimum)
+        )
+    return value
+
+
+def _eval_window(params):
+    """Validated (offset, limit) output window; raises before any command
+    runs so a bad window never executes the request."""
+    offset = params.get("offset")
+    offset = 0 if offset is None else _slice_index(offset, "offset", 0)
+    limit = params.get("limit")
+    if limit is not None:
+        limit = _slice_index(limit, "limit", 1)
+    return offset, limit
+
+
+def _eval_output(text, strip=True, window=(0, None)):
+    """:func:`_limited_output` plus line-range readback for eval output.
+
+    Every response carries ``total_lines``; a ranged read additionally
+    carries ``offset`` and sets ``truncated`` when further lines remain.
+    """
+    offset, limit = window
+    if strip:
+        text = _strip_ansi(text)
+    lines = text.splitlines()
+    result = {"total_lines": len(lines), "truncated": False}
+    if offset or limit is not None:
+        stop = None if limit is None else offset + limit
+        selected = lines[offset:stop]
+        text = "\n".join(selected)
+        if offset + len(selected) < len(lines):
+            result["truncated"] = True
+        if limit is not None:
+            result["offset"] = offset
+    if len(text) > EVAL_OUTPUT_LIMIT:
+        text = text[:EVAL_OUTPUT_LIMIT] + _TRUNC_MARKER
+        result["truncated"] = True
+    result["output"] = text
+    return result
+
+
 def _probe_features():
     feats = set()
     if hasattr(gdb, "interrupt"):
@@ -800,9 +845,10 @@ class Plugin(object):
         command = params.get("command")
         if not command:
             raise PluginError("BAD_PARAMS", "command is required")
+        window = _eval_window(params)
         keep_ansi = bool(params.get("keep_ansi", False))
         out = gdb.execute(str(command), to_string=True) or ""
-        return _limited_output(out, strip=not keep_ansi)
+        return _eval_output(out, strip=not keep_ansi, window=window)
 
     def _handle_read_mem(self, params):
         addr = self._resolve_addr(params.get("addr"))

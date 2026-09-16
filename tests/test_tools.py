@@ -252,6 +252,48 @@ class TestExecTools:
         assert ei.value.code == "PLUGIN_ERROR"
 
     @pytest.mark.asyncio
+    async def test_execute_command_pagination_params(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {
+                    "command": "heap",
+                    "offset": 40,
+                    "limit": 20,
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            {"output": "chunk", "truncated": True, "total_lines": 100, "offset": 40},
+        )
+        assert req["verb"] == "eval"
+        assert req["params"]["offset"] == 40
+        assert req["params"]["limit"] == 20
+        result = await task
+        assert result["total_lines"] == 100
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kwargs",
+        [{"offset": -1}, {"offset": 1.5}, {"limit": 0}, {"limit": True}],
+    )
+    async def test_execute_command_bad_window(self, env, kwargs):
+        _, _, tools = env
+        with pytest.raises(ValueError):
+            await run_tool(
+                tools["execute_command"],
+                {"command": "vmmap", **kwargs},
+                ctx_for(env),
+            )
+
+    @pytest.mark.asyncio
     async def test_continue_sets_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)

@@ -7,6 +7,20 @@ MCP 服务器，让大模型（Claude Code 等）驱动 Linux 下的 **gdb 进�
 - 服务器跑在 **Windows**（Claude Code），gdb 跑在 **WSL2 / Linux**：gdb 内插件通过 TCP 回连服务器，多会话注册表自动管理。
 - 结构化工具（内存/寄存器/回溯/断点/线程/反汇编）+ **pwndbg 命令透传**（`vmmap`/`heap`/`got`/`checksec`/`ropgadget`…）+ 一键崩溃定位（`crash_report`）。
 
+## 与同类项目的差异
+
+| 项目 | 架构 | 多会话 | pwndbg | pwntools 协同 | 崩溃定位 |
+|---|---|---|---|---|---|
+| **gdb-mcp（本项目）** | gdb 进程内插件 + TCP 回连 | ✅ | ✅ 命令透传 | ✅ `gdb.debug()`/`attach()` 原生 | ✅ `crash_report` |
+| [signal-slot/mcp-gdb](https://github.com/signal-slot/mcp-gdb) | GDB/MI 子进程 | ✅ | ❌ | ❌ | ❌ |
+| [yywz1999/gdb-mcp-server](https://github.com/yywz1999/gdb-mcp-server) | tmux/iTerm 终端注入 | ❌ | 附加用户现成会话 | ❌ | ❌ |
+| [BeaCox/gdb-mcp](https://github.com/BeaCox/gdb-mcp) | GDB/MI + lazy 代理 | ✅ | pwndbg 风格自实现 | ❌ | 诊断工具组 |
+| [RocketMaDev/pwndbg-mcp](https://github.com/RocketMaDev/pwndbg-mcp) | GDB/MI 直连 | ❌ 单会话 | ✅ 别名透传 | 官方 roadmap 未完成 | ❌ |
+
+本项目的进程内插件路线：pwndbg 上下文天然可用、不依赖 MI 解析与终端模拟（无 prompt
+兼容问题）、`stop`/`running`/`exited` 事件经 `gdb.events` 主动推送。生态全景与后续
+路线见 [ROADMAP.md](ROADMAP.md)。
+
 ## 架构
 
 ```

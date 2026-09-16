@@ -6,7 +6,7 @@ from mcp.server.fastmcp import Context
 
 from gdb_mcp.sessions import RUNNING
 
-from ._common import check_resumable, config_from, resolve_gdb
+from ._common import check_stopped, config_from, resolve_gdb
 
 _MODES = ("continue", "step", "next", "stepi", "nexti", "finish", "until")
 
@@ -16,17 +16,34 @@ def register(app, registry, config) -> None:
     async def execute_command(
         command: str,
         keep_ansi: bool = False,
+        offset: int | None = None,
+        limit: int | None = None,
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
         """Execute a raw gdb command and return its output. Use for
         pwndbg-specific commands (vmmap, heap, got, checksec, ropgadget,
         search, ...) or any other gdb CLI command. Works while the
-        inferior is running (queued until the next stop)."""
+        inferior is running (queued until the next stop). Large output
+        should be read in line ranges: pass offset (0-based) and limit to
+        page through; every response carries total_lines and truncated."""
+        if offset is not None and (
+            isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+        ):
+            raise ValueError("offset must be a non-negative int")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("limit must be a positive int")
         session = resolve_gdb(ctx, session_id)
+        params = {"command": command, "keep_ansi": keep_ansi}
+        if offset is not None:
+            params["offset"] = offset
+        if limit is not None:
+            params["limit"] = limit
         result = await session.request(
             "eval",
-            {"command": command, "keep_ansi": keep_ansi},
+            params,
             timeout=config_from(ctx).request_timeout,
         )
         return result
@@ -44,7 +61,7 @@ def register(app, registry, config) -> None:
         if mode not in _MODES:
             raise ValueError("mode must be one of %s" % ", ".join(_MODES))
         session = resolve_gdb(ctx, session_id)
-        check_resumable(session)
+        check_stopped(session)
         params = {}
         if mode == "until" and until_addr:
             params["until_addr"] = until_addr
