@@ -31,33 +31,36 @@ MCP 层的价值必须靠 **gdbscript 拿不到的东西** 证明：上下文聚
 | README 对比表 | 根目录 | ✅ 与 signal-slot/yywz1999/BeaCox/RocketMaDev 的差异表 |
 | `.gitignore` | 根目录 | ✅ `tests/bridge/`、`tests/ezheap/`、`tests/dashboard_demo.py`、`.mimosa/` 等本地产物 |
 
-## Phase 1 (v0.2) — Token 经济学（主线 A）
+## Phase 1 (v0.2) — Token 经济学（主线 A）✅ 已完成（2026-09-17）
 
-### 1.1 停机即上下文（对标 go-delve Automatic Context / pwno-mcp / BeaCox）
-- 新增复合行为：`continue_execution` / `wait_for_stop` 增加可选 `with_context: bool`。
-  命中时一次返回：stop_info + 关键寄存器子集（pc/sp/ax 系/参数寄存器）+ backtrace 顶 N 帧
-  + PC±8 反汇编。服务端组合现有 `regs`/`backtrace`/`disasm` 请求即可（参照
-  `crash_tools.py` 的 `try_verb` + `session.lock` 原子模式），**插件无需改动**。
-- `crash_report` 保留，作为崩溃场景的更深变体（memory@fault 等）。
-- 现有细粒度工具不动（逃生舱哲学：高频操作聚合，低频操作保留）。
+### 1.1 停机即上下文 ✅
+- `continue_execution(wait=True, with_context=True)`：一次调用完成 resume →
+  等停 → 返回 stop_info + 关键寄存器子集（x86/ARM 常用集，未知架构回退全量）+
+  backtrace 顶 N 帧 + PC 附近反汇编（`tools/stop_context.py`，复用 crash_report
+  的持锁 try_verb 模式，插件零改动）。
+- `wait_for_stop(with_context=True)` 同样支持。默认行为（立即返回）保持不变；
+  `crash_report` 保留为崩溃场景的更深变体。
 
-### 1.2 输出治理（对标 veh / BeaCox）
-- 所有列表型输出带精确 `truncated` 计数（丢弃多少条），禁止静默截断。
-- 大结果（> 配置阈值）落盘 `%GDB_MCP_LOG_DIR%/results/`，响应只回
-  `path + sha256 + 总行数 + 前 N 行`，新工具 `read_result(path, offset, limit)` 按需读回。
-- `execute_command` 是最大的 token 漏洞：pwndbg `heap`/`vmmap` 轻则几千 token。
-  除分页外，为高频 pwndbg 命令写**解析器**（不重实现）：`vmmap`/`info proc mappings`
-  → 结构化 segments（现在 `mem_map` 只回原文，`crash_report` 只取头 40 行文本）。
+### 1.2 输出治理 ✅（精确丢弃计数一项以布尔标记+total_lines 替代）
+- `execute_command` 分页（Phase 0 已有）+ **大结果落盘**：超过
+  `GDB_MCP_RESULT_INLINE_LIMIT`（默认 16k 字符）自动存盘
+  （内容寻址去重），响应只回 preview + `result_file`/`result_sha256`，
+  新工具 `read_result(path, offset, limit)` 按行续读（带路径越界校验）。
+- `get_memory_map` 返回**结构化 segments**（start/end/size/offset/perms/
+  objfile，`output.parse_proc_mappings` 容错解析，不依赖 pwndbg）；
+  `crash_report` 的 memory_map 同步结构化。
+- `backtrace`/`disasm` 响应带 `truncated` 标记（插件多走一帧/一条探测；
+  未做全栈游走的精确丢弃计数——对模型用途布尔+total_lines 已足够）。
+- eval 响应始终携带精确 `total_lines`。
 
-### 1.3 事件环形缓冲（对标 x64dbg GetEventLog）
-- `push_notification` 时同时 append 到 `session.event_log`（deque maxlen，带单调序号与
-  时间戳），新增 `get_events(last=N)`。改动 ~20 行，解决"事件发生在两次调用之间"。
-- 插件侧顺手加 `new_objfile`/库加载事件（dashboard 分支的 hello features 里已出现过）。
+### 1.3 事件环形缓冲 ✅
+- `Session.event_log`（deque maxlen=100，单调 seq + 时间戳），记录
+  connected / stop / running / exited / prompt / disconnected；
+  新工具 `get_events(last=N)` 兜底"两次调用之间的事件"。
 
-### 1.4 工具分档（对标 BeaCox tool-profile / veh lazy gateway）
-- `GDB_MCP_TOOL_PROFILE=core|full`：core 只注册 10~12 个高频工具，其余经 full 档或
-  逃生舱 `execute_command` 可达。降低每次请求的 schema token 成本。
-- 顺带精简过长的工具 docstring（schema 成本）。
+### 1.4 工具分档 ✅
+- `GDB_MCP_TOOL_PROFILE=core`（12 个高频工具）| `full`（全部 29 个）。
+  server instructions 已指向 one-call 模式。
 
 ## Phase 2 (v0.3) — 漏洞工作流纵深（主线 B，护城河）
 

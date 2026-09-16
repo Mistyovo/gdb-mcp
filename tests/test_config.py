@@ -5,6 +5,23 @@ import pytest
 from gdb_mcp.config import Config, DEFAULTS
 
 
+class TestPhase1Options:
+    def test_tool_profile_default_and_validation(self):
+        assert Config().tool_profile == "full"
+        with pytest.raises(ValueError):
+            Config(tool_profile="mega").validate()
+
+    def test_result_inline_limit_default(self):
+        assert Config().result_inline_limit == DEFAULTS["result_inline_limit"]
+
+    def test_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_TOOL_PROFILE", "core")
+        monkeypatch.setenv("GDB_MCP_RESULT_INLINE_LIMIT", "2048")
+        cfg = Config.from_env()
+        assert cfg.tool_profile == "core"
+        assert cfg.result_inline_limit == 2048
+
+
 class TestDefaults:
     def test_factory_defaults(self):
         cfg = Config()

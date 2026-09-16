@@ -1011,7 +1011,8 @@ class Plugin(object):
             frames.append(self._frame_entry(frame, level))
             frame = frame.older()
             level += 1
-        return {"frames": frames}
+        # one extra walk tells the caller the stack continues
+        return {"frames": frames, "truncated": frame is not None}
 
     def _handle_disasm(self, params):
         count = params.get("count", 16)
@@ -1038,20 +1039,26 @@ class Plugin(object):
             except Exception:
                 raise PluginError("NO_INFERIOR", "no architecture available")
         insns = []
+        truncated = False
         try:
-            for ins in arch.disassemble(start, count=count):
-                insns.append(
-                    {
-                        "addr": "0x%x" % int(ins["addr"]),
-                        "size": int(ins["length"]),
-                        "asm": str(ins["asm"]),
-                    }
-                )
+            # ask for one extra instruction so we can report continuation
+            fetched = list(arch.disassemble(start, count=count + 1))
         except gdb.MemoryError as exc:
             raise PluginError(
                 "MEMORY_ERROR", "cannot disassemble at 0x%x: %s" % (start, exc)
             )
-        return {"start": "0x%x" % start, "instructions": insns}
+        if len(fetched) > count:
+            truncated = True
+            fetched = fetched[:count]
+        for ins in fetched:
+            insns.append(
+                {
+                    "addr": "0x%x" % int(ins["addr"]),
+                    "size": int(ins["length"]),
+                    "asm": str(ins["asm"]),
+                }
+            )
+        return {"start": "0x%x" % start, "instructions": insns, "truncated": truncated}
 
     def _handle_evaluate(self, params):
         expr = params.get("expression")

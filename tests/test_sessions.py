@@ -15,11 +15,13 @@ from gdb_mcp.errors import (
 from gdb_mcp.sessions import (
     CONNECTING,
     DISCONNECTED,
+    EVENT_LOG_LIMIT,
     EXITED,
     READY,
     RESERVED,
     RUNNING,
     STOPPED,
+    Session,
     SessionRegistry,
 )
 
@@ -369,3 +371,45 @@ class TestInfo:
         assert info["arch"] == "x86_64"
         assert info["pwndbg"] is True
         assert info["inferior"] == "/tmp/vuln"
+
+
+class TestEventRing:
+    def test_records_are_bounded_and_ordered(self):
+        s = Session(session_id="s-ev")
+        for i in range(EVENT_LOG_LIMIT + 5):
+            s.record_event("stop", {"i": i})
+        assert len(s.event_log) == EVENT_LOG_LIMIT
+        events = s.recent_events(3)
+        assert [e["payload"]["i"] for e in events] == [
+            EVENT_LOG_LIMIT + 2,
+            EVENT_LOG_LIMIT + 3,
+            EVENT_LOG_LIMIT + 4,
+        ]
+        assert events[-1]["seq"] == EVENT_LOG_LIMIT + 5
+
+    def test_recent_events_zero_returns_empty(self):
+        s = Session(session_id="s-ev0")
+        s.record_event("stop", {})
+        assert s.recent_events(0) == []
+
+    @pytest.mark.asyncio
+    async def test_push_notification_records_event(self):
+        s = Session(session_id="s-ev2")
+        await s.push_notification("stop", {"pc": "0x401000"})
+        await s.push_notification("exited", {"exit_code": 0})
+        kinds = [e["event"] for e in s.recent_events(10)]
+        assert kinds == ["stop", "exited"]
+        assert s.recent_events(1)[0]["event"] == "exited"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_recorded(self):
+        s = Session(session_id="s-ev3")
+        s.writer = FakeWriter()
+        await s.on_disconnect()
+        assert s.recent_events(1)[0]["event"] == "disconnected"
+
+    def test_register_hello_records_connected(self):
+        registry = SessionRegistry(Config())
+        s = registry.register_hello(hello(), FakeWriter())
+        kinds = [e["event"] for e in s.recent_events(10)]
+        assert kinds == ["connected"]

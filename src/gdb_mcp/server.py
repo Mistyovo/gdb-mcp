@@ -31,8 +31,11 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
         instructions=(
             "gdb-mcp v%s drives a local Linux gdb (possibly with pwndbg) "
             "for binary exploitation. Sessions are gdb processes connected "
-            "via the in-gdb plugin. Typical crash-triage flow: "
-            "continue_execution -> wait_for_stop -> crash_report."
+            "via the in-gdb plugin. One-call stop inspection: "
+            "continue_execution(wait=True, with_context=True) resumes and "
+            "returns the stop reason plus registers/backtrace/disassembly "
+            "in a single response; crash_report does deeper crash triage; "
+            "get_events surfaces events that happened between calls."
         )
         % __version__,
     )

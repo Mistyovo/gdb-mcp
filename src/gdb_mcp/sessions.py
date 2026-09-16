@@ -20,6 +20,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,9 @@ STOPPED_STATES = frozenset({CONNECTING, READY, STOPPED, EXITED})
 #: States in which a session counts as a live gdb session for auto-select.
 ACTIVE_STATES = frozenset({CONNECTING, READY, RUNNING, STOPPED, EXITED})
 
+#: Maximum number of events kept per session for get_events.
+EVENT_LOG_LIMIT = 100
+
 
 @dataclass
 class Session:
@@ -89,6 +93,11 @@ class Session:
     stop_gen: int = 0
     #: incremented only by authoritative plugin/lifecycle events
     state_gen: int = 0
+    #: ring of protocol/lifecycle events, newest last (for get_events)
+    event_log: deque = field(
+        default_factory=lambda: deque(maxlen=EVENT_LOG_LIMIT)
+    )
+    event_seq: int = 0
 
     _next_id: int = field(default=1, init=False)
 
@@ -183,9 +192,29 @@ class Session:
 
     # -- notifications ------------------------------------------------------
 
+    def record_event(self, event: str, payload: dict) -> None:
+        """Append to the per-session event ring (get_events reads it)."""
+        self.event_seq += 1
+        self.event_log.append(
+            {
+                "seq": self.event_seq,
+                "ts": round(time.time(), 3),
+                "event": event,
+                "payload": payload,
+            }
+        )
+
+    def recent_events(self, last: int = 20) -> list[dict]:
+        """The most recent ``last`` events, oldest first."""
+        last = max(0, last)
+        if not last:
+            return []
+        return list(self.event_log)[-last:]
+
     async def push_notification(self, event: str, payload: dict) -> None:
         """Apply a plugin notification (called by the tcp_listener)."""
         self.state_gen += 1
+        self.record_event(event, payload)
         if event == "running":
             self.state = RUNNING
         elif event == "stop":
@@ -240,6 +269,7 @@ class Session:
         """Socket closed: fail pending requests, wake stop waiters."""
         self.state = DISCONNECTED
         self.state_gen += 1
+        self.record_event("disconnected", {})
         self.writer = None
         for fut in self.pending.values():
             if not fut.done():
@@ -355,6 +385,14 @@ class SessionRegistry:
         pid = hello.get("pid")
         if isinstance(pid, int):
             self._by_pid[pid] = session.session_id
+        session.record_event(
+            "connected",
+            {
+                "pid": pid,
+                "inferior": hello.get("inferior"),
+                "pwndbg": hello.get("pwndbg"),
+            },
+        )
         log.debug(
             "hello from pid=%s arch=%s -> session %s",
             pid,

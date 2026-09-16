@@ -9,6 +9,7 @@ from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.server import build_app
 from gdb_mcp.sessions import EXITED, RUNNING, SessionRegistry
+from gdb_mcp.tools import CORE_TOOLS
 
 from test_sessions import FakeWriter, hello
 
@@ -24,8 +25,13 @@ class FakeContext:
 
 
 @pytest.fixture
-def env():
-    cfg = Config(request_timeout=5.0, max_mem_read=1024)
+def env(tmp_path):
+    cfg = Config(
+        request_timeout=5.0,
+        max_mem_read=1024,
+        log_dir=tmp_path / "logs",
+        result_inline_limit=64,
+    )
     ids = iter("s-%03d" % i for i in range(100))
     registry = SessionRegistry(cfg, session_id_factory=lambda: next(ids))
     app = build_app(cfg, registry)
@@ -522,7 +528,20 @@ CRASH_SCRIPT = [
     ("read_mem", {"addr": 0x401000, "hex": "90", "ascii": ".", "unreadable": [], "partial": False}),
     ("read_mem", {"addr": 0x7FFFFFFFE000, "hex": "41", "ascii": "A", "unreadable": [], "partial": False}),
     ("read_mem", {"addr": 0x41414141, "hex": "42", "ascii": "B", "unreadable": [], "partial": False}),
-    ("mem_map", {"output": "m1\nm2\n", "truncated": False}),
+    (
+        "mem_map",
+        {
+            "output": (
+                "          Start Addr           End Addr       Size     Offset  Perms  objfile\n"
+                "          0x555555554000     0x555555555000     0x1000        0x0"
+                "  r--p   /usr/bin/vuln\n"
+                "          0x7ffff7dd0000     0x7ffff7dfd000    0x2d000        0x0"
+                "  r--p   /usr/lib/x86_64-linux-gnu/libc.so.6\n"
+            ),
+            "truncated": False,
+            "total_lines": 3,
+        },
+    ),
 ]
 
 
@@ -558,7 +577,11 @@ class TestCrashReport:
         assert report["memory_at_pc"]["hex"] == "90"
         assert report["memory_at_sp"]["hex"] == "41"
         assert report["memory_at_fault_addr"]["hex"] == "42"
-        assert report["memory_map_head"] == ["m1", "m2"]
+        mmap = report["memory_map"]
+        assert mmap["total_segments"] == 2
+        assert mmap["segments"][0]["objfile"] == "/usr/bin/vuln"
+        assert mmap["segments"][1]["size"] == 0x2D000
+        assert mmap["truncated"] is False
         assert report["warnings"] == []
 
     @pytest.mark.asyncio
@@ -580,7 +603,7 @@ class TestCrashReport:
         report = await task
         assert report["registers"] == {}
         assert "memory_at_sp" not in report
-        assert "memory_map_head" not in report
+        assert "memory_map" not in report
         assert any("regs:" in w for w in report["warnings"])
         assert any("mem_map:" in w for w in report["warnings"])
 
@@ -625,3 +648,267 @@ class TestSessionResolution:
         req = await respond_to(s, s.writer, {"breakpoints": []})
         assert req["verb"] == "breakpoints"
         assert await task == {"breakpoints": []}
+
+
+CONTEXT_SCRIPT = [
+    (
+        "regs",
+        {
+            "regs": {
+                "rax": "0x1",
+                "rsp": "0x7fffffffe000",
+                "rip": "0x401000",
+                "xmm0": "0x0",
+            }
+        },
+    ),
+    (
+        "backtrace",
+        {
+            "frames": [{"level": 0, "pc": "0x401000", "function": "vuln"}],
+            "truncated": False,
+        },
+    ),
+    (
+        "disasm",
+        {
+            "start": "0x400ff0",
+            "instructions": [{"addr": "0x400ff0", "size": 4, "asm": "nop"}],
+            "truncated": False,
+        },
+    ),
+]
+
+
+class TestStopContext:
+    @pytest.mark.asyncio
+    async def test_wait_for_stop_with_context(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", {"signal": "SIGSEGV", "pc": "0x401000"})
+        task = asyncio.create_task(
+            run_tool(
+                tools["wait_for_stop"],
+                {"with_context": True, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        for verb, result in CONTEXT_SCRIPT:
+            req = await respond_to(s, s.writer, result)
+            assert req["verb"] == verb
+        result = await task
+        assert result["stopped"] is True
+        context = result["context"]
+        assert context["registers"]["rip"] == "0x401000"
+        assert "xmm0" not in context["registers"]  # key-register filter
+        assert context["backtrace"][0]["function"] == "vuln"
+        assert context["disassembly"][0]["asm"] == "nop"
+        assert context["warnings"] == []
+
+    @pytest.mark.asyncio
+    async def test_wait_for_stop_without_context(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", {"pc": "0x401000"})
+        result = await run_tool(
+            tools["wait_for_stop"], {"session_id": s.session_id}, ctx_for(env)
+        )
+        assert result["stopped"] is True
+        assert "context" not in result
+
+    @pytest.mark.asyncio
+    async def test_continue_wait_with_context(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["continue_execution"],
+                {"wait": True, "with_context": True, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"state": "running"})
+        assert req["verb"] == "continue"
+        # the inferior stops while the tool call is waiting
+        await s.push_notification("stop", {"signal": "SIGSEGV", "pc": "0x401000"})
+        for _, result in CONTEXT_SCRIPT:
+            await respond_to(s, s.writer, result)
+        result = await task
+        assert result["resumed"] is True
+        assert result["stopped"] is True
+        assert result["stop_info"]["pc"] == "0x401000"
+        assert result["context"]["registers"]["rip"] == "0x401000"
+
+    @pytest.mark.asyncio
+    async def test_continue_wait_timeout_has_no_context(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["continue_execution"],
+                {"wait": True, "timeout_ms": 100, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"state": "running"})
+        result = await task
+        assert result["stopped"] is False
+        assert result["state"] == RUNNING
+        assert "context" not in result
+
+    @pytest.mark.asyncio
+    async def test_continue_wait_rejects_tiny_timeout(self, env):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        with pytest.raises(ValueError):
+            await run_tool(
+                tools["continue_execution"],
+                {"wait": True, "timeout_ms": 1},
+                ctx_for(env),
+            )
+
+
+class TestGetEvents:
+    def test_events_recorded_and_ordered(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)  # hello records a "connected" event
+        s.record_event("stop", {"pc": "0x401000"})
+        s.record_event("running", {})
+        result = asyncio.run(
+            run_tool(
+                tools["get_events"],
+                {"last": 2, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        assert [e["event"] for e in result["events"]] == ["stop", "running"]
+        seqs = [e["seq"] for e in result["events"]]
+        assert seqs[1] > seqs[0]
+        assert result["total_recorded"] == 3
+
+    def test_get_events_validates_last(self, env):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        for bad in (0, -1, True, 101):
+            with pytest.raises(ValueError):
+                asyncio.run(
+                    run_tool(tools["get_events"], {"last": bad}, ctx_for(env))
+                )
+
+
+class TestResultStore:
+    @pytest.mark.asyncio
+    async def test_large_output_stored_and_read_back(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        big = "\n".join("line-%04d" % i for i in range(50))  # > inline limit
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {"command": "heap", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(
+            s, s.writer, {"output": big, "total_lines": 50, "truncated": False}
+        )
+        result = await task
+        assert result["truncated"] is True
+        assert result["result_file"]
+        assert len(result["output"]) < len(big)
+        assert result["output"].startswith("line-0000")
+        tail = await run_tool(
+            tools["read_result"],
+            {"path": result["result_file"], "offset": 45},
+            ctx_for(env),
+        )
+        assert tail["total_lines"] == 50
+        assert tail["output"].splitlines()[0] == "line-0045"
+        assert tail["truncated"] is False
+        assert tail["sha256"] == result["result_sha256"]
+
+    @pytest.mark.asyncio
+    async def test_small_output_not_stored(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {"command": "vmmap", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(
+            s, s.writer, {"output": "short", "total_lines": 1, "truncated": False}
+        )
+        result = await task
+        assert "result_file" not in result
+        assert result["output"] == "short"
+
+    @pytest.mark.asyncio
+    async def test_read_result_rejects_paths_outside_store(self, env):
+        _, _, tools = env
+        for bad in ("C:/Windows/win.ini", "relative.txt", "logs/../etc/passwd"):
+            with pytest.raises(GdbMcpError) as ei:
+                await run_tool(
+                    tools["read_result"], {"path": bad}, ctx_for(env)
+                )
+            assert ei.value.code == "BAD_PARAMS"
+
+
+class TestToolProfile:
+    def test_core_profile_registers_subset(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", tool_profile="core")
+        app = build_app(cfg, SessionRegistry(cfg))
+        names = set(app._tool_manager._tools)
+        assert names == CORE_TOOLS
+        assert "write_memory" not in names
+        assert "execute_command" in names
+
+    def test_full_profile_registers_everything(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l")
+        app = build_app(cfg, SessionRegistry(cfg))
+        names = set(app._tool_manager._tools)
+        assert "write_memory" in names
+        assert "kill_session" in names
+        assert len(names) > len(CORE_TOOLS)
+
+
+class TestMemoryMap:
+    @pytest.mark.asyncio
+    async def test_get_memory_map_structured(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["get_memory_map"], {"session_id": s.session_id}, ctx_for(env)
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            {
+                "output": (
+                    "          Start Addr           End Addr       Size"
+                    "     Offset  Perms  objfile\n"
+                    "          0x555555554000     0x555555555000     0x1000"
+                    "        0x0  r--p   /usr/bin/vuln\n"
+                    "          0x7ffff7dd0000     0x7ffff7dfd000    0x2d000"
+                    "        0x0  r--p   /lib/x86_64-linux-gnu/libc.so.6\n"
+                ),
+                "total_lines": 3,
+                "truncated": False,
+            },
+        )
+        assert req["verb"] == "mem_map"
+        result = await task
+        assert result["count"] == 2
+        assert result["segments"][0] == {
+            "start": "0x555555554000",
+            "end": "0x555555555000",
+            "size": 0x1000,
+            "offset": "0x0",
+            "perms": "r--p",
+            "objfile": "/usr/bin/vuln",
+        }
+        assert result["truncated"] is False

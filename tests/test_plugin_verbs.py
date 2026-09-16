@@ -219,6 +219,7 @@ class TestBacktrace:
         assert frames[0]["file"] == "a.c" and frames[0]["line"] == 10
         assert frames[1]["function"] == "helper"
         assert frames[1]["line"] == 42
+        assert resp["result"]["truncated"] is False
 
     def test_max_frames_cap(self, plugin):
         set_inferior()
@@ -229,6 +230,7 @@ class TestBacktrace:
             f = nxt
         resp = call(plugin, "backtrace", {"max_frames": 3})
         assert len(resp["result"]["frames"]) == 3
+        assert resp["result"]["truncated"] is True
 
     def test_no_frame(self, plugin):
         set_inferior()
@@ -244,13 +246,16 @@ class TestDisasm:
         assert r["start"] == "0x401000"
         assert len(r["instructions"]) == 5
         assert r["instructions"][0] == {"addr": "0x401000", "size": 4, "asm": "nop"}
-        assert mock_gdb.state.arch.disasm_calls == [(0x401000, 5)]
+        # one extra instruction is requested to detect continuation
+        assert mock_gdb.state.arch.disasm_calls == [(0x401000, 6)]
+        assert r["truncated"] is True
 
     def test_default_pc(self, plugin):
         set_inferior()
         resp = call(plugin, "disasm", {})
         assert resp["result"]["start"] == "0x401000"
         assert len(resp["result"]["instructions"]) == 16
+        assert resp["result"]["truncated"] is False
 
 
 class TestEvaluate:

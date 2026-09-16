@@ -74,6 +74,60 @@ def fmt_addr(value: int) -> str:
     return "0x%x" % value
 
 
+_PERMS_RE = re.compile(r"^[r-][w-][x-][psa-]?$")
+
+
+def parse_proc_mappings(text: str) -> list[dict]:
+    """Parse ``info proc mappings`` output into structured segments.
+
+    Accepts the common gdb column layouts (start end size offset perms
+    [objfile], with or without size/perms); non-conforming lines (banner,
+    header) are skipped. Addresses come back as hex strings, size in bytes.
+    """
+    segments: list[dict] = []
+    for raw in text.splitlines():
+        parts = raw.strip().split()
+        if (
+            len(parts) < 2
+            or not parts[0].startswith("0x")
+            or not parts[1].startswith("0x")
+        ):
+            continue
+        try:
+            start = int(parts[0], 16)
+            end = int(parts[1], 16)
+        except ValueError:
+            continue
+        hex_vals: list[int] = []
+        perms = None
+        rest: list[str] = []
+        for tok in parts[2:]:
+            if len(hex_vals) < 2 and perms is None and tok.startswith("0x"):
+                try:
+                    hex_vals.append(int(tok, 16))
+                    continue
+                except ValueError:
+                    pass
+            if perms is None and _PERMS_RE.match(tok):
+                perms = tok
+                continue
+            rest.append(tok)
+        size = hex_vals[0] if hex_vals else end - start
+        segment: dict = {
+            "start": fmt_addr(start),
+            "end": fmt_addr(end),
+            "size": size,
+        }
+        if len(hex_vals) > 1:
+            segment["offset"] = fmt_addr(hex_vals[1])
+        if perms:
+            segment["perms"] = perms
+        if rest:
+            segment["objfile"] = " ".join(rest)
+        segments.append(segment)
+    return segments
+
+
 def tail_text_file(
     path: str, lines: int = 200, max_bytes: int = 1024 * 1024
 ) -> tuple[str, bool]:

@@ -32,6 +32,8 @@ DEFAULTS = {
     "gc_idle_reserved": 300.0,
     "attach_timeout_ms": 30_000,
     "launch_timeout_ms": 10_000,
+    "tool_profile": "full",
+    "result_inline_limit": 16_000,
 }
 
 
@@ -56,6 +58,10 @@ class Config:
     gc_idle_reserved: float = DEFAULTS["gc_idle_reserved"]
     attach_timeout_ms: int = DEFAULTS["attach_timeout_ms"]
     launch_timeout_ms: int = DEFAULTS["launch_timeout_ms"]
+    #: which MCP tools are registered: "full" or "core" (a minimal set)
+    tool_profile: str = DEFAULTS["tool_profile"]
+    #: tool outputs longer than this are stored on disk and previewed
+    result_inline_limit: int = DEFAULTS["result_inline_limit"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -81,6 +87,10 @@ class Config:
         for name in ("attach_timeout_ms", "launch_timeout_ms"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.tool_profile not in ("core", "full"):
+            raise ValueError("tool_profile must be 'core' or 'full'")
+        if self.result_inline_limit < 1:
+            raise ValueError("result_inline_limit must be a positive integer")
         minimum_line_size = max(self.eval_output_limit, self.max_mem_read * 2) + 4096
         if self.max_async_line < minimum_line_size:
             raise ValueError(
@@ -133,6 +143,9 @@ class Config:
             or DEFAULTS["attach_timeout_ms"],
             launch_timeout_ms=env("LAUNCH_TIMEOUT_MS", int)
             or DEFAULTS["launch_timeout_ms"],
+            tool_profile=env("TOOL_PROFILE", str) or DEFAULTS["tool_profile"],
+            result_inline_limit=env("RESULT_INLINE_LIMIT", int)
+            or DEFAULTS["result_inline_limit"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:

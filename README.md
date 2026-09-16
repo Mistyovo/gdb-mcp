@@ -122,24 +122,34 @@ gdb 内还有 `mcp status|reconnect|detach` 命令。
 ## 崩溃定位流程（LLM 视角）
 
 ```
-continue_execution → wait_for_stop → crash_report（一次调用返回：
-  signal / fault_addr / pc / thread / registers / backtrace /
-  disasm(PC±) / memory@PC / memory@SP / memory@fault / 内存映射头部）
+# 一步到位（推荐）：resume + 等停 + 上下文，一次调用
+continue_execution(wait=True, with_context=True) →
+  stop_info(signal/fault_addr/pc) + 关键寄存器 + backtrace + disasm(PC附近)
+# 崩溃现场需要更深细节时：
+crash_report（一次调用返回：signal / fault_addr / pc / thread / registers /
+  backtrace / disasm(PC±) / memory@PC / memory@SP / memory@fault /
+  结构化内存映射）
 → evaluate / read_memory / write_memory 验证利用思路
-→ execute_command("vmmap") 拿 libc/PIE 基址
+→ execute_command("vmmap") 拿 libc/PIE 基址（大输出自动落盘，read_result 续读）
 → set_reg / write_memory 现场修补
 → continue_execution 复跑
+两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（27 个）
+## 工具一览（29 个）
 
 | 类别 | 工具 |
 |---|---|
-| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` |
-| 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容）`continue_execution` `interrupt` `wait_for_stop` `get_stop_reason` |
+| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` |
+| 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`get_stop_reason` `read_result` |
 | 崩溃定位 | `crash_report` |
-| 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` `load_target` |
+| 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程）`list_breakpoints` `manage_breakpoint` |
+
+`GDB_MCP_TOOL_PROFILE=core` 只注册 12 个高频工具（省每次请求的 schema
+token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
+`truncated` 标记；`execute_command` 输出超过内联阈值时自动存盘并在响应中
+给出 `result_file`/`result_sha256`。
 
 所有工具带可选 `session_id`（唯一会话自动选中；多会话时报错并列出）。地址参数均支持 gdb 表达式（`main+0x20`、`&puts@got`，PIE 按实时基址解析）。
 
@@ -156,6 +166,7 @@ continue_execution → wait_for_stop → crash_report（一次调用返回：
 | `GDB_MCP_DEBUG` | gdb 进程 | `1` = 插件调试输出（stderr） |
 | `GDB_MCP_WSL_DISTRO` / `GDB_MCP_LOG_DIR` | 服务器 | launch 工具配置 |
 | `GDB_MCP_REQUEST_TIMEOUT` / `GDB_MCP_HEARTBEAT_SEC` | 服务器 | 请求与心跳超时 |
+| `GDB_MCP_TOOL_PROFILE` / `GDB_MCP_RESULT_INLINE_LIMIT` | 服务器 | 工具分档（core/full）与大结果内联阈值（字符数） |
 | `GDB_MCP_MAX_MEM_READ` / `GDB_MCP_MAX_ASYNC_LINE` | 两侧 | 内存读取与协议帧上限 |
 
 部分内存读取返回 `segments`（每段都含实际 `addr`、`length`、`hex` 和

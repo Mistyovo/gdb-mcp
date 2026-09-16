@@ -1,12 +1,16 @@
-"""Execution-control tools (continue/step/interrupt/wait)."""
+"""Execution-control tools (continue/step/interrupt/wait) and result store."""
 
 from __future__ import annotations
 
+import asyncio
+
 from mcp.server.fastmcp import Context
 
+from gdb_mcp.results import load_result_slice, store_result
 from gdb_mcp.sessions import RUNNING
 
 from ._common import check_stopped, config_from, resolve_gdb
+from .stop_context import collect_stop_context
 
 _MODES = ("continue", "step", "next", "stepi", "nexti", "finish", "until")
 
@@ -26,7 +30,10 @@ def register(app, registry, config) -> None:
         search, ...) or any other gdb CLI command. Works while the
         inferior is running (queued until the next stop). Large output
         should be read in line ranges: pass offset (0-based) and limit to
-        page through; every response carries total_lines and truncated."""
+        page through; responses carry total_lines and truncated. Outputs
+        exceeding the inline limit are stored on disk — the response then
+        carries result_file/result_sha256 and read_result serves the
+        rest."""
         if offset is not None and (
             isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
         ):
@@ -35,6 +42,7 @@ def register(app, registry, config) -> None:
             isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
         ):
             raise ValueError("limit must be a positive int")
+        cfg = config_from(ctx)
         session = resolve_gdb(ctx, session_id)
         params = {"command": command, "keep_ansi": keep_ansi}
         if offset is not None:
@@ -44,31 +52,83 @@ def register(app, registry, config) -> None:
         result = await session.request(
             "eval",
             params,
-            timeout=config_from(ctx).request_timeout,
+            timeout=cfg.request_timeout,
         )
+        output = result.get("output")
+        if isinstance(output, str) and len(output) > cfg.result_inline_limit:
+            stored = await asyncio.to_thread(store_result, cfg.log_dir, output)
+            result["output"] = (
+                output[: cfg.result_inline_limit] + "\n...[stored to result_file]"
+            )
+            result["truncated"] = True
+            result["result_file"] = stored["path"]
+            result["result_sha256"] = stored["sha256"]
         return result
+
+    @app.tool()
+    def read_result(
+        path: str,
+        offset: int = 0,
+        limit: int | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """Read a line range from a stored result file (the result_file
+        path returned when an execute_command output was too large for an
+        inline response). offset is a 0-based line number; the response
+        carries total_lines and truncated."""
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative int")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+        ):
+            raise ValueError("limit must be a positive int")
+        cfg = config_from(ctx)
+        return load_result_slice(cfg.log_dir, path, offset, limit)
 
     @app.tool()
     async def continue_execution(
         mode: str = "continue",
         until_addr: str | None = None,
+        wait: bool = False,
+        timeout_ms: int = 30000,
+        with_context: bool = False,
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
         """Resume the inferior: continue / step / next / stepi / nexti /
-        finish / until. Returns immediately; use wait_for_stop to wait for
-        the next stop event, or rely on the async stop notification."""
+        finish / until. By default returns immediately ({'state':
+        'running'}). With wait=True the call blocks until the next stop
+        (or timeout_ms) and returns the stop reason; add
+        with_context=True to also get key registers, backtrace and
+        disassembly around PC in the same response — the one-call
+        breakpoint-hit pattern."""
         if mode not in _MODES:
             raise ValueError("mode must be one of %s" % ", ".join(_MODES))
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 100:
+            raise ValueError("timeout_ms must be an int >= 100")
+        cfg = config_from(ctx)
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         params = {}
         if mode == "until" and until_addr:
             params["until_addr"] = until_addr
         result = await session.request(
-            mode, params, timeout=config_from(ctx).request_timeout
+            mode, params, timeout=cfg.request_timeout
         )
-        return result
+        if not wait:
+            return result
+        stopped = await session.wait_for_stop(timeout=max(0.1, timeout_ms / 1000.0))
+        response = {
+            "session_id": session.session_id,
+            "resumed": True,
+            "stopped": stopped,
+            "state": session.state,
+            "stop_info": session.stop_info,
+            "exited_code": session.exited_code,
+        }
+        if with_context and stopped:
+            response["context"] = await collect_stop_context(session, cfg)
+        return response
 
     @app.tool()
     async def interrupt(session_id: str | None = None, ctx: Context = None) -> dict:
@@ -88,20 +148,26 @@ def register(app, registry, config) -> None:
     @app.tool()
     async def wait_for_stop(
         timeout_ms: int = 30000,
+        with_context: bool = False,
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
         """Wait until the inferior stops (signal, breakpoint, exit) or the
         timeout elapses. Returns immediately when the inferior is already
-        stopped."""
+        stopped. With with_context=True the response also carries key
+        registers, backtrace and disassembly around PC."""
+        cfg = config_from(ctx)
         session = resolve_gdb(ctx, session_id)
         stopped = await session.wait_for_stop(timeout=max(0.1, timeout_ms / 1000.0))
-        return {
+        result = {
             "session_id": session.session_id,
             "stopped": stopped,
             "state": session.state,
             "stop_info": session.stop_info,
         }
+        if with_context and stopped:
+            result["context"] = await collect_stop_context(session, cfg)
+        return result
 
     @app.tool()
     def get_stop_reason(session_id: str | None = None, ctx: Context = None) -> dict:

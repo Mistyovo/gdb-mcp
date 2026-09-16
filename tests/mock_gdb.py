@@ -129,6 +129,8 @@ class MockReg:
 
 class MockArch:
     REGS = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip", "eflags"]
+    #: instruction stream ends here, so disassembly can run out
+    DISASM_END = 0x401000 + 0x40
 
     def __init__(self, name="x86_64"):
         self._name = name
@@ -142,10 +144,13 @@ class MockArch:
 
     def disassemble(self, start, count=16):
         self.disasm_calls.append((start, count))
-        return [
-            {"addr": start + 4 * i, "length": 4, "asm": "nop"}
-            for i in range(count)
-        ]
+        out = []
+        for i in range(count):
+            addr = start + 4 * i
+            if addr >= self.DISASM_END:
+                break
+            out.append({"addr": addr, "length": 4, "asm": "nop"})
+        return out
 
 
 class MockProgspace:

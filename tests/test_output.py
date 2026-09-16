@@ -6,9 +6,56 @@ from gdb_mcp.output import (
     decode_with_fallback,
     fmt_addr,
     hex_to_bytes,
+    parse_proc_mappings,
     strip_ansi,
     truncate_text,
 )
+
+
+class TestParseProcMappings:
+    def test_canonical_six_columns(self):
+        text = (
+            "          Start Addr           End Addr       Size     Offset"
+            "  Perms  objfile\n"
+            "          0x555555554000     0x555555555000     0x1000"
+            "        0x0  r--p   /usr/bin/vuln\n"
+            "          0x7ffff7dd0000     0x7ffff7dfd000    0x2d000"
+            "        0x0  r--p   /usr/lib/x86_64-linux-gnu/libc.so.6\n"
+        )
+        segs = parse_proc_mappings(text)
+        assert len(segs) == 2
+        assert segs[0] == {
+            "start": "0x555555554000",
+            "end": "0x555555555000",
+            "size": 0x1000,
+            "offset": "0x0",
+            "perms": "r--p",
+            "objfile": "/usr/bin/vuln",
+        }
+        assert segs[1]["size"] == 0x2D000
+        assert segs[1]["objfile"].endswith("libc.so.6")
+
+    def test_anon_mapping_without_objfile(self):
+        text = "    0x7ffff7800000     0x7ffff7801000     0x1000        0x0  rw-p\n"
+        segs = parse_proc_mappings(text)
+        assert segs == [
+            {
+                "start": "0x7ffff7800000",
+                "end": "0x7ffff7801000",
+                "size": 0x1000,
+                "offset": "0x0",
+                "perms": "rw-p",
+            }
+        ]
+
+    def test_skips_header_and_garbage(self):
+        text = "legend: some text\nnot a mapping line\n0xzz 0xyy bad\n"
+        assert parse_proc_mappings(text) == []
+
+    def test_size_defaults_to_span(self):
+        text = "0x1000 0x2000\n"
+        segs = parse_proc_mappings(text)
+        assert segs == [{"start": "0x1000", "end": "0x2000", "size": 0x1000}]
 
 
 class TestStripAnsi:

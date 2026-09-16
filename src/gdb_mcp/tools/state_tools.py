@@ -5,7 +5,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
-from gdb_mcp.output import hex_to_bytes
+from gdb_mcp.output import hex_to_bytes, parse_proc_mappings
 
 from ._common import check_stopped, config_from, resolve_gdb
 
@@ -192,14 +192,22 @@ def register(app, registry, config) -> None:
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
-        """Memory mappings of the inferior (`info proc mappings` — works
-        without pwndbg). For richer output use
-        execute_command('vmmap')."""
+        """Memory mappings of the inferior as structured segments
+        (start/end hex, size bytes, offset, perms, objfile), parsed from
+        `info proc mappings` — works without pwndbg. For the raw text use
+        execute_command('info proc mappings')."""
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
-        return await session.request(
+        result = await session.request(
             "mem_map", {}, timeout=config_from(ctx).request_timeout
         )
+        segments = parse_proc_mappings(result.get("output", ""))
+        return {
+            "segments": segments,
+            "count": len(segments),
+            "total_lines": result.get("total_lines"),
+            "truncated": bool(result.get("truncated", False)),
+        }
 
     @app.tool()
     async def load_target(

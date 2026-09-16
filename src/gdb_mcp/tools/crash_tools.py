@@ -5,6 +5,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.output import parse_proc_mappings
 from gdb_mcp.sessions import RUNNING
 
 from ._common import check_stopped, config_from, parse_hex_addr, resolve_gdb
@@ -88,7 +89,13 @@ def register(app, registry, config) -> None:
 
             mmap = await try_verb("mem_map", {})
             if mmap is not None:
-                lines = mmap.get("output", "").splitlines()
-                report["memory_map_head"] = lines[:40]
+                segments = parse_proc_mappings(mmap.get("output", ""))
+                head = segments[:24]
+                report["memory_map"] = {
+                    "segments": head,
+                    "total_segments": len(segments),
+                    "truncated": len(segments) > len(head)
+                    or bool(mmap.get("truncated", False)),
+                }
             report["warnings"] = warnings
         return report

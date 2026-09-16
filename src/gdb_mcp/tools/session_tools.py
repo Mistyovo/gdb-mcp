@@ -59,6 +59,26 @@ def register(app, registry, config) -> None:
         }
 
     @app.tool()
+    def get_events(
+        last: int = 20,
+        session_id: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """Recent session events (connected / stop / running / exited /
+        prompt / disconnected), oldest first, each with a monotonic seq.
+        Use this to catch events that happened between other tool calls
+        instead of re-polling state."""
+        if isinstance(last, bool) or not isinstance(last, int) or not (1 <= last <= 100):
+            raise ValueError("last must be an int between 1 and 100")
+        session = resolve_any(ctx, session_id)
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "events": session.recent_events(last),
+            "total_recorded": len(session.event_log),
+        }
+
+    @app.tool()
     async def get_process_output(
         tail_lines: int = 200,
         session_id: str | None = None,
