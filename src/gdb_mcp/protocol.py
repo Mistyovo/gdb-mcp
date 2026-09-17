@@ -43,6 +43,13 @@ ERROR_CODES = frozenset(
         "PLUGIN_ERROR",
         "DISCONNECTED",
         "PROTOCOL_MISMATCH",
+        "UNSAFE_BLOCKED",
+        "NO_PWNDBG",
+        "NO_JOURNAL",
+        "NO_RESULT",
+        "NO_LOG",
+        "NOT_LAUNCHED",
+        "EXITED",
     }
 )
 

@@ -391,7 +391,8 @@ class SessionRegistry:
             session.journal = Journal(
                 self.config.log_dir
                 / "journals"
-                / ("%s.jsonl" % session.session_id)
+                / ("%s.jsonl" % session.session_id),
+                load_existing=True,
             )
 
     def register_hello(self, hello: dict, writer: Any) -> Session:

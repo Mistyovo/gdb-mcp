@@ -66,8 +66,12 @@ def register(app, registry, config) -> None:
         check_stopped(session)
         policy_params = dict(params or {})
         policy_params["kind"] = kind
+        # policies loop plugin-side; a large fuzz sweep can legitimately
+        # run for minutes, so the default request timeout does not apply
         return await session.request(
-            "policy", policy_params, timeout=config_from(ctx).request_timeout
+            "policy",
+            policy_params,
+            timeout=max(config_from(ctx).request_timeout, 600.0),
         )
 
     @app.tool()

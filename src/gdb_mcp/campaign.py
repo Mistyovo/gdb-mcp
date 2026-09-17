@@ -87,7 +87,10 @@ def campaign_set(data: dict, section: str, key: str, value, evidence=None) -> di
     bucket = data.setdefault(section, {})
     if len(bucket) >= _SECTION_CAP and key not in bucket:
         raise ValueError("section %r is full" % section)
-    entry = {"value": value, "ts": round(time.time(), 3)}
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > 2048:
+        text = text[:2048] + "...<+%d chars>" % (len(text) - 2048)
+    entry = {"value": text, "ts": round(time.time(), 3)}
     if evidence:
         entry["evidence"] = str(evidence)[:256]
     bucket[str(key)[:128]] = entry

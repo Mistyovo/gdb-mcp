@@ -164,7 +164,8 @@ class _TimelineBreakpoint(gdb.Breakpoint):
                 entry["caller"] = "0x%x" % int(older.pc())
             args = {}
             for name in ("rdi", "rsi", "rdx", "rcx", "r8", "r9",
-                         "edi", "esi", "edx", "ecx"):
+                         "edi", "esi", "edx", "ecx",
+                         "x0", "x1", "x2", "x3", "w0", "w1", "w2", "w3"):
                 try:
                     args[name] = "0x%x" % int(frame.read_register(name))
                 except Exception:
@@ -1727,15 +1728,16 @@ class Plugin(object):
             try:
                 self._handle_continue_family(0, "continue", {})
             except PluginError as exc:
-                if exc.code != "INFERIOR_RUNNING":
-                    try:
-                        self._handle_bp_delete({"number": marker["number"]})
-                    except PluginError:
-                        pass
-                    crashes.append(
-                        {"round": rounds, "payload_index": index, "error": exc.message}
-                    )
-                    break
+                # a failed resume poisons the round; stop the sweep and
+                # report the failure instead of spinning on a bad state
+                try:
+                    self._handle_bp_delete({"number": marker["number"]})
+                except PluginError:
+                    pass
+                crashes.append(
+                    {"round": rounds, "payload_index": index, "error": exc.message}
+                )
+                break
             stop = self.stop_info or {}
             hit_numbers = stop.get("breakpoints") or []
             if marker["number"] in hit_numbers:

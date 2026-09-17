@@ -51,19 +51,52 @@ def _trim(value, depth: int = 0):
 
 
 class Journal:
-    """Append-only JSONL writer with an in-memory mirror for exports."""
+    """Append-only JSONL writer with an in-memory mirror for exports.
 
-    def __init__(self, path: Path):
+    The mirror is capped (``MIRROR_CAP``); the file always holds the full
+    history. ``load_existing`` re-reads the file so a session that
+    survives a server restart keeps a continuous journal for exports.
+    """
+
+    MIRROR_CAP = 20_000
+    LOAD_CAP = 50_000
+
+    def __init__(self, path: Path, load_existing: bool = False):
         self.path = Path(path)
         self._entries: list[dict] = []
+        self.head_truncated = False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+        if load_existing:
+            self._load_existing()
+
+    def _load_existing(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return
+        if len(lines) > self.LOAD_CAP:
+            self.head_truncated = True
+            lines = lines[-self.LOAD_CAP :]
+        entries: list[dict] = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue  # torn tail line from a crash mid-write
+            if isinstance(entry, dict):
+                entries.append(entry)
+        self._entries = entries
 
     def append(self, kind: str, data: dict) -> None:
         entry = {"ts": round(time.time(), 3), "kind": kind, **_trim(data)}
         self._entries.append(entry)
+        if len(self._entries) > self.MIRROR_CAP:
+            del self._entries[: len(self._entries) - self.MIRROR_CAP]
+            self.head_truncated = True
         try:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")

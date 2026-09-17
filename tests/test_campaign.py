@@ -77,6 +77,16 @@ class TestCampaignState:
         assert len(notes) == 32
         assert notes[-1]["text"] == "note 99"
 
+    def test_values_capped(self):
+        data = new_campaign()
+        campaign_set(data, "offsets", "huge", "A" * 5000)
+        stored = data["offsets"]["huge"]["value"]
+        assert len(stored) < 3000
+        assert "...<+" in stored
+        # non-string values are stringified then capped
+        campaign_set(data, "offsets", "obj", object())
+        assert isinstance(data["offsets"]["obj"]["value"], str)
+
     def test_detect_records_pc_control(self):
         data = new_campaign()
         pattern = cyclic_pattern(256)

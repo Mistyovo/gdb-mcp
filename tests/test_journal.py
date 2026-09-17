@@ -1,5 +1,7 @@
 """Tests for the session journal and gdbscript compilation."""
 
+import json
+
 from gdb_mcp.journal import Journal, _trim, compile_gdbscript
 
 
@@ -47,6 +49,43 @@ class TestJournal:
         journal.path = journal.path.parent / "no" / "such" / "dir" / "j.jsonl"
         journal.append("request", {"verb": "eval", "params": {}, "ok": True})
         assert len(journal) == 1
+
+    def test_restart_continuity(self, tmp_path):
+        path = tmp_path / "journals" / "s-1.jsonl"
+        first = Journal(path)
+        first.append("request", {"verb": "eval", "params": {"command": "x"}, "ok": True})
+        first.append("notification", {"event": "stop", "payload": {}})
+        # server restart: a fresh Journal over the same file re-reads it
+        second = Journal(path, load_existing=True)
+        assert len(second) == 2
+        assert second.entries()[0]["verb"] == "eval"
+        assert second.entries()[1]["event"] == "stop"
+        second.append("request", {"verb": "break", "params": {}, "ok": True})
+        assert len(second) == 3
+        # the file holds the full continuous history
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+
+    def test_torn_tail_line_tolerated(self, tmp_path):
+        path = tmp_path / "journals" / "torn.jsonl"
+        path.parent.mkdir(parents=True)
+        good = {"ts": 1.0, "kind": "request", "verb": "eval", "ok": True}
+        path.write_text(
+            json.dumps(good) + "\n" + '{"kind": "req', encoding="utf-8"
+        )
+        journal = Journal(path, load_existing=True)
+        assert len(journal) == 1
+
+    def test_mirror_cap_drops_oldest_from_memory_only(self, tmp_path):
+        path = tmp_path / "journals" / "cap.jsonl"
+        journal = Journal(path)
+        journal.MIRROR_CAP = 5
+        for i in range(8):
+            journal.append("request", {"verb": "eval", "params": {"i": i}, "ok": True})
+        assert len(journal) == 5
+        assert journal.entries()[0]["params"]["i"] == 3
+        assert journal.head_truncated is True
+        # the file keeps everything
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 8
 
 
 class TestCompileGdbscript:
