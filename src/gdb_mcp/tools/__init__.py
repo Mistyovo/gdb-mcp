@@ -12,6 +12,7 @@ from . import (
     campaign_tools,
     crash_tools,
     exec_tools,
+    experimental,
     heap_tools,
     launch_tools,
     session_tools,
@@ -26,6 +27,7 @@ TOOL_MODULES = (
     breakpoint_tools,
     heap_tools,
     campaign_tools,
+    experimental,
     crash_tools,
 )
 
