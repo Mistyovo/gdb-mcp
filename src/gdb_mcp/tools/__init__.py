@@ -11,6 +11,7 @@ from . import (
     breakpoint_tools,
     crash_tools,
     exec_tools,
+    heap_tools,
     launch_tools,
     session_tools,
     state_tools,
@@ -22,6 +23,7 @@ TOOL_MODULES = (
     exec_tools,
     state_tools,
     breakpoint_tools,
+    heap_tools,
     crash_tools,
 )
 

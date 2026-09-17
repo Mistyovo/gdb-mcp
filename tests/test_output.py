@@ -6,10 +6,67 @@ from gdb_mcp.output import (
     decode_with_fallback,
     fmt_addr,
     hex_to_bytes,
+    parse_pwndbg_bins,
     parse_proc_mappings,
     strip_ansi,
     truncate_text,
 )
+
+
+class TestParsePwndbgBins:
+    def test_full_parse(self):
+        text = (
+            "tcachebins\n"
+            "0x20 [  2]: 0x5555555592a0 —▸ 0x5555555592c0 ◂— 0x0\n"
+            "fastbins\n"
+            "empty\n"
+            "0x30: 0x555555559300 ◂— 0x0\n"
+            "unsorted bins\n"
+            "0x410 [ 1]: 0x5555555595a0 ◂— 0x7ffff7e1bce0\n"
+            "small bins\n"
+            "empty\n"
+            "large bins\n"
+            "empty\n"
+        )
+        r = parse_pwndbg_bins(text)
+        assert r["parsed"] is True
+        assert r["tcachebins"]["0x20"] == ["0x5555555592a0", "0x5555555592c0"]
+        # 'empty' is skipped; the following size line belongs to fastbins
+        assert r["fastbins"] == {"0x30": ["0x555555559300"]}
+        # the arena back-pointer is kept as-is; interpreting it is the
+        # model's job, guessing here would be lying
+        assert r["unsorted"] == {
+            "0x410": ["0x5555555595a0", "0x7ffff7e1bce0"]
+        }
+        assert r["small"] == {} and r["large"] == {}
+
+    def test_unrecognized_output(self):
+        r = parse_pwndbg_bins("pwndbg>gef➤  whatever\nno sections here\n")
+        assert r["parsed"] is False
+        assert r["tcachebins"] == {}
+
+    def test_case_insensitive_headers(self):
+        r = parse_pwndbg_bins("FastBins\n0x20: 0x1a0 ◂— 0x0\n")
+        assert r["parsed"] is True
+        assert r["fastbins"] == {"0x20": ["0x1a0"]}
+
+    def test_real_pwndbg_singular_headers(self):
+        # captured from pwndbg on kali (glibc 2.42): singular section names
+        text = (
+            "tcachebins\n"
+            "empty\n"
+            "unsortedbin\n"
+            "0x410 [ 1]: 0x5555555595a0 ◂— 0x7ffff7e1bce0\n"
+            "smallbins\n"
+            "empty\n"
+            "largebins\n"
+            "empty\n"
+        )
+        r = parse_pwndbg_bins(text)
+        assert r["parsed"] is True
+        assert r["tcachebins"] == {}
+        assert r["unsorted"] == {"0x410": ["0x5555555595a0", "0x7ffff7e1bce0"]}
+        assert r["small"] == {} and r["large"] == {}
 
 
 class TestParseProcMappings:

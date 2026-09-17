@@ -365,6 +365,33 @@ class TestBreakpoints:
         assert "set breakpoint pending on" in executed
         assert executed[-1] == "set breakpoint pending auto"
 
+    def test_break_with_commands_and_auto_continue(self, plugin):
+        set_inferior()
+        resp = call(
+            plugin,
+            "break",
+            {
+                "location": "main",
+                "commands": ["x/4gx $rdi", "info registers"],
+                "auto_continue": True,
+            },
+        )
+        r = resp["result"]
+        assert r["has_commands"] is True
+        bp = mock_gdb.state.breakpoints[0]
+        assert bp.commands == "silent\nx/4gx $rdi\ninfo registers\ncontinue"
+
+    def test_break_auto_continue_only(self, plugin):
+        set_inferior()
+        resp = call(plugin, "break", {"location": "main", "auto_continue": True})
+        assert resp["result"]["has_commands"] is True
+        assert mock_gdb.state.breakpoints[0].commands == "silent\ncontinue"
+
+    def test_break_commands_invalid_type(self, plugin):
+        set_inferior()
+        resp = call(plugin, "break", {"location": "main", "commands": "x/1i $pc"})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
     def test_break_invalid_type(self, plugin):
         set_inferior()
         assert call(plugin, "break", {"location": "main", "type": "weird"})["error"]["code"] == "BAD_PARAMS"
@@ -511,3 +538,83 @@ class TestReaderVerbs:
         monkeypatch.setattr(mock_gdb, "post_event", boom)
         plugin._handle_reader_verb({"type": "request", "id": 3, "verb": "interrupt"})
         assert drain(plugin)[-1]["error"]["code"] == "INTERRUPT_FAILED"
+
+
+SNAP_MAPPINGS = (
+    "          Start Addr           End Addr       Size     Offset  Perms  objfile\n"
+    "          0x1000             0x3000             0x2000        0x0  rw-p   [heap]\n"
+    "          0x400000           0x401000             0x1000        0x0  r-xp   /tmp/vuln\n"
+)
+
+
+class TestSnapshots:
+    def _setup(self, plugin):
+        inf = set_inferior()
+        inf.memory[0x1000:0x3000] = b"\x00" * 0x2000
+        mock_gdb.state.output_map["info proc mappings"] = SNAP_MAPPINGS
+        return inf
+
+    def test_create_and_list(self, plugin):
+        self._setup(plugin)
+        resp = call(plugin, "snapshot_create", {})
+        r = resp["result"]
+        assert r["snapshot_id"] == "ck-1"
+        # only the rw mapping is captured; r-x is skipped by the perms filter
+        assert r["segments"] == [{"addr": "0x1000", "length": 0x2000}]
+        assert r["total_bytes"] == 0x2000
+        assert r["registers"] == 4  # rax/rbx/rcx + rip
+        assert r["skipped"] == []
+        listing = call(plugin, "snapshot_list", {})["result"]["snapshots"]
+        assert [s["snapshot_id"] for s in listing] == ["ck-1"]
+        assert listing[0]["segments"] == 1
+
+    def test_diff_detects_memory_and_register_changes(self, plugin):
+        self._setup(plugin)
+        call(plugin, "snapshot_create", {})
+        inf = mock_gdb.state.inferior
+        inf.memory[0x1080:0x1088] = b"AAAAAAAA"
+        mock_gdb.state.newest_frame._regs["rax"] = 0x99
+        r = call(plugin, "snapshot_diff", {"snapshot_id": "ck-1"})["result"]
+        assert r["memory_changes"][0]["addr"] == "0x1080"
+        # rows are DIFF_ROW_BYTES wide; the tail of the row is untouched
+        assert r["memory_changes"][0]["new_hex"] == "4141414141414141" + "00" * 8
+        assert {
+            "name": "rax",
+            "old": "0x1",
+            "new": "0x99",
+        } in r["registers_changed"]
+        assert r["memory_truncated"] is False
+
+    def test_restore_round_trip(self, plugin):
+        inf = self._setup(plugin)
+        inf.memory[0x1000:0x1010] = b"\x41" * 16
+        call(plugin, "snapshot_create", {})
+        inf.memory[0x1000:0x1010] = b"\x42" * 16
+        mock_gdb.state.newest_frame._regs["rbx"] = 7
+        r = call(plugin, "snapshot_restore", {"snapshot_id": "ck-1"})["result"]
+        assert r["segments_written"] == 1
+        assert r["segments_skipped"] == []
+        assert r["registers_written"] >= 1
+        assert bytes(inf.memory[0x1000:0x1010]) == b"\x41" * 16
+        assert mock_gdb.state.newest_frame._regs["rbx"] == 2
+
+    def test_budget_skips_large_segments(self, plugin):
+        self._setup(plugin)
+        r = call(
+            plugin,
+            "snapshot_create",
+            {"max_segment_bytes": 0x1000, "max_total_bytes": 0x1000},
+        )["result"]
+        assert r["segments"] == []
+        assert r["skipped"][0]["reason"] == "segment exceeds max_segment_bytes"
+
+    def test_unknown_snapshot_id(self, plugin):
+        self._setup(plugin)
+        resp = call(plugin, "snapshot_diff", {"snapshot_id": "nope"})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_gated_while_running(self, plugin):
+        self._setup(plugin)
+        plugin.state = "running"
+        resp = call(plugin, "snapshot_create", {})
+        assert resp["error"]["code"] == "INFERIOR_RUNNING"

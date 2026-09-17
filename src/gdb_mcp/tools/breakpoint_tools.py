@@ -20,16 +20,26 @@ def register(app, registry, config) -> None:
         temporary: bool = False,
         pending: bool = False,
         thread: int | None = None,
+        commands: list[str] | None = None,
+        auto_continue: bool = False,
         session_id: str | None = None,
         ctx: Context = None,
     ) -> dict:
         """Set a breakpoint at an address/symbol/expression
         ('main', '*main+0x20', '0x401000'). Types: breakpoint (software),
-        hw (hardware), watch, hw_watch."""
+        hw (hardware), watch, hw_watch. With commands (gdb CLI strings),
+        they run automatically on hit (prefixed with `silent` so the stop
+        is quiet); with auto_continue the hit also resumes immediately —
+        together they turn a breakpoint into an unattended probe."""
         if type not in _BP_TYPES:
             raise GdbMcpError(
                 "BAD_PARAMS", "type must be one of %s" % ", ".join(_BP_TYPES)
             )
+        if commands is not None and (
+            not isinstance(commands, list)
+            or any(not isinstance(c, str) for c in commands)
+        ):
+            raise GdbMcpError("BAD_PARAMS", "commands must be a list of strings")
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         params = {
@@ -42,6 +52,10 @@ def register(app, registry, config) -> None:
             params["condition"] = condition
         if thread is not None:
             params["thread"] = thread
+        if commands:
+            params["commands"] = commands
+        if auto_continue:
+            params["auto_continue"] = True
         return await session.request(
             "break", params, timeout=config_from(ctx).request_timeout
         )

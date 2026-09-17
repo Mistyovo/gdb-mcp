@@ -128,6 +128,70 @@ def parse_proc_mappings(text: str) -> list[dict]:
     return segments
 
 
+_BIN_SECTION_NAMES = {
+    "tcachebins": "tcachebins",
+    "tcache": "tcachebins",
+    "fastbins": "fastbins",
+    "fastbin": "fastbins",
+    "unsorted bins": "unsorted",
+    "unsorted bin": "unsorted",
+    "unsortedbin": "unsorted",
+    "small bins": "small",
+    "small bin": "small",
+    "smallbins": "small",
+    "large bins": "large",
+    "large bin": "large",
+    "largebins": "large",
+}
+
+# "0x20 [ 3]: ..." or "0x20: ..." — a bin size followed by a chunk chain
+_BIN_SIZE_LINE_RE = re.compile(r"^(0x[0-9a-fA-F]+)\s*(?:\[\s*(\d+)\s*\])?\s*:")
+_HEX_TOKEN_RE = re.compile(r"0x[0-9a-fA-F]+")
+
+
+def parse_pwndbg_bins(text: str) -> dict:
+    """Tolerant parse of pwndbg ``bins`` output into per-bin chunk lists.
+
+    Returns five bins sections (tcachebins/fastbins as size->entries maps,
+    unsorted/small/large likewise) and a ``parsed`` flag that is only True
+    when at least one known section header was seen. Unknown formats must
+    be surfaced to the caller as raw text instead of guessed at.
+    """
+    result: dict = {
+        "tcachebins": {},
+        "fastbins": {},
+        "unsorted": {},
+        "small": {},
+        "large": {},
+        "parsed": False,
+    }
+    section = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        canonical = _BIN_SECTION_NAMES.get(line.lower())
+        if canonical:
+            section = canonical
+            result["parsed"] = True
+            continue
+        if section is None:
+            continue
+        size_match = _BIN_SIZE_LINE_RE.match(line)
+        if size_match is None:
+            continue  # annotations, banners, other commands' output
+        size = size_match.group(1).lower()
+        after_colon = line[line.index(":") + 1 :]
+        entries = [
+            tok.lower()
+            for tok in _HEX_TOKEN_RE.findall(after_colon)
+            if int(tok, 16) != 0  # chain terminators (◔— 0x0) are not chunks
+        ]
+        result[section].setdefault(size, [])
+        result[section][size].extend(entries)
+    return result
+
+
 def tail_text_file(
     path: str, lines: int = 200, max_bytes: int = 1024 * 1024
 ) -> tuple[str, bool]:

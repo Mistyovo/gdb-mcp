@@ -77,6 +77,10 @@ VERBS = frozenset(
         "mem_map",
         "file",
         "core",
+        "snapshot_create",
+        "snapshot_list",
+        "snapshot_restore",
+        "snapshot_diff",
     }
 ) | ASYNC_VERBS | READER_VERBS
 

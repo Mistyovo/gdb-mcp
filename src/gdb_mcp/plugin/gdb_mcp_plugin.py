@@ -43,6 +43,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 
 import gdb
 
@@ -85,6 +86,17 @@ _REGISTER_NAME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_]*\Z")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _TRUNC_MARKER = "\n...[truncated]"
 
+#: checkpoint (snapshot) knobs: per-segment / total memory budgets and the
+#: ring size of kept snapshots. Budgets bound the wire line (hex doubles).
+SNAPSHOT_MAX_SEGMENT = 4 * 1024 * 1024
+SNAPSHOT_MAX_TOTAL = 8 * 1024 * 1024
+SNAPSHOT_HARD_TOTAL = 12 * 1024 * 1024
+SNAPSHOT_KEEP = 8
+SNAPSHOT_RESTORE_CHUNK = 1024 * 1024
+DIFF_ROW_BYTES = 16
+DIFF_MAX_ROWS = 256
+DIFF_MAX_REGS = 64
+
 #: handled entirely on the reader thread
 READER_VERBS = frozenset(["ping", "interrupt", "quit"])
 #: resume verbs: reply before executing, then emit running/stop notifications
@@ -109,6 +121,10 @@ GATED_VERBS = frozenset(
         "bp_enable",
         "bp_disable",
         "mem_map",
+        "snapshot_create",
+        "snapshot_list",
+        "snapshot_restore",
+        "snapshot_diff",
     ]
 )
 _CONTINUE_CMDS = {
@@ -288,6 +304,37 @@ def _pwndbg_loaded():
     return False
 
 
+def _writable_segments(mappings_text):
+    """(start, end) pairs of rw mappings, parsed from ``info proc
+    mappings`` text. Tolerates with/without size-column layouts."""
+    segments = []
+    for raw in mappings_text.splitlines():
+        parts = raw.strip().split()
+        if len(parts) < 3 or not parts[0].startswith("0x") or not parts[1].startswith("0x"):
+            continue
+        try:
+            start = int(parts[0], 16)
+            end = int(parts[1], 16)
+        except ValueError:
+            continue
+        perms = None
+        for tok in parts[2:6]:
+            if tok and set(tok) <= set("rwxps-") and ("r" in tok or "w" in tok):
+                perms = tok
+                break
+        if perms and "w" in perms and end > start:
+            segments.append((start, end))
+    return segments
+
+
+def _bounded_int(value, default, lo, hi):
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise PluginError("BAD_PARAMS", "expected an int, got %r" % (value,))
+    return max(lo, min(hi, value))
+
+
 # --- the plugin ------------------------------------------------------------
 
 
@@ -314,6 +361,8 @@ class Plugin(object):
         self._event_handlers = []
         self._connection = None
         self._wire_generation = 0
+        self._snapshots = {}
+        self._snapshot_counter = 0
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1186,7 +1235,27 @@ class Plugin(object):
         finally:
             if pending:
                 gdb.execute("set breakpoint pending auto", to_string=True)
-        return {"number": bp.number, "type": type_str, "enabled": bp.enabled}
+        commands = params.get("commands")
+        if commands is not None and not isinstance(commands, list):
+            raise PluginError("BAD_PARAMS", "commands must be a list of strings")
+        auto_continue = bool(params.get("auto_continue", False))
+        has_commands = bool(commands) or auto_continue
+        if has_commands:
+            lines = ["silent"] + [str(c) for c in (commands or [])]
+            if auto_continue:
+                lines.append("continue")
+            try:
+                bp.commands = "\n".join(lines)
+            except (gdb.error, AttributeError) as exc:
+                raise PluginError(
+                    "PLUGIN_ERROR", "cannot set breakpoint commands: %s" % exc
+                )
+        return {
+            "number": bp.number,
+            "type": type_str,
+            "enabled": bp.enabled,
+            "has_commands": has_commands,
+        }
 
     @staticmethod
     def _create_breakpoint(spec, bptype, temporary):
@@ -1253,6 +1322,174 @@ class Plugin(object):
             or ""
         )
         return _limited_output(out)
+
+    # -- checkpoints (registers + writable memory snapshots) -----------------
+
+    def _find_snapshot(self, params):
+        sid = params.get("snapshot_id")
+        snap = self._snapshots.get(sid) if isinstance(sid, str) else None
+        if snap is None:
+            known = ", ".join(self._snapshots) or "none"
+            raise PluginError(
+                "BAD_PARAMS", "unknown snapshot_id %r (kept: %s)" % (sid, known)
+            )
+        return sid, snap
+
+    def _handle_snapshot_create(self, params):
+        self._guard_stopped()
+        max_segment = _bounded_int(
+            params.get("max_segment_bytes"),
+            SNAPSHOT_MAX_SEGMENT,
+            1024,
+            SNAPSHOT_HARD_TOTAL,
+        )
+        max_total = _bounded_int(
+            params.get("max_total_bytes"),
+            max(max_segment, SNAPSHOT_MAX_TOTAL),
+            max_segment,
+            SNAPSHOT_HARD_TOTAL,
+        )
+        regs = self._handle_regs({}).get("regs", {})
+        mappings = self._handle_mem_map({}).get("output", "")
+        inf = self._require_inferior()
+        taken = []
+        skipped = []
+        total = 0
+        for start, end in _writable_segments(mappings):
+            size = end - start
+            entry = {"addr": "0x%x" % start, "length": size}
+            if size > max_segment:
+                entry["reason"] = "segment exceeds max_segment_bytes"
+                skipped.append(entry)
+                continue
+            if total + size > max_total:
+                entry["reason"] = "total budget exhausted"
+                skipped.append(entry)
+                continue
+            try:
+                data = bytes(inf.read_memory(start, size))
+            except gdb.MemoryError:
+                entry["reason"] = "unreadable"
+                skipped.append(entry)
+                continue
+            taken.append((start, data))
+            total += size
+        self._snapshot_counter += 1
+        sid = "ck-%d" % self._snapshot_counter
+        self._snapshots[sid] = {
+            "regs": regs,
+            "segments": taken,
+            "total_bytes": total,
+            "created": time.time(),
+        }
+        while len(self._snapshots) > SNAPSHOT_KEEP:
+            self._snapshots.pop(next(iter(self._snapshots)))
+        return {
+            "snapshot_id": sid,
+            "registers": len(regs),
+            "segments": [
+                {"addr": "0x%x" % addr, "length": len(data)} for addr, data in taken
+            ],
+            "skipped": skipped,
+            "total_bytes": total,
+        }
+
+    def _handle_snapshot_list(self, params):
+        return {
+            "snapshots": [
+                {
+                    "snapshot_id": sid,
+                    "created": snap["created"],
+                    "total_bytes": snap["total_bytes"],
+                    "segments": len(snap["segments"]),
+                    "registers": len(snap["regs"]),
+                }
+                for sid, snap in self._snapshots.items()
+            ]
+        }
+
+    def _handle_snapshot_restore(self, params):
+        sid, snap = self._find_snapshot(params)
+        regs_written = 0
+        regs_skipped = []
+        for name, value in snap["regs"].items():
+            try:
+                self._handle_set_reg({"name": name, "value": value})
+                regs_written += 1
+            except PluginError as exc:
+                regs_skipped.append({"name": name, "reason": exc.message})
+        segments_written = 0
+        segments_skipped = []
+        for addr, data in snap["segments"]:
+            try:
+                for off in range(0, len(data), SNAPSHOT_RESTORE_CHUNK):
+                    chunk = data[off : off + SNAPSHOT_RESTORE_CHUNK]
+                    self._handle_write_mem({"addr": addr + off, "hex": chunk.hex()})
+                segments_written += 1
+            except PluginError as exc:
+                segments_skipped.append(
+                    {"addr": "0x%x" % addr, "reason": exc.message}
+                )
+        return {
+            "snapshot_id": sid,
+            "registers_written": regs_written,
+            "registers_skipped": regs_skipped,
+            "segments_written": segments_written,
+            "segments_skipped": segments_skipped,
+        }
+
+    def _handle_snapshot_diff(self, params):
+        sid, snap = self._find_snapshot(params)
+        inf = self._require_inferior()
+        current_regs = self._handle_regs({}).get("regs", {})
+        regs_changed = []
+        regs_truncated = False
+        for name, old in snap["regs"].items():
+            new = current_regs.get(name)
+            if new is None or new == old:
+                continue
+            if len(regs_changed) >= DIFF_MAX_REGS:
+                regs_truncated = True
+                break
+            regs_changed.append({"name": name, "old": old, "new": new})
+        rows = []
+        memory_truncated = False
+        segments_skipped = []
+        for addr, data in snap["segments"]:
+            try:
+                current = bytes(inf.read_memory(addr, len(data)))
+            except gdb.MemoryError:
+                segments_skipped.append(
+                    {"addr": "0x%x" % addr, "reason": "unreadable"}
+                )
+                continue
+            if current == data:
+                continue
+            for off in range(0, len(data), DIFF_ROW_BYTES):
+                old_row = data[off : off + DIFF_ROW_BYTES]
+                new_row = current[off : off + DIFF_ROW_BYTES]
+                if old_row == new_row:
+                    continue
+                if len(rows) >= DIFF_MAX_ROWS:
+                    memory_truncated = True
+                    break
+                rows.append(
+                    {
+                        "addr": "0x%x" % (addr + off),
+                        "old_hex": old_row.hex(),
+                        "new_hex": new_row.hex(),
+                    }
+                )
+            if memory_truncated:
+                break
+        return {
+            "snapshot_id": sid,
+            "registers_changed": regs_changed,
+            "registers_truncated": regs_truncated,
+            "memory_changes": rows,
+            "memory_truncated": memory_truncated,
+            "segments_skipped": segments_skipped,
+        }
 
     # -- gdb events (main thread; never block) ------------------------------
 
@@ -1432,6 +1669,10 @@ VERB_HANDLERS = {
     "mem_map": Plugin._handle_mem_map,
     "file": Plugin._handle_file,
     "core": Plugin._handle_core,
+    "snapshot_create": Plugin._handle_snapshot_create,
+    "snapshot_list": Plugin._handle_snapshot_list,
+    "snapshot_restore": Plugin._handle_snapshot_restore,
+    "snapshot_diff": Plugin._handle_snapshot_diff,
 }
 
 

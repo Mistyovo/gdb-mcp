@@ -912,3 +912,222 @@ class TestMemoryMap:
             "objfile": "/usr/bin/vuln",
         }
         assert result["truncated"] is False
+
+
+BINS_TEXT = (
+    "tcachebins\n"
+    "0x20 [  2]: 0x5555555592a0 —▸ 0x5555555592c0 ◂— 0x0\n"
+    "fastbins\n"
+    "empty\n"
+    "small bins\n"
+    "empty\n"
+    "large bins\n"
+    "empty\n"
+    "unsorted bins\n"
+    "empty\n"
+)
+
+
+class TestHeapBins:
+    @pytest.mark.asyncio
+    async def test_structured_bins(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)  # hello advertises pwndbg
+        task = asyncio.create_task(
+            run_tool(
+                tools["heap_bins"], {"session_id": s.session_id}, ctx_for(env)
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            {"output": BINS_TEXT, "total_lines": 10, "truncated": False},
+        )
+        assert req["verb"] == "eval"
+        assert req["params"]["command"] == "bins"
+        result = await task
+        assert result["parsed"] is True
+        assert result["tcachebins"]["0x20"] == ["0x5555555592a0", "0x5555555592c0"]
+        assert result["truncated"] is False
+        assert "output" not in result
+
+    @pytest.mark.asyncio
+    async def test_unparsed_output_includes_raw(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["heap_bins"],
+                {"session_id": s.session_id, "include_raw": False},
+                ctx_for(env),
+            )
+        )
+        await respond_to(
+            s, s.writer, {"output": "gef➤ no idea", "total_lines": 1, "truncated": False}
+        )
+        result = await task
+        assert result["parsed"] is False
+        assert "no idea" in result["output"]
+
+    @pytest.mark.asyncio
+    async def test_requires_pwndbg(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        s.hello = {"pwndbg": False}
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["heap_bins"], {"session_id": s.session_id}, ctx_for(env)
+            )
+        assert ei.value.code == "NO_PWNDBG"
+
+
+class TestCheckpoint:
+    @pytest.mark.asyncio
+    async def test_create_flow(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["checkpoint"],
+                {"action": "create", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        # regs/mem_map sub-requests happen inside the plugin; only one
+        # wire request leaves the server
+        req = await respond_to(
+            s,
+            s.writer,
+            {
+                "snapshot_id": "ck-1",
+                "registers": 4,
+                "segments": [{"addr": "0x1000", "length": 0x2000}],
+                "skipped": [],
+                "total_bytes": 0x2000,
+            },
+        )
+        assert req["verb"] == "snapshot_create"
+        result = await task
+        assert result["snapshot_id"] == "ck-1"
+        assert result["segments"] == [{"addr": "0x1000", "length": 0x2000}]
+
+    @pytest.mark.asyncio
+    async def test_restore_requires_snapshot_id(self, env):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["checkpoint"], {"action": "restore"}, ctx_for(env)
+            )
+        assert ei.value.code == "BAD_PARAMS"
+
+    @pytest.mark.asyncio
+    async def test_invalid_action(self, env):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["checkpoint"], {"action": "teleport"}, ctx_for(env)
+            )
+        assert ei.value.code == "BAD_PARAMS"
+
+    @pytest.mark.asyncio
+    async def test_diff_passes_snapshot_id(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["checkpoint"],
+                {
+                    "action": "diff",
+                    "snapshot_id": "ck-3",
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"memory_changes": []})
+        assert req["verb"] == "snapshot_diff"
+        assert req["params"]["snapshot_id"] == "ck-3"
+        assert await task == {"memory_changes": []}
+
+
+class TestBatchCommands:
+    @pytest.mark.asyncio
+    async def test_batches_eval_requests(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["batch_commands"],
+                {"commands": ["aaa", "bbb", "ccc"], "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        for cmd in ("aaa", "bbb", "ccc"):
+            req = await respond_to(
+                s,
+                s.writer,
+                {"output": "out-" + cmd, "total_lines": 1, "truncated": False},
+            )
+            assert req["verb"] == "eval"
+            assert req["params"]["command"] == cmd
+        result = await task
+        assert result["executed"] == 3
+        assert result["completed"] is True
+        assert [r["ok"] for r in result["results"]] == [True, True, True]
+
+    @pytest.mark.asyncio
+    async def test_stops_on_first_error(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["batch_commands"],
+                {"commands": ["good", "bad", "never"], "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(
+            s, s.writer, {"output": "ok", "total_lines": 1, "truncated": False}
+        )
+        req = await respond_to(s, s.writer, error="PLUGIN_ERROR")
+        assert req["params"]["command"] == "bad"
+        result = await task
+        assert result["executed"] == 2
+        assert result["completed"] is False
+        assert result["results"][-1]["ok"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [[], "x", [""], ["ok", 1], list(range(33))])
+    async def test_validates_input(self, env, bad):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        with pytest.raises(ValueError):
+            await run_tool(
+                tools["batch_commands"], {"commands": bad}, ctx_for(env)
+            )
+
+
+class TestBreakpointCommands:
+    @pytest.mark.asyncio
+    async def test_forwards_commands_and_auto_continue(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["set_breakpoint"],
+                {
+                    "location": "main",
+                    "commands": ["x/1gx $rdi"],
+                    "auto_continue": True,
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"number": 1, "has_commands": True})
+        assert req["verb"] == "break"
+        assert req["params"]["commands"] == ["x/1gx $rdi"]
+        assert req["params"]["auto_continue"] is True
+        assert await task == {"number": 1, "has_commands": True}

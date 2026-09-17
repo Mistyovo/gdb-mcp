@@ -62,32 +62,42 @@ MCP 层的价值必须靠 **gdbscript 拿不到的东西** 证明：上下文聚
 - `GDB_MCP_TOOL_PROFILE=core`（12 个高频工具）| `full`（全部 29 个）。
   server instructions 已指向 one-call 模式。
 
-## Phase 2 (v0.3) — 漏洞工作流纵深（主线 B，护城河）
+## Phase 2 (v0.3) — 漏洞工作流纵深（主线 B，护城河）✅ 核心完成（2026-09-17）
 
-### 2.1 堆分析结构化（生态最大空位，对标 Aiyakami/PWN-MCP 的 20 个 heap 工具）
-分两步，全程依赖 pwndbg 而非重写：
-1. **状态导出**：新插件 verb `heap_state` —— 透传 `heap`/`bins` 并解析为 JSON
-   （tcache/fastbins/unsorted/small/large、chunk header 字段、arena 基址），支持
-   `delta_since=<token>` 增量模式（服务端保存上次快照做 diff）。
-2. **行为日志**（可选，对标 PWN-MCP heap_logger）：在 malloc/calloc/realloc/free 上下断
-   （内部实现，不经 LLM），自动记录参数/返回值/caller 到环形缓冲，`heap_timeline` 工具
-   读取；支持"请求粒度"标记（begin/end 一对断点）。
-- 你已有实验基础：`tests/ezheap/`（堆题 core dump）、`build/ezheap-analysis/`（glibc 2.31
-  导出）。heap 探测逻辑在插件内实现（进程内、免 IPC）。
+### 2.1 堆分析结构化 ✅（bins 部分；malloc/free 行为日志延期）
+- 新工具 `heap_bins`：pwndbg `bins` → 结构化 JSON（tcachebins/fastbins/unsorted/
+  small/large，每节 size → chunk 地址表）。节名解析覆盖新旧 pwndbg 两种写法
+  （`unsorted bins` 与 `unsortedbin` 等——后者已在 kali 真实环境采样验证，glibc 2.42）；
+  无法识别时 `parsed=false` 并原样带回文本，**诚实降级而非猜测**。
+- 插件要求 pwndbg（`hello.pwndbg` 门控，缺失时报 NO_PWNDBG 并指引 execute_command）。
+- **延期**：malloc/free hook 行为日志 + heap_timeline（需在真实调试会话验证断点
+  自动采样，见 2.1b）。
 
-### 2.2 checkpoint / restore / diff（对标 veh，全生态独有设计）
-- 插件 verb `snapshot_create/restore/diff`：寄存器全集 + 可写内存段（按 `info proc
-  mappings` 过滤 rw 段，单段大小上限保护）。
-- 价值场景：改 payload → restore → 重跑 → diff 堆布局。与 2.1 的 delta 模式共用 diff 引擎。
+### 2.2 checkpoint / restore / diff ✅
+- 插件新增 4 个 GATED 动词 `snapshot_create/list/restore/diff`；寄存器全集 +
+  可写内存段（`info proc mappings` perms 过滤），单段/总预算默认 4MiB/8MiB
+  （硬顶 12MiB，保护协议帧上限），保留最近 8 个快照（内容寻址去重无需——按
+  id 环形）。restore 复用 `set_reg`/`write_mem` 既有校验路径；diff 输出变更
+  寄存器 + 16 字节粒度内存差异行（上限 256 行 + truncated 标记）。
+- 新工具 `checkpoint(action=create|list|restore|diff, snapshot_id, ...)`。
+- 价值场景闭环：snapshot → 打 payload → diff 堆布局 → restore 重跑。
 
-### 2.3 断点 action 与批量（对标 veh / x64dbg）
-- `set_breakpoint` 增加 `commands: list[str]`（命中自动执行，可选 `auto_continue`）。
-- 新 verb `batch`：一次调用顺序执行多个既有 verb，合并响应。省 round-trip 的最后一块。
+### 2.3 断点 action 与批量 ✅
+- `set_breakpoint` 新增 `commands`（命中自动执行，自动加 `silent` 前缀）与
+  `auto_continue`（命中即恢复）——一条指令布好无人值守信息收集探针。
+- 新工具 `batch_commands(commands)`：多条 gdb CLI 命令一次往返，逐条结果、
+  首错即停；全部命令在执行前校验（不含 verb 级 batch——CLI 批量 + 停机上下文
+  + crash_report 已覆盖主要 round-trip 场景）。
 
-### 2.4 inferior I/O 通道（可选能力，对标 PWN-MCP send_to_process）
-- 插件侧经 inferior tty 提供 `send_to_inferior` / `read_inferior_output`（环形缓冲）。
-- **pwntools 场景保持脚本自治**（这是你的核心设计，不要抢 pwntools 的 I/O）；
-  此能力只服务"纯 gdb 调试无脚本"的次要场景。默认关闭，`launch_gdb(io=True)` 开启。
+### 2.1b（延期项）heap 行为日志与 timeline
+- malloc/calloc/realloc/free 断点自动采样（ABI 感知取参 + caller 回溯）→
+  环形缓冲 → `heap_timeline` 工具；请求粒度 begin/end 标记。与 2.2 的 diff
+  引擎共用行格式。这是 v0.3 里程碑判定（真实堆题全流程）的前置项。
+
+### 2.4 inferior I/O 通道 ⏸ 延期
+- `send_to_inferior`/`read_inferior_output`（inferior-tty + 环形缓冲）需要
+  在 WSL 无头环境做 tty 交互验证，且 pwntools 场景必须保持脚本自治。延期到
+  专门的小迭代，不阻塞主线。
 
 ## Phase 3 (v0.4) — 分发与规模（主线 C）
 

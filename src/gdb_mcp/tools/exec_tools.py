@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from mcp.server.fastmcp import Context
 
+from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.results import load_result_slice, store_result
 from gdb_mcp.sessions import RUNNING
 
@@ -13,6 +12,24 @@ from ._common import check_stopped, config_from, resolve_gdb
 from .stop_context import collect_stop_context
 
 _MODES = ("continue", "step", "next", "stepi", "nexti", "finish", "until")
+
+_BATCH_LIMIT = 32
+
+
+def _maybe_store_result(config, result: dict) -> dict:
+    """Store oversized eval output on disk; returns the (possibly
+    preview-trimmed) result with result_file/result_sha256 attached."""
+    output = result.get("output")
+    if isinstance(output, str) and len(output) > config.result_inline_limit:
+        stored = store_result(config.log_dir, output)
+        result = dict(result)
+        result["output"] = (
+            output[: config.result_inline_limit] + "\n...[stored to result_file]"
+        )
+        result["truncated"] = True
+        result["result_file"] = stored["path"]
+        result["result_sha256"] = stored["sha256"]
+    return result
 
 
 def register(app, registry, config) -> None:
@@ -54,16 +71,47 @@ def register(app, registry, config) -> None:
             params,
             timeout=cfg.request_timeout,
         )
-        output = result.get("output")
-        if isinstance(output, str) and len(output) > cfg.result_inline_limit:
-            stored = await asyncio.to_thread(store_result, cfg.log_dir, output)
-            result["output"] = (
-                output[: cfg.result_inline_limit] + "\n...[stored to result_file]"
+        return _maybe_store_result(cfg, result)
+
+    @app.tool()
+    async def batch_commands(
+        commands: list[str],
+        session_id: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """Execute multiple raw gdb commands in one round-trip. Returns
+        per-command results ({ok, output, ...} or {ok, error}) in order;
+        execution stops at the first failing command. For composed state
+        reads prefer wait_for_stop(with_context=True) or crash_report."""
+        if (
+            not isinstance(commands, list)
+            or not commands
+            or len(commands) > _BATCH_LIMIT
+        ):
+            raise ValueError(
+                "commands must be a list of 1..%d strings" % _BATCH_LIMIT
             )
-            result["truncated"] = True
-            result["result_file"] = stored["path"]
-            result["result_sha256"] = stored["sha256"]
-        return result
+        # validate everything up front so no command is executed for an
+        # otherwise-invalid batch
+        if any(not isinstance(c, str) or not c.strip() for c in commands):
+            raise ValueError("each command must be a non-empty string")
+        cfg = config_from(ctx)
+        session = resolve_gdb(ctx, session_id)
+        results = []
+        for command in commands:
+            try:
+                r = await session.request(
+                    "eval", {"command": command}, timeout=cfg.request_timeout
+                )
+                results.append({"ok": True, **_maybe_store_result(cfg, r)})
+            except GdbMcpError as exc:
+                results.append({"ok": False, "error": str(exc)})
+                break
+        return {
+            "results": results,
+            "executed": len(results),
+            "completed": len(results) == len(commands),
+        }
 
     @app.tool()
     def read_result(
