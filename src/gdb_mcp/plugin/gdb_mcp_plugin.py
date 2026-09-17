@@ -1646,6 +1646,8 @@ class Plugin(object):
             "heap_read": self._policy_heap_read,
             "heap_disarm": self._policy_heap_disarm,
             "fuzz_loop": self._policy_fuzz_loop,
+            "crash_check": self._policy_crash_check,
+            "minimize": self._policy_minimize,
         }
         handler = handlers.get(kind)
         if handler is None:
@@ -1780,30 +1782,20 @@ class Plugin(object):
             except ValueError as exc:
                 raise PluginError("BAD_PARAMS", str(exc))
             rounds += 1
-            self._handle_snapshot_restore({"snapshot_id": sid})
-            if payload:
-                self._handle_write_mem({"addr": buffer_addr, "hex": payload.hex()})
-            marker = self._handle_break(
-                {"location": stop_location, "temporary": True}
-            )
-            try:
-                self._handle_continue_family(0, "continue", {})
-            except PluginError as exc:
-                # a failed resume poisons the round; stop the sweep and
-                # report the failure instead of spinning on a bad state
-                try:
-                    self._handle_bp_delete({"number": marker["number"]})
-                except PluginError:
-                    pass
+            verdict = self._fuzz_round(sid, buffer_addr, payload, stop_location)
+            if verdict["error"] is not None:
                 crashes.append(
-                    {"round": rounds, "payload_index": index, "error": exc.message}
+                    {
+                        "round": rounds,
+                        "payload_index": index,
+                        "error": verdict["error"],
+                    }
                 )
                 break
-            stop = self.stop_info or {}
-            hit_numbers = stop.get("breakpoints") or []
-            if marker["number"] in hit_numbers:
+            if verdict["survived"]:
                 survived += 1
             else:
+                stop = verdict["stop"]
                 signature = (stop.get("signal"), stop.get("pc"))
                 if signature not in signatures:
                     signatures.add(signature)
@@ -1815,10 +1807,6 @@ class Plugin(object):
                             "stop": stop,
                         }
                     )
-            try:
-                self._handle_bp_delete({"number": marker["number"]})
-            except PluginError:
-                pass  # temporary breakpoint already consumed itself
         return {
             "snapshot_id": sid,
             "rounds": rounds,
@@ -1903,6 +1891,117 @@ class Plugin(object):
         self._io = None
         self._io_buf.clear()
         return {"torn_down": True, "total_chunks_seen": total}
+
+    def _fuzz_round(self, sid, buffer_addr, payload, stop_location):
+        """One restore -> write -> resume cycle. Returns
+        ``{"survived", "stop", "error"}`` — survived means the marker
+        breakpoint (a guaranteed stop) was hit rather than the run
+        dying."""
+        self._handle_snapshot_restore({"snapshot_id": sid})
+        if payload:
+            self._handle_write_mem({"addr": buffer_addr, "hex": payload.hex()})
+        marker = self._handle_break(
+            {"location": stop_location, "temporary": True}
+        )
+        try:
+            self._handle_continue_family(0, "continue", {})
+        except PluginError as exc:
+            # a failed resume poisons the round; report it instead of
+            # spinning on a bad state
+            try:
+                self._handle_bp_delete({"number": marker["number"]})
+            except PluginError:
+                pass
+            return {"survived": False, "stop": None, "error": exc.message}
+        stop = self.stop_info or {}
+        survived = marker["number"] in (stop.get("breakpoints") or [])
+        try:
+            self._handle_bp_delete({"number": marker["number"]})
+        except PluginError:
+            pass  # temporary breakpoint already consumed itself
+        return {"survived": survived, "stop": stop, "error": None}
+
+    def _policy_crash_check(self, params):
+        sid, _snap = self._find_snapshot(params)
+        if "buffer_addr" not in params or "stop_location" not in params:
+            raise PluginError(
+                "BAD_PARAMS",
+                "crash_check requires buffer_addr and stop_location",
+            )
+        buffer_addr = self._resolve_addr(params.get("buffer_addr"))
+        payload = _hex_to_bytes(params.get("payload", ""))
+        verdict = self._fuzz_round(
+            sid, buffer_addr, payload, str(params.get("stop_location"))
+        )
+        return {
+            "survived": verdict["survived"],
+            "stop": verdict["stop"],
+            "error": verdict["error"],
+        }
+
+    def _policy_minimize(self, params):
+        sid, _snap = self._find_snapshot(params)
+        if "buffer_addr" not in params or "stop_location" not in params:
+            raise PluginError(
+                "BAD_PARAMS", "minimize requires buffer_addr and stop_location"
+            )
+        buffer_addr = self._resolve_addr(params.get("buffer_addr"))
+        stop_location = str(params.get("stop_location"))
+        payload = _hex_to_bytes(params.get("payload", ""))
+        if not payload:
+            raise PluginError("BAD_PARAMS", "payload (hex) is required")
+        max_rounds = _bounded_int(params.get("max_rounds"), 128, 1, 512)
+        initial_len = len(payload)
+        first = self._fuzz_round(sid, buffer_addr, payload, stop_location)
+        rounds = 1
+        if first["error"] is not None:
+            raise PluginError("PLUGIN_ERROR", first["error"])
+        if first["survived"]:
+            raise PluginError(
+                "BAD_PARAMS",
+                "payload does not crash (marker hit); nothing to minimize",
+            )
+        signature = (first["stop"] or {}).get("signal")
+        # classic delta debugging: try dropping chunks, shrink the grain
+        # on success, coarsen when a full sweep removes nothing. Removals
+        # are only accepted while the crash signal stays the same — a
+        # changed signal means the minimizer drifted to a different bug.
+        chunks = 2
+        while len(payload) > 1 and rounds < max_rounds:
+            chunk_len = max(1, (len(payload) + chunks - 1) // chunks)
+            removed = False
+            i = 0
+            while i < chunks and rounds < max_rounds:
+                candidate = (
+                    payload[: i * chunk_len] + payload[(i + 1) * chunk_len :]
+                )
+                i += 1
+                if not candidate or candidate == payload:
+                    continue
+                rounds += 1
+                verdict = self._fuzz_round(
+                    sid, buffer_addr, candidate, stop_location
+                )
+                if verdict["error"] is not None or verdict["survived"]:
+                    continue
+                if (verdict["stop"] or {}).get("signal") == signature:
+                    payload = candidate
+                    removed = True
+                    chunks = max(2, chunks - 1)
+                    break
+            if not removed:
+                if chunks >= len(payload):
+                    break
+                chunks = min(chunks * 2, len(payload))
+        return {
+            "original_bytes": initial_len,
+            "minimized_bytes": len(payload),
+            "minimized_hex": payload.hex(),
+            "signal": signature,
+            "rounds": rounds,
+            "reduced": len(payload) < initial_len,
+            "rounds_truncated": rounds >= max_rounds,
+        }
 
     # -- gdb events (main thread; never block) ------------------------------
 

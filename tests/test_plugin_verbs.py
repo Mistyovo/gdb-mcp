@@ -712,7 +712,6 @@ class TestPolicies:
         resp = call(plugin, "policy", {"kind": "trace"})
         assert resp["error"]["code"] == "INFERIOR_RUNNING"
 
-
 class _MemoryChannel:
     def __init__(self):
         self.slave_path = "/dev/fake-pts"
@@ -776,3 +775,65 @@ class TestInferiorIo:
         r = call(plugin, "io_read", {})["result"]
         assert r["total_chunks"] == plugin_mod.IO_BUFFER_CHUNKS
         assert r["dropped_overflow"] == 76
+
+    def _minimize_setup(self, plugin):
+        plugin._connect_events()
+        inf = set_inferior()
+        inf.memory[0x1000:0x3000] = b"\x00" * 0x2000
+        mock_gdb.state.output_map["info proc mappings"] = SNAP_MAPPINGS
+        call(plugin, "snapshot_create", {})
+
+    def test_crash_check_verdicts(self, plugin):
+        self._minimize_setup(plugin)
+        common = {
+            "snapshot_id": "ck-1",
+            "buffer_addr": "0x1000",
+            "payload": "41" * 8,
+            "stop_location": "main",
+        }
+        mock_gdb.state.continue_script = [("bp",)]
+        r = call(plugin, "policy", {"kind": "crash_check", **common})["result"]
+        assert r["survived"] is True
+        assert r["error"] is None
+        mock_gdb.state.continue_script = [("sig", "SIGSEGV")]
+        r = call(plugin, "policy", {"kind": "crash_check", **common})["result"]
+        assert r["survived"] is False
+        assert r["stop"]["signal"] == "SIGSEGV"
+
+    def test_minimize_reduces_crashing_payload(self, plugin):
+        self._minimize_setup(plugin)
+        mock_gdb.state.continue_script = [("sig", "SIGSEGV")] * 400
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "minimize",
+                "snapshot_id": "ck-1",
+                "buffer_addr": "0x1000",
+                "payload": "41" * 64,
+                "stop_location": "main",
+            },
+        )["result"]
+        assert r["reduced"] is True
+        assert r["minimized_bytes"] == 1
+        assert r["original_bytes"] == 64
+        assert r["signal"] == "SIGSEGV"
+        assert r["rounds"] < 128
+        assert r["rounds_truncated"] is False
+
+    def test_minimize_rejects_non_crashing_payload(self, plugin):
+        self._minimize_setup(plugin)
+        mock_gdb.state.continue_script = [("bp",)]
+        resp = call(
+            plugin,
+            "policy",
+            {
+                "kind": "minimize",
+                "snapshot_id": "ck-1",
+                "buffer_addr": "0x1000",
+                "payload": "41" * 8,
+                "stop_location": "main",
+            },
+        )
+        assert resp["error"]["code"] == "BAD_PARAMS"
+        assert "does not crash" in resp["error"]["message"]

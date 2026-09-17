@@ -61,7 +61,13 @@ def register(app, registry, config) -> None:
           marker, e.g. the caller of the function under test) count as
           survived, anything else is a deduped crash. params:
           snapshot_id, buffer_addr, payloads (hex list), stop_location,
-          max_rounds."""
+          max_rounds.
+        - crash_check: single-payload verdict {survived, stop}.
+        - minimize: delta-debug a crashing payload down to its minimal
+          crashing form (params: snapshot_id, payload, buffer_addr,
+          stop_location, max_rounds); removals that change the crash
+          signal are rejected so the minimizer cannot drift to another
+          bug."""
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         policy_params = dict(params or {})
