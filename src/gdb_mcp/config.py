@@ -43,6 +43,7 @@ DEFAULTS = {
     "readonly": False,
     "allow_unsafe": False,
     "experimental": False,
+    "libc_rip_api": "https://libc.rip",
 }
 
 
@@ -89,6 +90,8 @@ class Config:
     allow_unsafe: bool = DEFAULTS["allow_unsafe"]
     #: register experimental tools (subject to change without notice)
     experimental: bool = DEFAULTS["experimental"]
+    #: libc.rip-compatible API endpoint for identify_libc
+    libc_rip_api: str = DEFAULTS["libc_rip_api"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -201,6 +204,7 @@ class Config:
             allow_unsafe=env_bool("ALLOW_UNSAFE") or DEFAULTS["allow_unsafe"],
             experimental=env_bool("EXPERIMENTAL")
             or DEFAULTS["experimental"],
+            libc_rip_api=env("LIBC_RIP_API", str) or DEFAULTS["libc_rip_api"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:
