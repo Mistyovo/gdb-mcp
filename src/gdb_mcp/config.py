@@ -34,6 +34,14 @@ DEFAULTS = {
     "launch_timeout_ms": 10_000,
     "tool_profile": "full",
     "result_inline_limit": 16_000,
+    "launcher": "wsl",
+    "ssh_host": None,
+    "docker_image": "gdb-mcp:latest",
+    "mcp_http": False,
+    "mcp_host": "127.0.0.1",
+    "mcp_port": 8001,
+    "readonly": False,
+    "allow_unsafe": False,
 }
 
 
@@ -62,6 +70,22 @@ class Config:
     tool_profile: str = DEFAULTS["tool_profile"]
     #: tool outputs longer than this are stored on disk and previewed
     result_inline_limit: int = DEFAULTS["result_inline_limit"]
+    #: where launch_* run processes: "wsl" | "native" | "docker" | "ssh"
+    launcher: str = DEFAULTS["launcher"]
+    #: target host for the ssh launcher backend
+    ssh_host: str | None = DEFAULTS["ssh_host"]
+    #: container image for the docker launcher backend
+    docker_image: str = DEFAULTS["docker_image"]
+    #: expose the MCP server over streamable HTTP instead of stdio
+    mcp_http: bool = DEFAULTS["mcp_http"]
+    #: HTTP bind (kept loopback unless deliberately changed; token required
+    #: for anything non-loopback, like the TCP listener)
+    mcp_host: str = DEFAULTS["mcp_host"]
+    mcp_port: int = DEFAULTS["mcp_port"]
+    #: drop state-mutating tools (write_memory/write_register)
+    readonly: bool = DEFAULTS["readonly"]
+    #: allow gdb commands that escape the debugger (shell/!/python/...)
+    allow_unsafe: bool = DEFAULTS["allow_unsafe"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -91,6 +115,18 @@ class Config:
             raise ValueError("tool_profile must be 'core' or 'full'")
         if self.result_inline_limit < 1:
             raise ValueError("result_inline_limit must be a positive integer")
+        if self.launcher not in ("wsl", "native", "docker", "ssh"):
+            raise ValueError("launcher must be wsl, native, docker or ssh")
+        if self.launcher == "ssh" and not self.ssh_host:
+            raise ValueError("GDB_MCP_SSH_HOST is required for the ssh launcher")
+        if not 0 <= self.mcp_port <= 65535:
+            raise ValueError("mcp_port must be between 0 and 65535")
+        mcp_loopback = self.mcp_host.lower() in {"127.0.0.1", "::1", "localhost"}
+        if self.mcp_http and not mcp_loopback and not self.token:
+            raise ValueError(
+                "a token is required when the MCP HTTP transport binds a "
+                "non-loopback address"
+            )
         minimum_line_size = max(self.eval_output_limit, self.max_mem_read * 2) + 4096
         if self.max_async_line < minimum_line_size:
             raise ValueError(
@@ -117,6 +153,12 @@ class Config:
                 return cast(raw)
             except ValueError:
                 return None
+
+        def env_bool(name: str) -> bool | None:
+            raw = os.environ.get(f"{_ENV_PREFIX}_{name}")
+            if raw is None or raw == "":
+                return None
+            return raw.lower() in ("1", "true", "yes", "on")
 
         cfg = cls(
             host_bind=env("HOST_BIND", str) or DEFAULTS["host_bind"],
@@ -146,6 +188,14 @@ class Config:
             tool_profile=env("TOOL_PROFILE", str) or DEFAULTS["tool_profile"],
             result_inline_limit=env("RESULT_INLINE_LIMIT", int)
             or DEFAULTS["result_inline_limit"],
+            launcher=env("LAUNCHER", str) or DEFAULTS["launcher"],
+            ssh_host=env("SSH_HOST", str),
+            docker_image=env("DOCKER_IMAGE", str) or DEFAULTS["docker_image"],
+            mcp_http=env_bool("MCP_HTTP") or DEFAULTS["mcp_http"],
+            mcp_host=env("MCP_HOST", str) or DEFAULTS["mcp_host"],
+            mcp_port=env("MCP_PORT", int) or DEFAULTS["mcp_port"],
+            readonly=env_bool("READONLY") or DEFAULTS["readonly"],
+            allow_unsafe=env_bool("ALLOW_UNSAFE") or DEFAULTS["allow_unsafe"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:

@@ -99,35 +99,40 @@ MCP 层的价值必须靠 **gdbscript 拿不到的东西** 证明：上下文聚
   在 WSL 无头环境做 tty 交互验证，且 pwntools 场景必须保持脚本自治。延期到
   专门的小迭代，不阻塞主线。
 
-## Phase 3 (v0.4) — 分发与规模（主线 C）
+## Phase 3 (v0.4) — 分发与规模（主线 C）✅ 核心完成（2026-09-17）
 
-### 3.1 Launcher 抽象（当前 `launcher.py` 硬编码 wsl.exe）
-- 接口化 `LauncherBackend`，四个实现：`wsl`（现状）/ `native`（Linux 本机）/ `ssh` /
-  `docker`。Docker 后端附带官方镜像（pwndbg + pwntools + 插件预装，`--cap-add=SYS_PTRACE`，
-  对标 pwno-mcp），同时解决隔离与安装门槛两个问题。
+### 3.1 Launcher 抽象 ✅
+- `GDB_MCP_LAUNCHER=wsl|native|docker|ssh`：`_spawn`/`pkill_marker` 按后端
+  构造 argv（`build_ssh_argv`/`build_docker_run_argv`/`build_terminate_argv`
+  纯函数，全单测）。docker 后端：一次性容器（`SYS_PTRACE` + 放宽 seccomp）、
+  容器名即会话标记（终止= `docker kill`）、cwd 与插件按次 bind-mount、插件
+  路径重写为容器内 `/opt/gdb-mcp/`。镜像配方 `docker/Dockerfile`
+  （kali + gdb + pwndbg + pwntools + 服务器包）。
+- **注意**：镜像构建与 docker/ssh 端到端在本机（无 docker/远端靶机）未实测，
+  构造器逻辑已单测覆盖——首次使用时按 Dockerfile 注释构建即可。
 
-### 3.2 MCP HTTP transport（对标 microsoft/DebugMCP 四防线）
-- 在 stdio 之外提供 streamable-HTTP（FastMCP 原生支持），必须带：loopback 默认绑定、
-  Host/Origin 校验、Bearer token、非 loopback 拒绝启动。服务远程 agent / 多客户端共享。
+### 3.2 MCP HTTP transport ✅
+- `GDB_MCP_MCP_HTTP=1` 切换 streamable-HTTP（FastMCP + uvicorn），默认
+  `127.0.0.1:8001/mcp`。`http_hardening.py` 落实四防线：非 loopback 绑定
+  强制 token（Config.validate 拒绝启动）、Host 头校验（防 DNS rebinding）、
+  Origin 校验、配置 token 则全请求 Bearer（常量时间比较）。决策函数纯化
+  单测；ASGI wrapper 拦截返回 403。
+- **注意**：加固逻辑单测覆盖；真实 MCP 客户端走 HTTP 握手的端到端未跑
+  （本机无第二客户端），首次启用建议先用 curl 验证 403/通行行为。
 
-### 3.3 安全分级（对标 BeaCox 四级）
-- 现状只有 token（`config.py` validate 已强制非 loopback 必须 token，好底子）。补：
-  - `GDB_MCP_READONLY=1`：注册时直接不挂 write_memory/write_register/kill 等 mutation 工具；
-  - `GDB_MCP_ALLOW_UNSAFE=1` 才放行 `execute_command` 中的 `shell`/`!`/`python` 类命令
-    （插件 `_handle_eval` 里做命令前缀黑名单，SDK 侧再挡一层）；
-  - 每个工具的 error/info 输出附 `risk` 字段供前端展示。
+### 3.3 安全分级 ✅
+- `GDB_MCP_READONLY=1`：注册层直接不挂 `write_memory`/`write_register`。
+- `GDB_MCP_ALLOW_UNSAFE=1`（`--allow-unsafe`，launch 时同步传给被拉起的
+  gdb）：`shell`/`!`/`pipe`/`python`/`source` 类逃逸命令默认 `UNSAFE_BLOCKED`，
+  服务端工具层与 gdb 内插件**双层拦截**（插件 stdlib 复制同一前缀表，
+  防绕过 MCP 直连插件）。文档明确：gdb 命令缩写使前缀门是纵深防御而非沙箱。
+- risk 字段标注延期（噪声大、收益低，前端有需要再说）。
 
-### 3.4 rr 时间旅行（对标 schuay / BeaCox / karellen-rr-mcp）
-- `rr_record` / `rr_replay` launch 变体 + `reverse_continue/step/next/finish` verbs
-  （ASYNC_VERBS 机制直接复用）。漏洞复现价值极高，且三家竞品已验证需求。
+### 3.4 rr 时间旅行 ⏸ 延期（同 2.1b：需真实 rr 环境；反向执行动词设计
+  已明确——复用 ASYNC_VERBS 机制映射 `reverse-continue/step/next/finish`）
 
-### 3.5 静态-动态桥（复活 Ghidra 导出器）
-- git 标签 `archive/reverse-tools-dashboard` 中保存了已实测跑通的 Ghidra headless 导出器
-  （manifest v2：按 sha256 缓存 functions/disassembly/annotations JSON，曾对 glibc 2.31
-  成功导出 225/235 个函数），以 `gdb-mcp-static` 附属包形式复活。
-- 动态侧新增 `load_static_analysis(path)`：backtrace/disasm 的 function 字段优先用静态
-  分析标注（无符号二进制收益巨大）。替代方案：直接集成 decomp2dbg（RocketMaDev 已趟过）。
-- 这是逆向 Agent 工作流的闭环：静态找嫌疑 → 动态验证，全在同一个 MCP 里。
+### 3.5 静态-动态桥 ⏸ 延期（归档标签 `archive/reverse-tools-dashboard`
+  的 Ghidra 导出器复活为 `gdb-mcp-static` 附属包，独立小迭代）
 
 ## Phase 4 (v1.0) — 生态身份与稳定
 

@@ -119,6 +119,30 @@ bash examples/bare_gdb.sh ./vuln        # 等价于 gdb -q -x plugin.py --args .
 
 gdb 内还有 `mcp status|reconnect|detach` 命令。
 
+## 运行后端与传输
+
+`launch_gdb`/`launch_script` 的执行位置由 `GDB_MCP_LAUNCHER` 决定：
+
+| 后端 | 说明 |
+|---|---|
+| `wsl`（默认） | 经 `wsl.exe -d <distro>` 在 WSL2 内启动（现状行为） |
+| `native` | 服务器所在 Linux 主机直接启动（`bash -lc`） |
+| `docker` | 一次性容器内启动（`SYS_PTRACE` + 放宽 seccomp；镜像见 `docker/Dockerfile`，`docker build -f docker/Dockerfile -t gdb-mcp:latest .`；cwd 与插件按次挂载，容器以 `gdbmcp_<session>` 命名，终止即 `docker kill`） |
+| `ssh` | 经 SSH 在远端靶机启动（需 `GDB_MCP_SSH_HOST`，BatchMode 免密） |
+
+MCP 传输默认 stdio；`GDB_MCP_MCP_HTTP=1`（或 `--http`）切换为 streamable
+HTTP（默认 `127.0.0.1:8001/mcp`），带四道防线：非 loopback 绑定强制
+token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 则所有
+请求必须带 `Authorization: Bearer`。
+
+## 安全分级
+
+- `GDB_MCP_READONLY=1`（`--readonly`）：不注册 `write_memory`/`write_register`。
+- `shell`/`!`/`pipe`/`python`/`source` 类逃逸调试器的命令默认拒绝
+  （`UNSAFE_BLOCKED`），服务端与 gdb 内插件双层拦截；`GDB_MCP_ALLOW_UNSAFE=1`
+  （`--allow-unsafe`）显式放行并向下传递给被 launch 的 gdb。注意 gdb 命令
+  缩写（如 `sh`、`py`）使前缀黑名单是尽力而为的纵深防御，不是沙箱。
+
 ## 崩溃定位流程（LLM 视角）
 
 ```
@@ -168,6 +192,9 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 | `GDB_MCP_WSL_DISTRO` / `GDB_MCP_LOG_DIR` | 服务器 | launch 工具配置 |
 | `GDB_MCP_REQUEST_TIMEOUT` / `GDB_MCP_HEARTBEAT_SEC` | 服务器 | 请求与心跳超时 |
 | `GDB_MCP_TOOL_PROFILE` / `GDB_MCP_RESULT_INLINE_LIMIT` | 服务器 | 工具分档（core/full）与大结果内联阈值（字符数） |
+| `GDB_MCP_LAUNCHER` / `GDB_MCP_SSH_HOST` / `GDB_MCP_DOCKER_IMAGE` | 服务器 | 启动后端（wsl/native/docker/ssh）及其参数 |
+| `GDB_MCP_MCP_HTTP` / `GDB_MCP_MCP_HOST` / `GDB_MCP_MCP_PORT` | 服务器 | MCP streamable HTTP 传输（默认关，127.0.0.1:8001） |
+| `GDB_MCP_READONLY` / `GDB_MCP_ALLOW_UNSAFE` | 两侧 | 只读模式；放行逃逸调试器的命令（双层拦截的开关） |
 | `GDB_MCP_MAX_MEM_READ` / `GDB_MCP_MAX_ASYNC_LINE` | 两侧 | 内存读取与协议帧上限 |
 
 部分内存读取返回 `segments`（每段都含实际 `addr`、`length`、`hex` 和

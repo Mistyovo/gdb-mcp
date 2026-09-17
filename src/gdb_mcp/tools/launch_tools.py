@@ -52,7 +52,7 @@ def register(app, registry, config) -> None:
             "session_id": session.session_id,
             "state": session.state,
             "log_file": session.log_file,
-            "distro": await launcher.distro(distro),
+            "distro": session.distro,
             "note": (
                 "plugin connected" if session.state != RESERVED
                 else "hello not received yet; the plugin retries in the background"

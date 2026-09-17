@@ -1131,3 +1131,63 @@ class TestBreakpointCommands:
         assert req["params"]["commands"] == ["x/1gx $rdi"]
         assert req["params"]["auto_continue"] is True
         assert await task == {"number": 1, "has_commands": True}
+
+
+class TestUnsafeGate:
+    @pytest.mark.asyncio
+    async def test_execute_command_blocks_unsafe_by_default(self, env):
+        registry, cfg, tools = env
+        assert cfg.allow_unsafe is False
+        s = add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["execute_command"],
+                {"command": "shell pwd", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        assert ei.value.code == "UNSAFE_BLOCKED"
+        assert s.writer.sent == []  # nothing reached the plugin
+
+    @pytest.mark.asyncio
+    async def test_execute_command_allows_normal(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {"command": "x/4gx $rsp", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"output": "ok", "total_lines": 1})
+        assert req["params"]["command"] == "x/4gx $rsp"
+        assert (await task)["output"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_batch_stops_on_unsafe(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["batch_commands"],
+                {"commands": ["x/1gx $sp", "shell id"], "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"output": "ok", "total_lines": 1})
+        result = await task
+        assert result["executed"] == 2
+        assert result["completed"] is False
+        assert result["results"][-1]["ok"] is False
+        # the unsafe second command never reached the plugin (respond_to
+        # already consumed the only request line)
+        assert len(s.writer.sent) == 0
+
+    def test_readonly_drops_write_tools(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", readonly=True)
+        app = build_app(cfg, SessionRegistry(cfg))
+        names = set(app._tool_manager._tools)
+        assert "write_memory" not in names
+        assert "write_register" not in names
+        assert "read_memory" in names
+        assert "continue_execution" in names

@@ -50,10 +50,13 @@ CORE_TOOLS = frozenset(
 def register_all(app: FastMCP, registry: SessionRegistry, config: Config) -> None:
     for module in TOOL_MODULES:
         module.register(app, registry, config)
+    tools = app._tool_manager._tools
     if config.tool_profile == "core":
         # Drop non-core registrations; the tool manager is the single
         # source of truth for what list_tools exposes.
-        tools = app._tool_manager._tools
         for name in list(tools):
             if name not in CORE_TOOLS:
                 del tools[name]
+    if config.readonly:
+        for name in ("write_memory", "write_register"):
+            tools.pop(name, None)

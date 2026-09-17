@@ -24,6 +24,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run the TCP listener only, without the stdio MCP transport "
         "(for integration tests)",
     )
+    p.add_argument(
+        "--http",
+        action="store_true",
+        help="expose MCP over hardened streamable HTTP instead of stdio",
+    )
+    p.add_argument("--mcp-host", default=None, help="MCP HTTP bind (default 127.0.0.1)")
+    p.add_argument("--mcp-port", type=int, default=None, help="MCP HTTP port (default 8001)")
+    p.add_argument(
+        "--launcher",
+        choices=("wsl", "native", "docker", "ssh"),
+        default=None,
+        help="where launch_* run processes (default: wsl)",
+    )
+    p.add_argument("--ssh-host", default=None, help="target host for the ssh launcher")
+    p.add_argument(
+        "--docker-image", default=None, help="image for the docker launcher (default gdb-mcp:latest)"
+    )
+    p.add_argument(
+        "--readonly",
+        action="store_true",
+        help="drop state-mutating tools (write_memory/write_register)",
+    )
+    p.add_argument(
+        "--allow-unsafe",
+        action="store_true",
+        help="allow gdb commands that escape the debugger (shell/!/python/...)",
+    )
     return p
 
 
@@ -42,6 +69,14 @@ def main(argv: list[str] | None = None) -> int:
                 "token": args.token,
                 "log_dir": Path(args.log_dir) if args.log_dir else None,
                 "mcp_transport": not args.no_mcp,
+                "mcp_http": args.http,
+                "mcp_host": args.mcp_host,
+                "mcp_port": args.mcp_port,
+                "launcher": args.launcher,
+                "ssh_host": args.ssh_host,
+                "docker_image": args.docker_image,
+                "readonly": args.readonly,
+                "allow_unsafe": args.allow_unsafe,
             }
         )
     except ValueError as exc:

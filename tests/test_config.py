@@ -5,6 +5,40 @@ import pytest
 from gdb_mcp.config import Config, DEFAULTS
 
 
+class TestPhase3Options:
+    def test_launcher_validation(self):
+        assert Config().launcher == "wsl"
+        with pytest.raises(ValueError):
+            Config(launcher="telnet").validate()
+        with pytest.raises(ValueError):
+            Config(launcher="ssh").validate()  # ssh_host required
+        Config(launcher="ssh", ssh_host="box").validate()
+        Config(launcher="native").validate()
+        Config(launcher="docker").validate()
+
+    def test_http_nonloopback_requires_token(self):
+        with pytest.raises(ValueError):
+            Config(mcp_http=True, mcp_host="0.0.0.0").validate()
+        Config(mcp_http=True, mcp_host="0.0.0.0", token="secret").validate()
+        Config(mcp_http=True, mcp_host="127.0.0.1").validate()
+
+    def test_bool_env_flags(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_READONLY", "1")
+        monkeypatch.setenv("GDB_MCP_ALLOW_UNSAFE", "true")
+        monkeypatch.setenv("GDB_MCP_MCP_HTTP", "on")
+        cfg = Config.from_env()
+        assert cfg.readonly is True
+        assert cfg.allow_unsafe is True
+        assert cfg.mcp_http is True
+
+    def test_launcher_env(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_LAUNCHER", "docker")
+        monkeypatch.setenv("GDB_MCP_DOCKER_IMAGE", "gdb-mcp:dev")
+        cfg = Config.from_env()
+        assert cfg.launcher == "docker"
+        assert cfg.docker_image == "gdb-mcp:dev"
+
+
 class TestPhase1Options:
     def test_tool_profile_default_and_validation(self):
         assert Config().tool_profile == "full"

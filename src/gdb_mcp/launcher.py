@@ -35,6 +35,9 @@ _PLUGIN_WIN_PATH = (
 
 _MARKER_PREFIX = "gdbmcp_"
 
+#: where the mounted plugin lives inside docker launcher containers
+DOCKER_PLUGIN_PATH = "/opt/gdb-mcp/gdb_mcp_plugin.py"
+
 
 # --- pure helpers (unit-testable) ------------------------------------------
 
@@ -132,6 +135,68 @@ def build_gdb_argv(
     return argv
 
 
+def build_ssh_argv(host: str, remote_command: str) -> list[str]:
+    """argv running ``remote_command`` through a single shell on ``host``."""
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        host,
+        remote_command,
+    ]
+
+
+def build_docker_run_argv(
+    image: str,
+    session_id: str,
+    bash_cmd: str,
+    cwd: str | None,
+    plugin_host_path: str | None,
+) -> list[str]:
+    """``docker run`` argv for an ephemeral debugging container.
+
+    SYS_PTRACE + a relaxed seccomp profile are the minimum for
+    ptrace-based debugging; the container is named after the session so
+    termination is a single ``docker kill``.
+    """
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        _MARKER_PREFIX + session_id,
+        "--cap-add=SYS_PTRACE",
+        "--security-opt",
+        "seccomp=unconfined",
+    ]
+    if plugin_host_path:
+        argv += ["-v", "%s:%s:ro" % (plugin_host_path, DOCKER_PLUGIN_PATH)]
+    if cwd:
+        argv += ["-v", "%s:%s" % (cwd, cwd), "-w", cwd]
+    argv += [image, "bash", "-lc", bash_cmd]
+    return argv
+
+
+def build_terminate_argv(
+    launcher: str,
+    session_id: str,
+    force: bool,
+    distro: str | None = None,
+    ssh_host: str | None = None,
+) -> list[str]:
+    """argv that terminates a launched session for the given backend."""
+    if launcher == "docker":
+        return ["docker", "kill", _MARKER_PREFIX + session_id]
+    cmd = build_pkill_command(session_id, force)
+    if launcher == "wsl":
+        return ["wsl.exe", "-d", distro, "--", "bash", "-lc", cmd]
+    if launcher == "native":
+        return ["bash", "-lc", cmd]
+    return build_ssh_argv(ssh_host, cmd)
+
+
 # --- the launcher -----------------------------------------------------------
 
 
@@ -168,6 +233,10 @@ class Launcher:
         return parse_distro_list(out or b"")
 
     async def distro(self, override: str | None = None) -> str:
+        if self.config.launcher != "wsl":
+            raise LaunchError(
+                "the WSL distro only applies to the wsl launcher backend"
+            )
         if override:
             return override
         if self.config.wsl_distro:
@@ -202,30 +271,44 @@ class Launcher:
         marker: bool,
         distro_override: str | None = None,
     ) -> Session:
-        distro = await self.distro(distro_override)
+        launcher = self.config.launcher
+        if launcher == "docker":
+            argv = [
+                DOCKER_PLUGIN_PATH if a == self.plugin_wsl_path() else a
+                for a in argv
+            ]
         bash_cmd = build_bash_command(
             argv,
             env,
             cwd_wsl,
             marker=_MARKER_PREFIX + session_id if marker else None,
         )
+        if launcher == "wsl":
+            distro = await self.distro(distro_override)
+            exec_argv = ["wsl.exe", "-d", distro, "--", "bash", "-lc", bash_cmd]
+        elif launcher == "native":
+            exec_argv = ["bash", "-lc", bash_cmd]
+        elif launcher == "docker":
+            exec_argv = build_docker_run_argv(
+                self.config.docker_image,
+                session_id,
+                bash_cmd,
+                cwd_wsl,
+                self.config.plugin_wsl_path or str(_PLUGIN_WIN_PATH),
+            )
+        else:  # ssh
+            exec_argv = build_ssh_argv(self.config.ssh_host, bash_cmd)
         session = self.registry.reserve(
             session_id, kind=kind, log_file=str(log_file)
         )
-        session.distro = distro
+        session.distro = await self.distro(distro_override) if launcher == "wsl" else None
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fh = open(log_file, "w", encoding="utf-8", errors="replace")
             try:
                 proc = await asyncio.wait_for(
                     asyncio.create_subprocess_exec(
-                        "wsl.exe",
-                        "-d",
-                        distro,
-                        "--",
-                        "bash",
-                        "-lc",
-                        bash_cmd,
+                        *exec_argv,
                         stdout=log_fh,
                         stderr=asyncio.subprocess.STDOUT,
                         stdin=(
@@ -250,10 +333,10 @@ class Launcher:
         if kind != "gdb":
             session.state = RUNNING  # scripts never hello
         log.info(
-            "launched %s session %s via %s (log: %s)",
+            "launched %s session %s via %s launcher (log: %s)",
             kind,
             session_id,
-            distro,
+            launcher,
             log_file,
         )
         return session
@@ -301,6 +384,7 @@ class Launcher:
             "GDB_MCP_EVAL_OUTPUT_LIMIT",
             "GDB_MCP_MAX_MEM_READ",
             "GDB_MCP_MAX_ASYNC_LINE",
+            "GDB_MCP_ALLOW_UNSAFE",
         ):
             env_vars.pop(reserved_name, None)
         env_vars.update({
@@ -312,6 +396,8 @@ class Launcher:
         })
         if self.config.token:
             env_vars["GDB_MCP_TOKEN"] = self.config.token
+        if self.config.allow_unsafe:
+            env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
         log_file = self.config.log_dir / ("%s.log" % session_id)
         session = await self._spawn(
             argv,
@@ -367,6 +453,7 @@ class Launcher:
             "GDB_MCP_EVAL_OUTPUT_LIMIT",
             "GDB_MCP_MAX_MEM_READ",
             "GDB_MCP_MAX_ASYNC_LINE",
+            "GDB_MCP_ALLOW_UNSAFE",
         ):
             env_vars.pop(reserved_name, None)
         env_vars.update({
@@ -380,6 +467,8 @@ class Launcher:
         })
         if self.config.token:
             env_vars["GDB_MCP_TOKEN"] = self.config.token
+        if self.config.allow_unsafe:
+            env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
         argv = [python, "-u", script_wsl] + list(args or [])
         log_file = self.config.log_dir / ("%s.log" % session_id)
         gdb_session = self.registry.reserve(
@@ -417,17 +506,16 @@ class Launcher:
     async def pkill_marker(
         self, session_id: str, force: bool, distro: str | None = None
     ) -> None:
-        distro = await self.distro(distro)
-        cmd = build_pkill_command(session_id, force)
+        argv = build_terminate_argv(
+            self.config.launcher,
+            session_id,
+            force,
+            distro=distro,
+            ssh_host=self.config.ssh_host,
+        )
         try:
             proc = await asyncio.create_subprocess_exec(
-                "wsl.exe",
-                "-d",
-                distro,
-                "--",
-                "bash",
-                "-lc",
-                cmd,
+                *argv,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )

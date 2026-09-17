@@ -45,9 +45,35 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
     return app
 
 
+async def _serve_http(app: FastMCP, config: Config) -> None:
+    """Run the streamable-HTTP transport behind the security middleware."""
+    import uvicorn
+
+    from gdb_mcp.http_hardening import SecurityHeadersMiddleware
+
+    log.info(
+        "MCP streamable HTTP on http://%s:%d/mcp (token %s)",
+        config.mcp_host,
+        config.mcp_port,
+        "required" if config.token else "disabled",
+    )
+    hardened = SecurityHeadersMiddleware(
+        app.streamable_http_app(), config.mcp_host, config.mcp_port, config.token
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            hardened,
+            host=config.mcp_host,
+            port=config.mcp_port,
+            log_level="info",
+        )
+    )
+    await server.serve()
+
+
 async def serve(config: Config) -> None:
-    """Run the full server: TCP listener for gdb plugins (+ GC loop) and,
-    unless ``--no-mcp``, the stdio MCP transport."""
+    """Run the full server: TCP listener for gdb plugins (+ GC loop) and
+    the MCP transport (stdio by default, or hardened streamable HTTP)."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -60,7 +86,10 @@ async def serve(config: Config) -> None:
     try:
         if config.mcp_transport:
             app = build_app(config, registry)
-            await app.run_stdio_async()
+            if config.mcp_http:
+                await _serve_http(app, config)
+            else:
+                await app.run_stdio_async()
         else:
             log.info(
                 "TCP-only mode: waiting for gdb plugin connections on %s:%d "

@@ -7,11 +7,49 @@ import pytest
 from gdb_mcp.launcher import (
     bash_quote,
     build_bash_command,
+    build_docker_run_argv,
     build_gdb_argv,
     build_pkill_command,
+    build_ssh_argv,
+    build_terminate_argv,
     parse_distro_list,
     win_to_wsl,
 )
+
+
+class TestLauncherBackends:
+    def test_ssh_argv(self):
+        argv = build_ssh_argv("box.example", "echo hi")
+        assert argv[0] == "ssh"
+        assert "box.example" in argv
+        assert argv[-1] == "echo hi"
+        assert "BatchMode=yes" in argv
+
+    def test_docker_run_argv(self):
+        argv = build_docker_run_argv(
+            "gdb-mcp:latest", "s-01", "echo hi", "/work", "/tmp/plugin.py"
+        )
+        assert argv[:3] == ["docker", "run", "--rm"]
+        assert "gdbmcp_s-01" in argv
+        assert "--cap-add=SYS_PTRACE" in argv
+        assert "/tmp/plugin.py:/opt/gdb-mcp/gdb_mcp_plugin.py:ro" in argv
+        assert "/work:/work" in argv and "-w" in argv
+        assert argv[-4:] == ["gdb-mcp:latest", "bash", "-lc", "echo hi"]
+
+    def test_docker_run_minimal(self):
+        argv = build_docker_run_argv("img", "s-02", "cmd", None, None)
+        assert not any(a.startswith("/") and ":" in a for a in argv if a != "cmd")
+        assert argv[-4:] == ["img", "bash", "-lc", "cmd"]
+
+    def test_terminate_argv_per_backend(self):
+        docker = build_terminate_argv("docker", "s-01", True)
+        assert docker == ["docker", "kill", "gdbmcp_s-01"]
+        wsl = build_terminate_argv("wsl", "s-01", True, distro="kali")
+        assert wsl[0] == "wsl.exe" and "pkill" in wsl[-1]
+        native = build_terminate_argv("native", "s-01", False)
+        assert native == ["bash", "-lc", build_pkill_command("s-01", False)]
+        ssh = build_terminate_argv("ssh", "s-01", True, ssh_host="box")
+        assert ssh[0] == "ssh" and "pkill" in ssh[-1]
 
 
 class TestWinToWsl:

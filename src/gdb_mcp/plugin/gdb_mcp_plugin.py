@@ -86,6 +86,45 @@ _REGISTER_NAME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_]*\Z")
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _TRUNC_MARKER = "\n...[truncated]"
 
+#: commands that escape the debugger; blocked unless GDB_MCP_ALLOW_UNSAFE=1.
+#: Mirrors gdb_mcp.security.UNSAFE_COMMAND_PREFIXES (stdlib-only copy).
+_UNSAFE_PREFIXES = (
+    ("shell", True),
+    ("!", False),
+    ("pipe", True),
+    ("python", True),
+    ("python-interactive", True),
+    ("pi", True),
+    ("source", True),
+)
+
+
+def _is_unsafe_command(command):
+    text = str(command).lstrip().lower()
+    if not text:
+        return False
+    for prefix, needs_boundary in _UNSAFE_PREFIXES:
+        if not text.startswith(prefix):
+            continue
+        if not needs_boundary:
+            return True
+        rest = text[len(prefix) :]
+        if rest == "" or rest[0] in (" ", "\t", "-"):
+            return True
+    return False
+
+
+def _guard_unsafe_command(command):
+    """Block debugger-escaping commands unless GDB_MCP_ALLOW_UNSAFE=1."""
+    if os.environ.get("GDB_MCP_ALLOW_UNSAFE") == "1":
+        return
+    if _is_unsafe_command(command):
+        raise PluginError(
+            "UNSAFE_BLOCKED",
+            "command can execute code outside the debugger; "
+            "set GDB_MCP_ALLOW_UNSAFE=1 to allow it",
+        )
+
 #: checkpoint (snapshot) knobs: per-segment / total memory budgets and the
 #: ring size of kept snapshots. Budgets bound the wire line (hex doubles).
 SNAPSHOT_MAX_SEGMENT = 4 * 1024 * 1024
@@ -895,6 +934,7 @@ class Plugin(object):
         if not command:
             raise PluginError("BAD_PARAMS", "command is required")
         window = _eval_window(params)
+        _guard_unsafe_command(command)
         keep_ansi = bool(params.get("keep_ansi", False))
         out = gdb.execute(str(command), to_string=True) or ""
         return _eval_output(out, strip=not keep_ansi, window=window)

@@ -6,6 +6,7 @@ from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.results import load_result_slice, store_result
+from gdb_mcp.security import is_unsafe_gdb_command
 from gdb_mcp.sessions import RUNNING
 
 from ._common import check_stopped, config_from, resolve_gdb
@@ -60,6 +61,13 @@ def register(app, registry, config) -> None:
         ):
             raise ValueError("limit must be a positive int")
         cfg = config_from(ctx)
+        if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
+            raise GdbMcpError(
+                "UNSAFE_BLOCKED",
+                "command can execute code outside the debugger "
+                "(shell/!/pipe/python/source); set GDB_MCP_ALLOW_UNSAFE=1 "
+                "or --allow-unsafe to allow it",
+            )
         session = resolve_gdb(ctx, session_id)
         params = {"command": command, "keep_ansi": keep_ansi}
         if offset is not None:
@@ -99,6 +107,15 @@ def register(app, registry, config) -> None:
         session = resolve_gdb(ctx, session_id)
         results = []
         for command in commands:
+            if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
+                results.append(
+                    {
+                        "ok": False,
+                        "error": "UNSAFE_BLOCKED: command can execute code "
+                        "outside the debugger",
+                    }
+                )
+                break
             try:
                 r = await session.request(
                     "eval", {"command": command}, timeout=cfg.request_timeout
@@ -110,7 +127,7 @@ def register(app, registry, config) -> None:
         return {
             "results": results,
             "executed": len(results),
-            "completed": len(results) == len(commands),
+            "completed": bool(results) and results[-1].get("ok") is True,
         }
 
     @app.tool()
