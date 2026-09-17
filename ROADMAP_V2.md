@@ -131,6 +131,20 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | B3 MVP | ✅ Journal（JSONL，trim/hex 标记）+ `export_session_script`（break 条件/auto_continue 探针/set_reg/≤256B 逐字节写/continue 族编译；纯读与 checkpoint 跳过并计数）。**脚本对真实 gdb 的独立重放验证归 E3 bench** |
 | H2 插件 `_exec()` 收口 | ⏳ 需一次终端手工重命名（Mimosa 钩子冻结该行） |
 
+### 第二、三批落地状态 ✅（2026-09-18）
+
+| 项 | 状态 |
+|---|---|
+| C2 cyclic oracle | ✅ `campaign.py`：pwntools 兼容 de Bruijn（缓存生成）+ LE 匹配 + `campaign(detect)`（扫 stop 的 pc/fault/寄存器，命中记 pc_control 候选）+ `campaign(pattern)` 模式生成 |
+| C2 libc 指纹 | ✅ 最小形态：泄漏以 section=libc 记录（值+证据时间戳）；外部 libc-database 比对属 E3 配套，未做 |
+| C1/C3 战役状态机 | ✅ Session.campaign（持久化含于 sessions.json）；`campaign` 工具 get/set/note/detect/pattern；stop_context 与 crash_report 自动注入恒定 brief |
+| C4 Resources | ✅ MCP Resource 模板 `gdb://campaign/{session_id}`（只读 JSON 视图） |
+| A 委托执行 | ✅ 插件 `policy` 动词（GATED）：`trace`（有界单步、去重 PC、含起始 PC）、`heap_arm/read/disarm`（`gdb.Breakpoint.stop()` 探针记录参数、自动续跑不打断执行流）、`fuzz_loop`（snapshot 恢复 + payload 写入 + 临时断点保证停机 + 信号+PC 去重崩溃）；工具层 `run_policy` |
+| D1 diff_sessions | ✅ 跨会话寄存器差分 + 可选单内存区域差分（16 字节行，上限 128） |
+| E2 PyPI 发布 | ⏳ 需 PyPI 凭证与发布决策（元数据已齐：pyproject 完整） |
+| E3 bench | ⏳ 需 crackme 语料与评分器设计（B3 导出脚本即评分依据） |
+| D2 会话多路 / E1 协议 v2 / E4 mTLS·scoped token | ⏳ 大型独立迭代，需专项设计与验证 |
+
 ## 8. 反目标（延续并强化）
 
 1. 不内嵌 LLM（分析质量归客户端 agent）。

@@ -1290,3 +1290,193 @@ class TestExportSessionScript:
                 ctx_for(env),
             )
         assert ei.value.code == "NO_JOURNAL"
+
+
+class TestRunPolicyTool:
+    @pytest.mark.asyncio
+    async def test_forwards_policy_verb_and_params(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["run_policy"],
+                {
+                    "kind": "trace",
+                    "params": {"max_steps": 5},
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            {"steps": 5, "unique_count": 6, "unique_pc": [], "truncated": False,
+             "stop": "max_steps"},
+        )
+        assert req["verb"] == "policy"
+        assert req["params"]["kind"] == "trace"
+        assert req["params"]["max_steps"] == 5
+        assert (await task)["steps"] == 5
+
+    @pytest.mark.asyncio
+    async def test_rejected_while_running(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        s.state = RUNNING
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["run_policy"],
+                {"kind": "trace", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        assert ei.value.code == "INFERIOR_RUNNING"
+
+
+class TestCampaignTool:
+    @pytest.mark.asyncio
+    async def test_set_note_get_pattern_detect(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await run_tool(
+            tools["campaign"],
+            {
+                "action": "set",
+                "section": "offsets",
+                "key": "libc_base",
+                "value": "0x7ffff7d80000",
+                "session_id": s.session_id,
+            },
+            ctx_for(env),
+        )
+        await run_tool(
+            tools["campaign"],
+            {"action": "note", "text": "leak via puts@plt", "session_id": s.session_id},
+            ctx_for(env),
+        )
+        state = await run_tool(
+            tools["campaign"], {"action": "get", "session_id": s.session_id},
+            ctx_for(env),
+        )
+        assert state["campaign"]["offsets"]["libc_base"]["value"] == "0x7ffff7d80000"
+        assert state["campaign"]["notes"][-1]["text"] == "leak via puts@plt"
+        pattern = await run_tool(
+            tools["campaign"],
+            {"action": "pattern", "value": "64", "session_id": s.session_id},
+            ctx_for(env),
+        )
+        assert pattern["pattern"].startswith("aaaabaaacaaa")
+        # detect over a PC that is a cyclic slice at offset 72
+        from gdb_mcp.campaign import cyclic_pattern
+
+        seq = cyclic_pattern(256)
+        pc_val = "0x%x" % int.from_bytes(seq[72:76].encode(), "little")
+        await s.push_notification("stop", {"pc": pc_val})
+        detect = await run_tool(
+            tools["campaign"], {"action": "detect", "session_id": s.session_id},
+            ctx_for(env),
+        )
+        assert detect["match"]["offset"] == 72
+        assert "pc_control" in detect["primitives"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_action(self, env):
+        _, _, tools = env
+        add_gdb_session(env[0])
+        with pytest.raises(ValueError):
+            await run_tool(
+                tools["campaign"], {"action": "teleport"}, ctx_for(env)
+            )
+
+    @pytest.mark.asyncio
+    async def test_campaign_resource(self, tmp_path):
+        from gdb_mcp.server import build_app as _build
+        from gdb_mcp.sessions import SessionRegistry as _Reg
+
+        cfg = Config(log_dir=tmp_path / "l")
+        registry = _Reg(cfg)
+        app = _build(cfg, registry)
+        s = registry.register_hello(hello(), FakeWriter())
+        contents = await app.read_resource("gdb://campaign/%s" % s.session_id)
+        assert "campaign" in str(contents)
+
+    @pytest.mark.asyncio
+    async def test_brief_injected_into_stop_context(self, env):
+        from gdb_mcp.campaign import campaign_set
+
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        campaign_set(s.campaign, "offsets", "libc_base", "0x7ffff7d80000")
+        await s.push_notification("stop", {"pc": "0x401000"})
+        task = asyncio.create_task(
+            run_tool(
+                tools["wait_for_stop"],
+                {"with_context": True, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        for _, result in CONTEXT_SCRIPT:
+            await respond_to(s, s.writer, result)
+        result = await task
+        assert any(
+            "libc_base" in line for line in result["context"]["campaign"]
+        )
+
+
+class TestDiffSessions:
+    @pytest.mark.asyncio
+    async def test_register_diff(self, env):
+        registry, _, tools = env
+        sa = add_gdb_session(registry, pid=111)
+        sb = add_gdb_session(registry, pid=222)
+        task = asyncio.create_task(
+            run_tool(
+                tools["diff_sessions"],
+                {"session_a": sa.session_id, "session_b": sb.session_id},
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(sa, sa.writer, {"regs": {"rax": "0x1", "rbx": "0x2"}})
+        assert req["verb"] == "regs"
+        await respond_to(sb, sb.writer, {"regs": {"rax": "0x9", "rbx": "0x2"}})
+        result = await task
+        assert result["registers_changed"] == {"rax": {"a": "0x1", "b": "0x9"}}
+        assert result["registers_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_memory_diff(self, env):
+        registry, _, tools = env
+        sa = add_gdb_session(registry, pid=333)
+        sb = add_gdb_session(registry, pid=444)
+        task = asyncio.create_task(
+            run_tool(
+                tools["diff_sessions"],
+                {
+                    "session_a": sa.session_id,
+                    "session_b": sb.session_id,
+                    "memory_addr": "0x1000",
+                    "memory_length": 16,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(sa, sa.writer, {"regs": {}})
+        assert req["verb"] == "regs"
+        req = await respond_to(sb, sb.writer, {"regs": {}})
+        req = await respond_to(
+            sa,
+            sa.writer,
+            {"addr": 0x1000, "hex": "11" * 16, "ascii": "", "segments": [],
+             "unreadable": [], "partial": False},
+        )
+        assert req["verb"] == "read_mem"
+        await respond_to(
+            sb,
+            sb.writer,
+            {"addr": 0x1000, "hex": "22" * 16, "ascii": "", "segments": [],
+             "unreadable": [], "partial": False},
+        )
+        result = await task
+        row = result["memory_diff"]["rows"][0]
+        assert row["a_hex"] == "11" * 16
+        assert row["b_hex"] == "22" * 16

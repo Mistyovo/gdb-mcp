@@ -45,6 +45,23 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
     app._registry = registry  # type: ignore[attr-defined]
     app._config = config  # type: ignore[attr-defined]
     register_all(app, registry, config)
+
+    @app.resource("gdb://campaign/{session_id}")
+    def campaign_resource(session_id: str) -> str:
+        """Read-only view of a session's exploit-campaign state."""
+        import json
+
+        from gdb_mcp.campaign import campaign_summary
+
+        session = registry.get(session_id)
+        payload = {
+            "session_id": session.session_id,
+            "state": session.state,
+            "campaign": session.campaign,
+            "summary": campaign_summary(session.campaign),
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=1)
+
     return app
 
 

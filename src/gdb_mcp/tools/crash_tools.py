@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import Context
 
+from gdb_mcp.campaign import campaign_detect, campaign_summary, is_empty
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.output import parse_proc_mappings
 from gdb_mcp.sessions import RUNNING
 
-from ._common import check_stopped, config_from, parse_hex_addr, resolve_gdb
+from ._common import check_stopped, config_from, parse_hex_addr, registry_from, resolve_gdb
 
 
 def register(app, registry, config) -> None:
@@ -97,5 +98,13 @@ def register(app, registry, config) -> None:
                     "truncated": len(segments) > len(head)
                     or bool(mmap.get("truncated", False)),
                 }
+            # cyclic oracle over the stop values: a pattern hit is recorded
+            # in the campaign as a pc-control candidate
+            detect = campaign_detect(session.campaign, stop_info)
+            if detect is not None:
+                report["cyclic_match"] = detect
+                registry_from(ctx).save()
+            if not is_empty(session.campaign):
+                report["campaign"] = campaign_summary(session.campaign)
             report["warnings"] = warnings
         return report

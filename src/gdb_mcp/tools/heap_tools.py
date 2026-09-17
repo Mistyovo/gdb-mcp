@@ -43,6 +43,34 @@ def register(app, registry, config) -> None:
         return parsed
 
     @app.tool()
+    async def run_policy(
+        kind: str,
+        params: dict | None = None,
+        session_id: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """Delegate a bounded loop to the plugin so it runs at native
+        speed; the response is a constant-size summary regardless of
+        iterations. Kinds (all need a stopped inferior):
+        - trace: {max_steps} single-steps, returns unique PCs in order.
+        - heap_arm: arm allocation-symbol probes {symbols, max_events}
+          that record args per hit and auto-continue invisibly;
+          heap_read accumulates the timeline; heap_disarm removes them.
+        - fuzz_loop: per payload — restore checkpoint, write payload at
+          buffer_addr, resume; stops at stop_location (a guaranteed-stop
+          marker, e.g. the caller of the function under test) count as
+          survived, anything else is a deduped crash. params:
+          snapshot_id, buffer_addr, payloads (hex list), stop_location,
+          max_rounds."""
+        session = resolve_gdb(ctx, session_id)
+        check_stopped(session)
+        policy_params = dict(params or {})
+        policy_params["kind"] = kind
+        return await session.request(
+            "policy", policy_params, timeout=config_from(ctx).request_timeout
+        )
+
+    @app.tool()
     async def checkpoint(
         action: str = "create",
         snapshot_id: str | None = None,

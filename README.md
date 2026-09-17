@@ -168,16 +168,30 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（33 个）
+## 工具一览（36 个）
 
 | 类别 | 工具 |
 |---|---|
-| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script`（journal → 可重放 gdbscript） |
+| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script`（journal → 可重放 gdbscript）`diff_sessions`（跨会话寄存器/内存差分） |
 | 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`get_stop_reason` `read_result` `batch_commands`（多命令一次往返） |
 | 崩溃定位 | `crash_report` |
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
-| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控） |
+| 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
+| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
+
+## 战役状态与委托执行
+
+- **campaign**：服务器为每个会话维护结构化漏洞利用进度（protections/libc 泄漏/
+  偏移/primitives/notes）。`campaign(action="detect")` 对最近一次停机的 PC/fault/
+  寄存器跑 **cyclic 偏移 oracle**（pwntools 兼容 de Bruijn 序列），命中即记录
+  pc_control 候选；`action="pattern"` 直接生成模式串。停机响应自动注入 3–6 行
+  战役摘要——agent 不再每轮重推上下文。状态只读视图经 MCP Resource
+  `gdb://campaign/{session_id}` 暴露。
+- **run_policy（委托执行）**：有界循环下沉到 gdb 进程内原生速度执行，响应大小
+  与迭代次数无关——`trace`（有界单步轨迹）、`heap_arm/read/disarm`（分配函数
+  探针记录参数、自动续跑不打断执行流）、`fuzz_loop`（checkpoint 恢复 + payload
+  写入 + 续跑的**gdb 内快照模糊测试**，崩溃按信号+PC 去重）。
 
 `GDB_MCP_TOOL_PROFILE=core` 只注册 12 个高频工具（省每次请求的 schema
 token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带

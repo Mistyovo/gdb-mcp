@@ -421,7 +421,13 @@ class TestPersistence:
         r1 = SessionRegistry(Config())
         r1.enable_persistence(path)
         r1.reserve("s-p1", log_file="/logs/s-p1.log")
-        r1.register_hello(hello(session_id="s-p1"), FakeWriter())
+        s1 = r1.register_hello(hello(session_id="s-p1"), FakeWriter())
+        from gdb_mcp.campaign import campaign_set
+
+        campaign_set(s1.campaign, "offsets", "libc_base", "0x7ffff7d80000")
+        # campaign mutations are persisted by the tool layer / GC loop;
+        # this test simulates both by saving explicitly
+        r1.save()
 
         # server restart: fresh registry over the same persistence file
         r2 = SessionRegistry(Config())
@@ -430,6 +436,7 @@ class TestPersistence:
         assert old.state == DISCONNECTED
         assert old.log_file == "/logs/s-p1.log"
         assert old.hello["pid"] == 1234
+        assert old.campaign["offsets"]["libc_base"]["value"] == "0x7ffff7d80000"
 
         # the plugin's re-hello revives the SAME identity
         revived = r2.register_hello(hello(session_id="s-p1", pid=999), FakeWriter())

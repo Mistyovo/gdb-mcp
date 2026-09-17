@@ -103,6 +103,16 @@ class Session:
     event_seq: int = 0
     #: per-session JSONL journal (audit + gdbscript export), if enabled
     journal: Any = None
+    #: structured exploit-campaign state (campaign tool / brief injection)
+    campaign: dict = field(
+        default_factory=lambda: {
+            "protections": {},
+            "libc": {},
+            "offsets": {},
+            "primitives": {},
+            "notes": [],
+        }
+    )
 
     _next_id: int = field(default=1, init=False)
 
@@ -517,6 +527,7 @@ class SessionRegistry:
                     "launched": s.launched,
                     "hello": s.hello,
                     "stop_info": s.stop_info,
+                    "campaign": s.campaign,
                 }
                 for s in self._sessions.values()
                 if s.kind == "gdb"
@@ -558,6 +569,9 @@ class SessionRegistry:
                 token=self.config.token,
             )
             session.stop_info = entry.get("stop_info")
+            campaign = entry.get("campaign")
+            if isinstance(campaign, dict):
+                session.campaign = campaign
             self._sessions[sid] = session
             self._attach_journal(session)
             restored += 1
@@ -586,13 +600,16 @@ class SessionRegistry:
         return removed
 
     async def gc_loop(self, interval: float = 60.0) -> None:
-        """Periodic GC task (runs until cancelled)."""
+        """Periodic GC + persistence checkpoint (runs until cancelled)."""
         while True:
             await asyncio.sleep(interval)
             try:
                 await self.gc_once()
             except Exception:  # pragma: no cover - never let GC die
                 log.exception("gc_once failed")
+            # safety net: catch campaign/journal metadata mutations that
+            # did not go through an explicitly save-triggering path
+            self.save()
 
 
 def make_registry(config: Config) -> SessionRegistry:

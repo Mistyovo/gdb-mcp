@@ -9,6 +9,7 @@ from gdb_mcp.sessions import SessionRegistry
 
 from . import (
     breakpoint_tools,
+    campaign_tools,
     crash_tools,
     exec_tools,
     heap_tools,
@@ -24,6 +25,7 @@ TOOL_MODULES = (
     state_tools,
     breakpoint_tools,
     heap_tools,
+    campaign_tools,
     crash_tools,
 )
 

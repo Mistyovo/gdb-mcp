@@ -135,6 +135,45 @@ SNAPSHOT_RESTORE_CHUNK = 1024 * 1024
 DIFF_ROW_BYTES = 16
 DIFF_MAX_ROWS = 256
 DIFF_MAX_REGS = 64
+POLICY_MAX_STEPS = 4096
+POLICY_MAX_EVENTS = 4096
+POLICY_TRACE_CAP = 512
+POLICY_TIMELINE_READ = 256
+POLICY_MAX_PAYLOADS = 64
+POLICY_MAX_CRASHES = 32
+
+
+class _TimelineBreakpoint(gdb.Breakpoint):
+    """Allocation probe: records arguments on every hit and returns False
+    so the inferior resumes invisibly — the timeline accumulates without
+    ever stopping the run."""
+
+    def __init__(self, location, sink, max_events):
+        gdb.Breakpoint.__init__(self, location, gdb.BP_BREAKPOINT)
+        self._sink = sink
+        self._max = max_events
+
+    def stop(self):
+        if len(self._sink) >= self._max:
+            return True  # budget exhausted: let the inferior stop
+        try:
+            frame = gdb.selected_frame()
+            entry = {"symbol": str(self.location), "pc": "0x%x" % int(frame.pc())}
+            older = frame.older()
+            if older is not None:
+                entry["caller"] = "0x%x" % int(older.pc())
+            args = {}
+            for name in ("rdi", "rsi", "rdx", "rcx", "r8", "r9",
+                         "edi", "esi", "edx", "ecx"):
+                try:
+                    args[name] = "0x%x" % int(frame.read_register(name))
+                except Exception:
+                    pass
+            entry["args"] = args
+            self._sink.append(entry)
+        except Exception:
+            pass
+        return False
 
 #: handled entirely on the reader thread
 READER_VERBS = frozenset(["ping", "interrupt", "quit"])
@@ -164,6 +203,7 @@ GATED_VERBS = frozenset(
         "snapshot_list",
         "snapshot_restore",
         "snapshot_diff",
+        "policy",
     ]
 )
 _CONTINUE_CMDS = {
@@ -402,6 +442,9 @@ class Plugin(object):
         self._wire_generation = 0
         self._snapshots = {}
         self._snapshot_counter = 0
+        self._timeline_bps = []
+        self._timeline_events = []
+        self._timeline_max = POLICY_MAX_EVENTS
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1531,6 +1574,197 @@ class Plugin(object):
             "segments_skipped": segments_skipped,
         }
 
+    # -- delegated policies (plugin-side loops, constant-size summaries) -----
+
+    def _handle_policy(self, params):
+        kind = params.get("kind")
+        handlers = {
+            "trace": self._policy_trace,
+            "heap_arm": self._policy_heap_arm,
+            "heap_read": self._policy_heap_read,
+            "heap_disarm": self._policy_heap_disarm,
+            "fuzz_loop": self._policy_fuzz_loop,
+        }
+        handler = handlers.get(kind)
+        if handler is None:
+            raise PluginError(
+                "BAD_PARAMS",
+                "unknown policy kind %r (expected %s)"
+                % (kind, ", ".join(sorted(handlers))),
+            )
+        self._guard_stopped()
+        return handler(params)
+
+    def _policy_trace(self, params):
+        max_steps = _bounded_int(
+            params.get("max_steps"), 200, 1, POLICY_MAX_STEPS
+        )
+        self._require_frame()
+        visited = []
+        seen = set()
+        try:
+            first_pc = int(gdb.selected_frame().pc())
+            visited.append(first_pc)
+            seen.add(first_pc)
+        except Exception:
+            pass
+        steps = 0
+        stop = "max_steps"
+        for _ in range(max_steps):
+            try:
+                self._handle_eval({"command": "stepi"})
+            except PluginError as exc:
+                stop = "error:%s" % exc.code
+                break
+            except Exception as exc:
+                stop = "error:%s" % exc
+                break
+            steps += 1
+            try:
+                pc = int(gdb.selected_frame().pc())
+            except Exception:
+                stop = "no_frame"
+                break
+            if pc not in seen:
+                seen.add(pc)
+                visited.append(pc)
+        return {
+            "steps": steps,
+            "unique_count": len(visited),
+            "unique_pc": ["0x%x" % pc for pc in visited[:POLICY_TRACE_CAP]],
+            "truncated": len(visited) > POLICY_TRACE_CAP,
+            "stop": stop,
+        }
+
+    def _policy_heap_arm(self, params):
+        if self._timeline_bps:
+            raise PluginError(
+                "BAD_PARAMS", "timeline already armed; heap_disarm first"
+            )
+        max_events = _bounded_int(
+            params.get("max_events"), 256, 1, POLICY_MAX_EVENTS
+        )
+        symbols = params.get("symbols") or [
+            "malloc", "free", "realloc", "calloc",
+        ]
+        self._timeline_events = []
+        self._timeline_max = max_events
+        armed = []
+        skipped = []
+        for sym in symbols:
+            try:
+                self._timeline_bps.append(
+                    _TimelineBreakpoint(str(sym), self._timeline_events, max_events)
+                )
+                armed.append(str(sym))
+            except gdb.error as exc:
+                skipped.append({"symbol": str(sym), "reason": str(exc)})
+        if not armed:
+            raise PluginError(
+                "PLUGIN_ERROR", "no allocation symbol could be armed"
+            )
+        return {"armed": armed, "skipped": skipped, "max_events": max_events}
+
+    def _policy_heap_read(self, params):
+        if not self._timeline_bps:
+            raise PluginError("BAD_PARAMS", "timeline not armed")
+        events = self._timeline_events
+        return {
+            "armed": [str(bp.location) for bp in self._timeline_bps],
+            "total": len(events),
+            "events": events[-POLICY_TIMELINE_READ:],
+            "truncated": len(events) > POLICY_TIMELINE_READ,
+        }
+
+    def _policy_heap_disarm(self, params):
+        if not self._timeline_bps:
+            raise PluginError("BAD_PARAMS", "timeline not armed")
+        total = len(self._timeline_events)
+        for bp in self._timeline_bps:
+            try:
+                bp.delete()
+            except Exception:
+                pass
+        self._timeline_bps = []
+        self._timeline_events = []
+        return {"disarmed": True, "total_events": total}
+
+    def _policy_fuzz_loop(self, params):
+        sid, _snap = self._find_snapshot(params)
+        payloads = params.get("payloads")
+        if not isinstance(payloads, list) or not payloads:
+            raise PluginError(
+                "BAD_PARAMS", "payloads must be a non-empty list of hex strings"
+            )
+        payloads = payloads[:POLICY_MAX_PAYLOADS]
+        if "buffer_addr" not in params or "stop_location" not in params:
+            raise PluginError(
+                "BAD_PARAMS",
+                "fuzz_loop requires buffer_addr and stop_location (a "
+                "guaranteed-stop marker, e.g. the caller of the function "
+                "under test)",
+            )
+        buffer_addr = self._resolve_addr(params.get("buffer_addr"))
+        stop_location = str(params.get("stop_location"))
+        crashes = []
+        survived = 0
+        rounds = 0
+        signatures = set()
+        for index, payload_hex in enumerate(payloads):
+            if not isinstance(payload_hex, str) or not payload_hex.strip():
+                continue
+            try:
+                payload = _hex_to_bytes(payload_hex)
+            except ValueError as exc:
+                raise PluginError("BAD_PARAMS", str(exc))
+            rounds += 1
+            self._handle_snapshot_restore({"snapshot_id": sid})
+            if payload:
+                self._handle_write_mem({"addr": buffer_addr, "hex": payload.hex()})
+            marker = self._handle_break(
+                {"location": stop_location, "temporary": True}
+            )
+            try:
+                self._handle_continue_family(0, "continue", {})
+            except PluginError as exc:
+                if exc.code != "INFERIOR_RUNNING":
+                    try:
+                        self._handle_bp_delete({"number": marker["number"]})
+                    except PluginError:
+                        pass
+                    crashes.append(
+                        {"round": rounds, "payload_index": index, "error": exc.message}
+                    )
+                    break
+            stop = self.stop_info or {}
+            hit_numbers = stop.get("breakpoints") or []
+            if marker["number"] in hit_numbers:
+                survived += 1
+            else:
+                signature = (stop.get("signal"), stop.get("pc"))
+                if signature not in signatures:
+                    signatures.add(signature)
+                    crashes.append(
+                        {
+                            "round": rounds,
+                            "payload_index": index,
+                            "payload_bytes": len(payload),
+                            "stop": stop,
+                        }
+                    )
+            try:
+                self._handle_bp_delete({"number": marker["number"]})
+            except PluginError:
+                pass  # temporary breakpoint already consumed itself
+        return {
+            "snapshot_id": sid,
+            "rounds": rounds,
+            "survived": survived,
+            "crash_count": len(crashes),
+            "crashes": crashes[:POLICY_MAX_CRASHES],
+            "truncated": len(crashes) > POLICY_MAX_CRASHES,
+        }
+
     # -- gdb events (main thread; never block) ------------------------------
 
     def _connect_events(self):
@@ -1713,6 +1947,7 @@ VERB_HANDLERS = {
     "snapshot_list": Plugin._handle_snapshot_list,
     "snapshot_restore": Plugin._handle_snapshot_restore,
     "snapshot_diff": Plugin._handle_snapshot_diff,
+    "policy": Plugin._handle_policy,
 }
 
 

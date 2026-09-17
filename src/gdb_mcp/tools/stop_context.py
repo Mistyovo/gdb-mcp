@@ -8,6 +8,7 @@ of crashing into 3-5 separate tool calls after every breakpoint hit.
 
 from __future__ import annotations
 
+from gdb_mcp.campaign import campaign_summary, is_empty
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.output import fmt_addr
@@ -78,4 +79,8 @@ async def collect_stop_context(
         else:
             context["disassembly"] = []
             warnings.append("no PC available for disassembly")
+    # constant-size campaign brief: what this session has already
+    # established, so the model never re-derives it
+    if not is_empty(session.campaign):
+        context["campaign"] = campaign_summary(session.campaign)
     return context

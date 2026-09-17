@@ -618,3 +618,96 @@ class TestSnapshots:
         plugin.state = "running"
         resp = call(plugin, "snapshot_create", {})
         assert resp["error"]["code"] == "INFERIOR_RUNNING"
+
+
+class TestPolicies:
+    def test_trace_steps_and_unique_pcs(self, plugin):
+        set_inferior()
+        mock_gdb.state.stepi_stride = 4
+        r = call(plugin, "policy", {"kind": "trace", "max_steps": 5})["result"]
+        assert r["steps"] == 5
+        # the starting PC is recorded, then the 5 stepped PCs
+        assert r["unique_count"] == 6
+        assert r["unique_pc"][:2] == ["0x401000", "0x401004"]
+        assert r["stop"] == "max_steps"
+        assert r["truncated"] is False
+
+    def test_trace_unknown_kind(self, plugin):
+        set_inferior()
+        resp = call(plugin, "policy", {"kind": "teleport"})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_heap_arm_read_disarm(self, plugin):
+        set_inferior()
+        r = call(
+            plugin,
+            "policy",
+            {"kind": "heap_arm", "symbols": ["malloc", "free"]},
+        )["result"]
+        assert r["armed"] == ["malloc", "free"]
+        assert len(mock_gdb.state.breakpoints) == 2
+        # a probe hit records args and auto-continues (stop() -> False)
+        assert mock_gdb.state.breakpoints[0].stop() is False
+        r = call(plugin, "policy", {"kind": "heap_read"})["result"]
+        assert r["total"] == 1
+        assert r["events"][0]["symbol"] == "malloc"
+        # mock frames only carry rax/rbx/rcx/rip; rcx is a probe register
+        assert r["events"][0]["args"] == {"rcx": "0x3"}
+        r = call(plugin, "policy", {"kind": "heap_disarm"})["result"]
+        assert r == {"disarmed": True, "total_events": 1}
+        assert mock_gdb.state.breakpoints == []
+
+    def test_heap_max_events_stops_inferior(self, plugin):
+        set_inferior()
+        call(plugin, "policy", {"kind": "heap_arm", "symbols": ["malloc"], "max_events": 1})
+        bp = mock_gdb.state.breakpoints[0]
+        assert bp.stop() is False  # records the first hit
+        assert bp.stop() is True  # budget exhausted: let the run stop
+
+    def test_heap_double_arm_rejected(self, plugin):
+        set_inferior()
+        call(plugin, "policy", {"kind": "heap_arm", "symbols": ["malloc"]})
+        resp = call(plugin, "policy", {"kind": "heap_arm", "symbols": ["free"]})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_fuzz_loop_crash_and_survive(self, plugin):
+        plugin._connect_events()
+        inf = set_inferior()
+        inf.memory[0x1000:0x3000] = b"\x00" * 0x2000
+        mock_gdb.state.output_map["info proc mappings"] = SNAP_MAPPINGS
+        call(plugin, "snapshot_create", {})
+        mock_gdb.state.continue_script = [
+            ("bp",),                 # round 1: reaches the marker -> survived
+            ("sig", "SIGSEGV"),      # round 2: crash (pc bumped by 0x10)
+            ("sig", "SIGSEGV"),      # round 3: crash at a different pc
+        ]
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "fuzz_loop",
+                "snapshot_id": "ck-1",
+                "buffer_addr": "0x1000",
+                "payloads": ["41" * 16, "42" * 8, "43" * 8],
+                "stop_location": "main",
+            },
+        )["result"]
+        assert r["rounds"] == 3
+        assert r["survived"] == 1
+        assert r["crash_count"] == 2
+        assert r["truncated"] is False
+        crash_signals = {c["stop"]["signal"] for c in r["crashes"]}
+        assert crash_signals == {"SIGSEGV"}
+        # the inferior is left stopped for the next policy round
+        assert plugin.state == "stopped"
+
+    def test_fuzz_loop_requires_snapshot_and_params(self, plugin):
+        set_inferior()
+        resp = call(plugin, "policy", {"kind": "fuzz_loop"})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_policy_gated_while_running(self, plugin):
+        set_inferior()
+        plugin.state = "running"
+        resp = call(plugin, "policy", {"kind": "trace"})
+        assert resp["error"]["code"] == "INFERIOR_RUNNING"

@@ -254,6 +254,11 @@ class FakeStopEvent:
         self.details = details or {}
 
 
+class FakeBreakHitEvent:
+    def __init__(self, breakpoints):
+        self.breakpoints = breakpoints
+
+
 class FakeExitedEvent:
     def __init__(self, exit_code=139):
         self.exit_code = exit_code
@@ -285,6 +290,8 @@ class _State:
         self.selected_thread = self.threads[0] if self.threads else None
         self.breakpoints = []
         self.interrupt_calls = 0
+        self.continue_script = []  # simulated stops for execute("continue")
+        self.stepi_stride = 4  # pc advance per execute("stepi")
         MockBreakpoint._next = 1
 
 
@@ -315,6 +322,22 @@ def execute(cmd, to_string=False):
             raise error("No frame selected.")
         name, expression = register_assignment.groups()
         frame._regs[name] = int(parse_and_eval(expression))
+        return ""
+    if cmd == "continue" and state.continue_script:
+        # simulate the next stop of a real resume: fire the connected
+        # event handlers exactly like a real gdb stop would
+        action = state.continue_script.pop(0)
+        if action[0] == "bp":
+            last = state.breakpoints[-1] if state.breakpoints else None
+            events.stop.fire(FakeBreakHitEvent([last] if last else []))
+        elif action[0] == "sig":
+            if state.newest_frame is not None:
+                state.newest_frame._pc += action[2] if len(action) > 2 else 0x10
+            events.stop.fire(FakeStopEvent(action[1], {"reason": "signal-received"}))
+        return ""
+    if cmd == "stepi":
+        if state.newest_frame is not None:
+            state.newest_frame._pc += state.stepi_stride
         return ""
     if cmd in state.output_map:
         return state.output_map[cmd]

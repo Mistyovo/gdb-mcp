@@ -81,6 +81,7 @@ VERBS = frozenset(
         "snapshot_list",
         "snapshot_restore",
         "snapshot_diff",
+        "policy",
     }
 ) | ASYNC_VERBS | READER_VERBS
 
