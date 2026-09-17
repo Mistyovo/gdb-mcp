@@ -180,6 +180,18 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
 | pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
 
+## 实验性功能
+
+设 `GDB_MCP_EXPERIMENTAL=1` 后额外注册 6 个实验工具（可能在没有弃用周期的情况下变动）：
+
+- **Inferior stdio 通道**：`io_setup` / `send_to_inferior` / `read_inferior_output` /
+  `io_teardown` — 把 inferior 的 stdio 重定向到插件管理的 pty，无需 pwntools 即可
+  交互菜单式程序，`run_policy(fuzz_loop)` 也可全自动喂输入。Unix only。
+- **崩溃最小化**：`run_policy(kind="minimize")` 对崩溃 payload 做 delta debugging，
+  只接受信号不变的删除（防漂移）；`kind="crash_check"` 单发判定。
+- **libc 识别 / ROP 搜索**：`identify_libc`（libc.rip 兼容 API，`GDB_MCP_LIBC_RIP_API`
+  可配）与 `search_gadgets`（ROPgadget CLI + 正则过滤，地址规范化）。
+
 ## 战役状态与委托执行
 
 - **campaign**：服务器为每个会话维护结构化漏洞利用进度（protections/libc 泄漏/
