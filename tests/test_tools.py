@@ -1480,3 +1480,64 @@ class TestDiffSessions:
         row = result["memory_diff"]["rows"][0]
         assert row["a_hex"] == "11" * 16
         assert row["b_hex"] == "22" * 16
+
+
+class TestExperimentalGating:
+    @staticmethod
+    def _app_with(experimental: bool, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", experimental=experimental)
+        registry = SessionRegistry(cfg)
+        app = build_app(cfg, registry)
+        return cfg, registry, app
+
+    def test_hidden_by_default(self, tmp_path):
+        _, _, app = self._app_with(False, tmp_path)
+        names = set(app._tool_manager._tools)
+        assert "send_to_inferior" not in names
+        assert "read_inferior_output" not in names
+        assert "io_setup" not in names
+        assert "io_teardown" not in names
+
+    def test_registered_when_enabled(self, tmp_path):
+        _, registry, app = self._app_with(True, tmp_path)
+        names = set(app._tool_manager._tools)
+        assert {
+            "send_to_inferior",
+            "read_inferior_output",
+            "io_setup",
+            "io_teardown",
+        } <= names
+
+    @pytest.mark.asyncio
+    async def test_send_to_inferior_passthrough(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", experimental=True)
+        registry = SessionRegistry(cfg)
+        app = build_app(cfg, registry)
+        tools = {n: app._tool_manager._tools[n] for n in app._tool_manager._tools}
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["send_to_inferior"],
+                {"hex": "3120", "session_id": s.session_id},
+                ctx_for((registry, cfg, tools)),
+            )
+        )
+        req = await respond_to(s, s.writer, {"sent": 2})
+        assert req["verb"] == "io_send"
+        assert req["params"]["hex"] == "3120"
+        assert await task == {"sent": 2}
+
+    @pytest.mark.asyncio
+    async def test_send_to_inferior_validates_hex(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", experimental=True)
+        registry = SessionRegistry(cfg)
+        app = build_app(cfg, registry)
+        tools = {n: app._tool_manager._tools[n] for n in app._tool_manager._tools}
+        add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["send_to_inferior"],
+                {"hex": "zz"},
+                ctx_for((registry, cfg, tools)),
+            )
+        assert ei.value.code == "BAD_PARAMS"

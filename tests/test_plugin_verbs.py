@@ -711,3 +711,68 @@ class TestPolicies:
         plugin.state = "running"
         resp = call(plugin, "policy", {"kind": "trace"})
         assert resp["error"]["code"] == "INFERIOR_RUNNING"
+
+
+class _MemoryChannel:
+    def __init__(self):
+        self.slave_path = "/dev/fake-pts"
+        self.written = []
+        self.closed = False
+        self.pending = [b"menu:\n1. create\n"]
+
+    def start(self, sink):
+        for chunk in self.pending:
+            sink(chunk)
+        return None
+
+    def write(self, data):
+        self.written.append(bytes(data))
+        return len(data)
+
+    def close(self):
+        self.closed = True
+
+
+class TestInferiorIo:
+    def test_setup_send_read_teardown(self, plugin, plugin_mod, monkeypatch):
+        channel = _MemoryChannel()
+        monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: channel)
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)
+        r = call(plugin, "io_setup", {})["result"]
+        assert r["slave_path"] == "/dev/fake-pts"
+        # the inferior-tty switch went through the eval verb
+        assert "set inferior-tty /dev/fake-pts" in mock_gdb.state.executed
+        r = call(plugin, "io_send", {"hex": "3120"})["result"]
+        assert r["sent"] == 2
+        assert channel.written == [b"1 "]
+        r = call(plugin, "io_read", {})["result"]
+        assert r["chunks"][0]["seq"] == 1
+        assert "menu:" in r["chunks"][0]["text"]
+        assert r["last_seq"] == 1
+        # paging: everything at or below since_seq is skipped
+        r = call(plugin, "io_read", {"since_seq": 1})["result"]
+        assert r["chunks"] == []
+        r = call(plugin, "io_teardown", {})["result"]
+        assert r["torn_down"] is True and channel.closed
+        assert call(plugin, "io_read", {})["error"]["code"] == "BAD_PARAMS"
+
+    def test_setup_twice_rejected(self, plugin, plugin_mod, monkeypatch):
+        monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: _MemoryChannel())
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)
+        call(plugin, "io_setup", {})
+        assert call(plugin, "io_setup", {})["error"]["code"] == "BAD_PARAMS"
+
+    def test_unsupported_platform(self, plugin, plugin_mod, monkeypatch):
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", False)
+        assert call(plugin, "io_setup", {})["error"]["code"] == "IO_UNSUPPORTED"
+
+    def test_buffer_overflow_accounting(self, plugin, plugin_mod, monkeypatch):
+        monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: _MemoryChannel())
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)
+        call(plugin, "io_setup", {})
+        # +1: the channel's initial chunk counts toward the cap too
+        for _ in range(plugin_mod.IO_BUFFER_CHUNKS + 75):
+            plugin._io_sink(b"x")
+        r = call(plugin, "io_read", {})["result"]
+        assert r["total_chunks"] == plugin_mod.IO_BUFFER_CHUNKS
+        assert r["dropped_overflow"] == 76

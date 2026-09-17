@@ -42,6 +42,7 @@ DEFAULTS = {
     "mcp_port": 8001,
     "readonly": False,
     "allow_unsafe": False,
+    "experimental": False,
 }
 
 
@@ -86,6 +87,8 @@ class Config:
     readonly: bool = DEFAULTS["readonly"]
     #: allow gdb commands that escape the debugger (shell/!/python/...)
     allow_unsafe: bool = DEFAULTS["allow_unsafe"]
+    #: register experimental tools (subject to change without notice)
+    experimental: bool = DEFAULTS["experimental"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -196,6 +199,8 @@ class Config:
             mcp_port=env("MCP_PORT", int) or DEFAULTS["mcp_port"],
             readonly=env_bool("READONLY") or DEFAULTS["readonly"],
             allow_unsafe=env_bool("ALLOW_UNSAFE") or DEFAULTS["allow_unsafe"],
+            experimental=env_bool("EXPERIMENTAL")
+            or DEFAULTS["experimental"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:

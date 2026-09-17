@@ -44,6 +44,7 @@ import socket
 import sys
 import threading
 import time
+from collections import deque
 
 import gdb
 
@@ -141,6 +142,61 @@ POLICY_TRACE_CAP = 512
 POLICY_TIMELINE_READ = 256
 POLICY_MAX_PAYLOADS = 64
 POLICY_MAX_CRASHES = 32
+IO_BUFFER_CHUNKS = 1024
+IO_READ_CHUNK = 4096
+IO_MAX_CHUNKS_PER_READ = 64
+
+
+class _PtyChannel:
+    """Unix pty pair feeding the inferior's stdio; the master side is our
+    write/read endpoint, the slave path becomes ``set inferior-tty``."""
+
+    def __init__(self):
+        master, slave = os.openpty()
+        self._master = master
+        self.slave_path = os.ttyname(slave)
+        self._stop = threading.Event()
+
+    def start(self, sink):
+        """Spawn the reader thread; ``sink`` is called with each chunk."""
+
+        def loop():
+            while not self._stop.is_set():
+                try:
+                    data = os.read(self._master, IO_READ_CHUNK)
+                except OSError:
+                    break
+                if not data:
+                    break
+                sink(data)
+
+        thread = threading.Thread(target=loop, name="gdbmcp-io", daemon=True)
+        thread.start()
+        return thread
+
+    def write(self, data: bytes) -> int:
+        view = memoryview(data)
+        total = 0
+        while view:
+            written = os.write(self._master, view)
+            total += written
+            view = view[written:]
+        return total
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            os.close(self._master)
+        except OSError:
+            pass
+
+
+def _make_io_channel():
+    """Factory indirection so tests can inject a memory-backed channel."""
+    return _PtyChannel()
+
+
+_HAS_OPENPTY = hasattr(os, "openpty")
 
 
 class _TimelineBreakpoint(gdb.Breakpoint):
@@ -446,6 +502,11 @@ class Plugin(object):
         self._timeline_bps = []
         self._timeline_events = []
         self._timeline_max = POLICY_MAX_EVENTS
+        self._io = None
+        self._io_buf = deque(maxlen=IO_BUFFER_CHUNKS)
+        self._io_seq = 0
+        self._io_dropped = 0
+        self._io_thread = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1767,6 +1828,82 @@ class Plugin(object):
             "truncated": len(crashes) > POLICY_MAX_CRASHES,
         }
 
+    # -- experimental: inferior stdio over a pty -----------------------------
+
+    def _io_sink(self, data: bytes) -> None:
+        if len(self._io_buf) == self._io_buf.maxlen:
+            self._io_dropped += 1
+        self._io_seq += 1
+        self._io_buf.append((self._io_seq, data))
+
+    def _handle_io_setup(self, params):
+        if self._io is not None:
+            raise PluginError("BAD_PARAMS", "io already set up; io_teardown first")
+        if not _HAS_OPENPTY:
+            raise PluginError(
+                "IO_UNSUPPORTED", "this platform has no pty support"
+            )
+        channel = _make_io_channel()
+        self._io = channel
+        self._io_buf.clear()
+        self._io_seq = 0
+        self._io_dropped = 0
+        self._io_thread = channel.start(self._io_sink)
+        # applies to the inferior's NEXT run/start (documented behavior
+        # of gdb's inferior-tty)
+        self._handle_eval(
+            {"command": "set inferior-tty %s" % channel.slave_path}
+        )
+        return {
+            "slave_path": channel.slave_path,
+            "note": "inferior stdio switches to the pty on its next run/start",
+        }
+
+    def _handle_io_send(self, params):
+        if self._io is None:
+            raise PluginError("BAD_PARAMS", "io not set up; io_setup first")
+        data = _hex_to_bytes(params.get("hex", ""))
+        if not data:
+            raise PluginError("BAD_PARAMS", "hex payload is required")
+        sent = self._io.write(data)
+        return {"sent": sent}
+
+    def _handle_io_read(self, params):
+        if self._io is None:
+            raise PluginError("BAD_PARAMS", "io not set up; io_setup first")
+        since = _bounded_int(params.get("since_seq"), 0, 0, 1 << 62)
+        snapshot = list(self._io_buf)
+        chunks = []
+        for seq, data in snapshot:
+            if seq <= since:
+                continue
+            chunks.append(
+                {
+                    "seq": seq,
+                    "length": len(data),
+                    "hex": data.hex(),
+                    "text": data.decode("utf-8", "replace"),
+                }
+            )
+        return {
+            "chunks": chunks[-IO_MAX_CHUNKS_PER_READ:],
+            "total_chunks": len(snapshot),
+            # older chunks evicted by the buffer cap (page back with
+            # since_seq for anything still buffered but beyond the
+            # per-read chunk limit)
+            "dropped_overflow": self._io_dropped,
+            "last_seq": self._io_seq,
+        }
+
+    def _handle_io_teardown(self, params):
+        if self._io is None:
+            raise PluginError("BAD_PARAMS", "io not set up")
+        total = self._io_seq
+        self._io.close()
+        self._io = None
+        self._io_buf.clear()
+        return {"torn_down": True, "total_chunks_seen": total}
+
     # -- gdb events (main thread; never block) ------------------------------
 
     def _connect_events(self):
@@ -1950,6 +2087,10 @@ VERB_HANDLERS = {
     "snapshot_restore": Plugin._handle_snapshot_restore,
     "snapshot_diff": Plugin._handle_snapshot_diff,
     "policy": Plugin._handle_policy,
+    "io_setup": Plugin._handle_io_setup,
+    "io_send": Plugin._handle_io_send,
+    "io_read": Plugin._handle_io_read,
+    "io_teardown": Plugin._handle_io_teardown,
 }
 
 
