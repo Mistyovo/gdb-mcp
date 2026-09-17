@@ -8,10 +8,11 @@ import time
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.journal import compile_gdbscript
 from gdb_mcp.output import tail_text_file
 from gdb_mcp.sessions import DISCONNECTED, RESERVED
 
-from ._common import resolve_any, resolve_gdb
+from ._common import config_from, resolve_any, resolve_gdb
 
 
 def register(app, registry, config) -> None:
@@ -76,6 +77,39 @@ def register(app, registry, config) -> None:
             "state": session.state,
             "events": session.recent_events(last),
             "total_recorded": len(session.event_log),
+        }
+
+    @app.tool()
+    def export_session_script(
+        session_id: str | None = None, ctx: Context = None
+    ) -> dict:
+        """Compile the session's journal into a deterministic, replayable
+        gdbscript (state-mutating and control-flow operations only; pure
+        reads and plugin-specific checkpoint ops are skipped, with
+        counters). This is the audit artifact: run it under plain gdb to
+        reproduce what was done — no gdb-mcp required."""
+        session = resolve_gdb(ctx, session_id)
+        if session.journal is None or len(session.journal) == 0:
+            raise GdbMcpError(
+                "NO_JOURNAL", "session has no journal entries yet"
+            )
+        meta = {
+            "session_id": session.session_id,
+            "inferior": (session.hello or {}).get("inferior"),
+        }
+        script, stats = compile_gdbscript(meta, session.journal.entries())
+        cfg = config_from(ctx)
+        out_dir = cfg.log_dir / "scripts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / ("%s.gdb" % session.session_id)
+        path.write_text(script, encoding="utf-8")
+        return {
+            "session_id": session.session_id,
+            "path": str(path),
+            "total_lines": script.count("\n"),
+            "journal_entries": len(session.journal),
+            **stats,
+            "script": script,
         }
 
     @app.tool()

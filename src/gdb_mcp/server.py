@@ -29,13 +29,16 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
         "gdb-mcp",
         lifespan=_lifespan,
         instructions=(
-            "gdb-mcp v%s drives a local Linux gdb (possibly with pwndbg) "
-            "for binary exploitation. Sessions are gdb processes connected "
-            "via the in-gdb plugin. One-call stop inspection: "
-            "continue_execution(wait=True, with_context=True) resumes and "
-            "returns the stop reason plus registers/backtrace/disassembly "
-            "in a single response; crash_report does deeper crash triage; "
-            "get_events surfaces events that happened between calls."
+            "gdb-mcp v%s drives local Linux gdb sessions (pwndbg-aware) "
+            "for binary exploitation. One-call stop inspection: "
+            "continue_execution(wait=True, with_context=True) returns the "
+            "stop reason plus registers/backtrace/disassembly in a single "
+            "response; crash_report does deeper crash triage; get_events "
+            "surfaces events between calls. Pwn workflow: heap_bins for "
+            "structured glibc bins (needs pwndbg), checkpoint(create/"
+            "restore/diff) for state snapshots, batch_commands to run "
+            "several gdb commands per round-trip. export_session_script "
+            "compiles the session into a replayable gdbscript."
         )
         % __version__,
     )
@@ -80,6 +83,7 @@ async def serve(config: Config) -> None:
     )
     config.ensure_dirs()
     registry = SessionRegistry(config)
+    registry.enable_persistence(config.log_dir / "sessions.json")
     listener = PluginTcpListener(config, registry)
     await listener.start()
     gc_task = asyncio.create_task(registry.gc_loop())

@@ -17,11 +17,13 @@ State machine::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from gdb_mcp.config import Config
@@ -32,6 +34,7 @@ from gdb_mcp.errors import (
     NoSuchSessionError,
     RequestTimeoutError,
 )
+from gdb_mcp.journal import Journal
 from gdb_mcp.protocol import (
     ASYNC_VERBS,
     build_quit,
@@ -98,6 +101,8 @@ class Session:
         default_factory=lambda: deque(maxlen=EVENT_LOG_LIMIT)
     )
     event_seq: int = 0
+    #: per-session JSONL journal (audit + gdbscript export), if enabled
+    journal: Any = None
 
     _next_id: int = field(default=1, init=False)
 
@@ -144,18 +149,34 @@ class Session:
                     await writer.drain()
             result = await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
+            self._journal_request(verb, params, ok=False, error="TIMEOUT")
             raise RequestTimeoutError(verb, timeout or 0.0) from None
         except (ConnectionError, OSError) as exc:
             if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
                 self.state = previous_state
+            self._journal_request(verb, params, ok=False, error="DISCONNECTED")
             raise GdbMcpError("DISCONNECTED", "connection to gdb lost") from exc
-        except GdbMcpError:
+        except GdbMcpError as exc:
             if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
                 self.state = previous_state
+            self._journal_request(verb, params, ok=False, error=exc.code)
             raise
         finally:
             self.pending.pop(req_id, None)
+        self._journal_request(verb, params, ok=True, result=result)
         return result
+
+    def _journal_request(
+        self, verb: str, params: dict, ok: bool, result=None, error=None
+    ) -> None:
+        if self.journal is None:
+            return
+        data: dict = {"verb": verb, "params": params, "ok": ok}
+        if error:
+            data["error"] = error
+        if result is not None:
+            data["result"] = result
+        self.journal.append("request", data)
 
     def _connected_writer(self) -> Any:
         writer = self.writer
@@ -215,6 +236,10 @@ class Session:
         """Apply a plugin notification (called by the tcp_listener)."""
         self.state_gen += 1
         self.record_event(event, payload)
+        if self.journal is not None:
+            self.journal.append(
+                "notification", {"event": event, "payload": payload}
+            )
         if event == "running":
             self.state = RUNNING
         elif event == "stop":
@@ -316,6 +341,7 @@ class SessionRegistry:
         )
         self._sessions: dict[str, Session] = {}
         self._by_pid: dict[int, str] = {}
+        self._persist_path: Path | None = None
 
     # -- registration -------------------------------------------------------
 
@@ -346,7 +372,17 @@ class SessionRegistry:
             token=self.config.token,
         )
         self._sessions[session_id] = session
+        self._attach_journal(session)
+        self.save()
         return session
+
+    def _attach_journal(self, session: Session) -> None:
+        if session.journal is None:
+            session.journal = Journal(
+                self.config.log_dir
+                / "journals"
+                / ("%s.jsonl" % session.session_id)
+            )
 
     def register_hello(self, hello: dict, writer: Any) -> Session:
         """Register a plugin connection from its hello message.
@@ -393,6 +429,8 @@ class SessionRegistry:
                 "pwndbg": hello.get("pwndbg"),
             },
         )
+        self._attach_journal(session)
+        self.save()
         log.debug(
             "hello from pid=%s arch=%s -> session %s",
             pid,
@@ -451,6 +489,81 @@ class SessionRegistry:
             pid = session.hello.get("pid")
             if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
                 self._by_pid.pop(pid, None)
+        self.save()
+
+    # -- persistence ----------------------------------------------------------
+    #
+    # The server is restarted far more often than its gdbs are stopped
+    # (it tracks an editor session). Persisting gdb session identity
+    # lets a plugin's re-hello reattach to the SAME session id instead
+    # of forking a new anonymous one.
+
+    def enable_persistence(self, path: Path) -> int:
+        """Track gdb sessions in ``path`` and restore any previously
+        persisted ones as DISCONNECTED (a re-hello revives them)."""
+        self._persist_path = Path(path)
+        return self.load()
+
+    def save(self) -> None:
+        if self._persist_path is None:
+            return
+        payload = {
+            "version": 1,
+            "sessions": [
+                {
+                    "session_id": s.session_id,
+                    "log_file": s.log_file,
+                    "distro": s.distro,
+                    "launched": s.launched,
+                    "hello": s.hello,
+                    "stop_info": s.stop_info,
+                }
+                for s in self._sessions.values()
+                if s.kind == "gdb"
+            ],
+        }
+        try:
+            self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._persist_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            tmp.replace(self._persist_path)
+        except OSError:
+            log.warning("session persistence write failed", exc_info=True)
+
+    def load(self) -> int:
+        if self._persist_path is None or not self._persist_path.exists():
+            return 0
+        try:
+            data = json.loads(
+                self._persist_path.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            log.warning("session persistence file unreadable; starting clean")
+            return 0
+        restored = 0
+        for entry in data.get("sessions", []):
+            sid = entry.get("session_id")
+            if not isinstance(sid, str) or sid in self._sessions:
+                continue
+            session = Session(
+                session_id=sid,
+                kind="gdb",
+                state=DISCONNECTED,
+                hello=entry.get("hello"),
+                log_file=entry.get("log_file"),
+                distro=entry.get("distro"),
+                launched=bool(entry.get("launched")),
+                token=self.config.token,
+            )
+            session.stop_info = entry.get("stop_info")
+            self._sessions[sid] = session
+            self._attach_journal(session)
+            restored += 1
+        if restored:
+            log.info("restored %d persisted session(s)", restored)
+        return restored
 
     async def gc_once(self) -> int:
         """Drop stale sessions; returns how many were removed."""
@@ -468,6 +581,8 @@ class SessionRegistry:
             if drop:
                 self.remove(sid)
                 removed += 1
+        if removed:
+            self.save()
         return removed
 
     async def gc_loop(self, interval: float = 60.0) -> None:

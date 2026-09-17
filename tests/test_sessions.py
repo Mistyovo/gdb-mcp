@@ -413,3 +413,53 @@ class TestEventRing:
         s = registry.register_hello(hello(), FakeWriter())
         kinds = [e["event"] for e in s.recent_events(10)]
         assert kinds == ["connected"]
+
+
+class TestPersistence:
+    def test_roundtrip_and_revival(self, tmp_path):
+        path = tmp_path / "sessions.json"
+        r1 = SessionRegistry(Config())
+        r1.enable_persistence(path)
+        r1.reserve("s-p1", log_file="/logs/s-p1.log")
+        r1.register_hello(hello(session_id="s-p1"), FakeWriter())
+
+        # server restart: fresh registry over the same persistence file
+        r2 = SessionRegistry(Config())
+        assert r2.enable_persistence(path) == 1
+        old = r2.get("s-p1")
+        assert old.state == DISCONNECTED
+        assert old.log_file == "/logs/s-p1.log"
+        assert old.hello["pid"] == 1234
+
+        # the plugin's re-hello revives the SAME identity
+        revived = r2.register_hello(hello(session_id="s-p1", pid=999), FakeWriter())
+        assert revived.session_id == "s-p1"
+        assert revived.state == CONNECTING
+        assert revived.log_file == "/logs/s-p1.log"
+        assert revived.journal is not None
+
+    def test_script_sessions_not_persisted(self, tmp_path):
+        path = tmp_path / "sessions.json"
+        r1 = SessionRegistry(Config())
+        r1.enable_persistence(path)
+        r1.reserve("s-scr", kind="script")
+        r1.save()
+        r2 = SessionRegistry(Config())
+        assert r2.enable_persistence(path) == 0
+
+    def test_corrupt_file_starts_clean(self, tmp_path):
+        path = tmp_path / "sessions.json"
+        path.write_text("not json", encoding="utf-8")
+        registry = SessionRegistry(Config())
+        assert registry.enable_persistence(path) == 0
+        assert registry.list_all() == []
+
+    def test_remove_updates_persistence(self, tmp_path):
+        path = tmp_path / "sessions.json"
+        r1 = SessionRegistry(Config())
+        r1.enable_persistence(path)
+        r1.reserve("s-p2")
+        assert "s-p2" in path.read_text(encoding="utf-8")
+        r1.remove("s-p2")
+        r2 = SessionRegistry(Config())
+        assert r2.enable_persistence(path) == 0

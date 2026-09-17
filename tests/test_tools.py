@@ -855,6 +855,25 @@ class TestResultStore:
                 )
             assert ei.value.code == "BAD_PARAMS"
 
+    def test_prune_results_bounds_directory(self, tmp_path):
+        import os
+
+        from gdb_mcp.results import prune_results, results_dir, store_result
+
+        for i in range(5):
+            store_result(tmp_path, "content-%d" % i)
+        directory = results_dir(tmp_path)
+        files = sorted(directory.iterdir(), key=lambda p: p.name)
+        for i, p in enumerate(files):  # deterministic mtimes
+            os.utime(p, (i + 1, i + 1))
+        removed = prune_results(tmp_path, max_files=2)
+        assert removed == 3
+        remaining = {p.name for p in directory.iterdir()}
+        assert len(remaining) == 2
+        # the two newest (highest mtime) survive
+        survivors = {files[-1].name, files[-2].name}
+        assert remaining == survivors
+
 
 class TestToolProfile:
     def test_core_profile_registers_subset(self, tmp_path):
@@ -1191,3 +1210,83 @@ class TestUnsafeGate:
         assert "write_register" not in names
         assert "read_memory" in names
         assert "continue_execution" in names
+
+
+class TestJournal:
+    @pytest.mark.asyncio
+    async def test_requests_and_notifications_journaled(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        assert s.journal is not None
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {"command": "checksec", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"output": "ok", "total_lines": 1})
+        await task
+        await s.push_notification("stop", {"pc": "0x401000"})
+        kinds = [
+            (e["kind"], e.get("verb") or e.get("event"))
+            for e in s.journal.entries()
+        ]
+        assert kinds == [("request", "eval"), ("notification", "stop")]
+        req_entry = s.journal.entries()[0]
+        assert req_entry["params"]["command"] == "checksec"
+        assert req_entry["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_failed_requests_journaled_with_error(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["execute_command"],
+                {"command": "nope", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, error="PLUGIN_ERROR")
+        with pytest.raises(GdbMcpError):
+            await task
+        entry = s.journal.entries()[-1]
+        assert entry["ok"] is False and entry["error"] == "PLUGIN_ERROR"
+
+
+class TestExportSessionScript:
+    @pytest.mark.asyncio
+    async def test_exports_compiled_script(self, env):
+        registry, cfg, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["set_breakpoint"],
+                {"location": "main", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"number": 1, "type": "breakpoint", "enabled": True})
+        await task
+        result = await run_tool(
+            tools["export_session_script"],
+            {"session_id": s.session_id},
+            ctx_for(env),
+        )
+        assert result["used"] == 1
+        assert "break main" in result["script"]
+        assert result["script"].splitlines()[-1] == "quit"
+        assert (cfg.log_dir / "scripts" / ("%s.gdb" % s.session_id)).exists()
+
+    @pytest.mark.asyncio
+    async def test_empty_journal_errors(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["export_session_script"],
+                {"session_id": s.session_id},
+                ctx_for(env),
+            )
+        assert ei.value.code == "NO_JOURNAL"

@@ -193,6 +193,21 @@ class TestVerbSets:
     def test_all_verbs_known(self):
         assert READER_VERBS | ASYNC_VERBS <= VERBS
 
+    def test_plugin_verb_table_matches_protocol(self, plugin_mod):
+        """H5: the two hand-written verb tables must never drift."""
+        plugin_verbs = (
+            set(plugin_mod.VERB_HANDLERS)
+            | set(plugin_mod.ASYNC_VERBS)
+            | set(plugin_mod.READER_VERBS)
+        )
+        assert plugin_verbs == set(VERBS)
+        # every gated verb must be a dispatchable sync verb
+        assert set(plugin_mod.GATED_VERBS) <= set(plugin_mod.VERB_HANDLERS)
+        assert not (
+            set(plugin_mod.GATED_VERBS)
+            & (set(plugin_mod.ASYNC_VERBS) | set(plugin_mod.READER_VERBS))
+        )
+
 
 class TestResponseHelpers:
     def test_is_ok_response(self):

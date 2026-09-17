@@ -1,0 +1,116 @@
+"""Tests for the session journal and gdbscript compilation."""
+
+from gdb_mcp.journal import Journal, _trim, compile_gdbscript
+
+
+class TestTrim:
+    def test_long_string_trimmed_with_note(self):
+        out = _trim("A" * 300)
+        assert out.startswith("A" * 256)
+        assert "...<+44 chars>" in out
+
+    def test_hex_payload_becomes_length_marker(self):
+        out = _trim("ab" * 5000)
+        assert out == "<hex:5000 bytes>"
+
+    def test_short_values_untouched(self):
+        assert _trim({"a": "ok", "b": ["x", "y"]}) == {"a": "ok", "b": ["x", "y"]}
+
+    def test_lists_bounded(self):
+        out = _trim(list(range(100)))
+        assert len(out) == 33  # 32 kept + marker
+        assert out[-1] == "<+68 more>"
+
+    def test_unknown_objects_stringified(self):
+        class Thing:
+            def __str__(self):
+                return "thing"
+
+        assert _trim(Thing()) == "thing"
+
+
+class TestJournal:
+    def test_append_writes_jsonl_and_mirrors(self, tmp_path):
+        journal = Journal(tmp_path / "journals" / "s-1.jsonl")
+        journal.append("request", {"verb": "eval", "params": {"command": "x " * 200}, "ok": True})
+        journal.append("notification", {"event": "stop", "payload": {"pc": "0x1"}})
+        assert len(journal) == 2
+        lines = (tmp_path / "journals" / "s-1.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert len(lines) == 2
+        assert '"kind": "request"' in lines[0] or '"kind":"request"' in lines[0]
+
+    def test_append_survives_unwritable_path(self, tmp_path):
+        journal = Journal(tmp_path / "journals" / "s-2.jsonl")
+        # repoint to an un-creatable nested path: append must not raise
+        journal.path = journal.path.parent / "no" / "such" / "dir" / "j.jsonl"
+        journal.append("request", {"verb": "eval", "params": {}, "ok": True})
+        assert len(journal) == 1
+
+
+class TestCompileGdbscript:
+    def _entries(self):
+        return [
+            {"kind": "notification", "event": "stop", "payload": {}},
+            {"kind": "request", "verb": "regs", "params": {}, "ok": True},
+            {"kind": "request", "verb": "eval", "params": {"command": "checksec"}, "ok": True},
+            {
+                "kind": "request",
+                "verb": "break",
+                "params": {
+                    "location": "main",
+                    "condition": "i>1",
+                    "commands": ["x/4gx $rdi"],
+                    "auto_continue": True,
+                },
+                "ok": True,
+            },
+            {"kind": "request", "verb": "continue", "params": {}, "ok": True},
+            {"kind": "request", "verb": "set_reg", "params": {"name": "rax", "value": "0x2"}, "ok": True},
+            {"kind": "request", "verb": "write_mem", "params": {"addr": "0x1000", "hex": "9090c3"}, "ok": True},
+            {"kind": "request", "verb": "snapshot_create", "params": {}, "ok": True},
+            {"kind": "request", "verb": "continue", "params": {}, "ok": False, "error": "INFERIOR_RUNNING"},
+        ]
+
+    def test_full_compilation(self):
+        script, stats = compile_gdbscript(
+            {"session_id": "s-9", "inferior": "/tmp/vuln"}, self._entries()
+        )
+        lines = script.splitlines()
+        assert "# session: s-9" in lines
+        assert "# inferior: /tmp/vuln" in lines
+        assert "checksec" in lines
+        assert "break main if i>1" in lines
+        # breakpoint probe compiles to a silent auto-continue block
+        i = lines.index("commands")
+        assert lines[i + 1 : i + 4] == ["silent", "x/4gx $rdi", "continue"]
+        assert lines[i + 4] == "end"
+        assert "continue" in lines
+        assert "set $rax = 0x2" in lines
+        # 3-byte write compiles to per-byte assignments
+        assert "set {unsigned char}0x1000 = 0x90" in lines
+        assert "set {unsigned char}0x1002 = 0xc3" in lines
+        assert "# checkpoint create (plugin-specific; not replayable here)" in lines
+        assert lines[-1] == "quit"
+        assert stats["used"] == 6
+        assert stats["reads"] == 1  # regs
+        assert stats["skipped"] == 1  # failed continue
+
+    def test_reads_do_not_appear_in_script(self):
+        entries = [
+            {"kind": "request", "verb": "read_mem", "params": {"addr": "0x1"}, "ok": True},
+            {"kind": "request", "verb": "backtrace", "params": {}, "ok": True},
+        ]
+        script, stats = compile_gdbscript({"session_id": "s"}, entries)
+        assert stats["reads"] == 2 and stats["used"] == 0
+        assert "quit" in script
+
+    def test_write_mem_degrades_on_bad_payload(self):
+        entries = [
+            {"kind": "request", "verb": "write_mem", "params": {"addr": "main", "hex": "90"}, "ok": True},
+            {"kind": "request", "verb": "write_mem", "params": {"addr": "0x1000", "hex": "zz"}, "ok": True},
+        ]
+        script, stats = compile_gdbscript({"session_id": "s"}, entries)
+        assert stats["skipped"] == 2 and stats["used"] == 0
+        assert "set {unsigned char}" not in script

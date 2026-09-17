@@ -19,6 +19,33 @@ def results_dir(log_dir: Path) -> Path:
     return Path(log_dir) / "results"
 
 
+#: the result store is a bounded cache, not an archive
+RESULTS_MAX_FILES = 500
+
+
+def prune_results(log_dir: Path, max_files: int = RESULTS_MAX_FILES) -> int:
+    """Delete the oldest stored results beyond ``max_files``; returns how
+    many were removed. Called after every store so the directory stays a
+    bounded cache instead of leaking disk forever."""
+    directory = results_dir(log_dir)
+    try:
+        files = [p for p in directory.iterdir() if p.is_file() and p.suffix == ".txt"]
+    except OSError:
+        return 0
+    try:
+        files.sort(key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return 0
+    removed = 0
+    for path in files[: max(0, len(files) - max_files)]:
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def store_result(log_dir: Path, text: str) -> dict:
     """Store ``text`` in the results store (idempotent per content)."""
     data = text.encode("utf-8")
@@ -28,6 +55,7 @@ def store_result(log_dir: Path, text: str) -> dict:
     path = directory / ("%s.txt" % digest[:16])
     if not path.exists():
         path.write_bytes(data)
+    prune_results(log_dir)
     return {"path": str(path), "sha256": digest, "bytes": len(data)}
 
 

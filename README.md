@@ -135,6 +135,14 @@ HTTP（默认 `127.0.0.1:8001/mcp`），带四道防线：非 loopback 绑定强
 token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 则所有
 请求必须带 `Authorization: Bearer`。
 
+## 会话日志与持久化
+
+每个 gdb 会话自动记录 **journal**（`~/.gdb-mcp/logs/journals/<session>.jsonl`，
+长值截断、hex 超限变长度标记）：`export_session_script` 将其中的变更与控制流
+操作编译为**确定性、可独立重放的 gdbscript**（纯读取与 checkpoint 类操作跳过
+并计数）——审计、复现、分享都靠它。服务器重启后，已持久化的 gdb 会话身份
+（session_id/日志/启动信息）保留，插件重连即自动复活同一会话。
+
 ## 安全分级
 
 - `GDB_MCP_READONLY=1`（`--readonly`）：不注册 `write_memory`/`write_register`。
@@ -160,11 +168,11 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（32 个）
+## 工具一览（33 个）
 
 | 类别 | 工具 |
 |---|---|
-| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` |
+| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script`（journal → 可重放 gdbscript） |
 | 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`get_stop_reason` `read_result` `batch_commands`（多命令一次往返） |
 | 崩溃定位 | `crash_report` |
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
