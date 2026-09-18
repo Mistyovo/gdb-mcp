@@ -36,6 +36,19 @@ OBSERVER_ALLOWED_TOOLS = frozenset(
         "export_session_script",
         "read_result",
         "diff_sessions",
+        # 3.5 static bridge queries (analysis itself is a write)
+        "list_analyses",
+        "get_analysis_status",
+        "get_binary_overview",
+        "list_sections",
+        "list_symbols",
+        "list_functions",
+        "decompile_function",
+        "get_static_disassembly",
+        "list_strings",
+        "get_xrefs",
+        "get_call_graph",
+        "search_decompiled_code",
     }
 )
 

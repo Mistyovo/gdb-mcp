@@ -123,7 +123,7 @@ VERBS = frozenset(
 ) | ASYNC_VERBS | READER_VERBS
 
 NOTIFICATION_EVENTS = frozenset(
-    {"stop", "exited", "running", "prompt", "ready"}
+    {"stop", "exited", "running", "prompt", "ready", "target"}
 )
 
 HEARTBEAT_PING_ID = -1

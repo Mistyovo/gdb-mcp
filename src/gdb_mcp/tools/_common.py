@@ -13,6 +13,11 @@ def registry_from(ctx: Any) -> SessionRegistry:
     return ctx.request_context.lifespan_context["registry"]
 
 
+def analysis_from(ctx: Any):
+    """The 3.5 static-bridge analysis manager (Ghidra headless cache)."""
+    return ctx.request_context.lifespan_context["analysis"]
+
+
 def config_from(ctx: Any) -> Config:
     return ctx.request_context.lifespan_context["config"]
 

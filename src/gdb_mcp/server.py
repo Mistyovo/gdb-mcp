@@ -21,10 +21,15 @@ log = logging.getLogger("gdb_mcp.server")
 async def _lifespan(app: FastMCP):
     registry = app._registry  # set before startup (see serve)
     config = app._config
-    yield {"registry": registry, "config": config}
+    analysis = app._analysis  # set before startup (see serve)
+    yield {
+        "registry": registry,
+        "config": config,
+        "analysis": analysis,
+    }
 
 
-def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
+def build_app(config: Config, registry: SessionRegistry, analysis=None) -> FastMCP:
     app = FastMCP(
         "gdb-mcp",
         lifespan=_lifespan,
@@ -38,12 +43,15 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
             "structured glibc bins (needs pwndbg), checkpoint(create/"
             "restore/diff) for state snapshots, batch_commands to run "
             "several gdb commands per round-trip. export_session_script "
-            "compiles the session into a replayable gdbscript."
+            "compiles the session into a replayable gdbscript. Static "
+            "bridge: analyze_binary + decompile_function etc. when a "
+            "Ghidra headless installation is available."
         )
         % __version__,
     )
     app._registry = registry  # type: ignore[attr-defined]
     app._config = config  # type: ignore[attr-defined]
+    app._analysis = analysis  # type: ignore[attr-defined]
     register_all(app, registry, config)
 
     if config.observer_tokens:
@@ -145,12 +153,23 @@ async def serve(config: Config) -> None:
     config.ensure_dirs()
     registry = SessionRegistry(config)
     registry.enable_persistence(config.log_dir / "sessions.json")
+
+    analysis = None
+    try:
+        from gdb_mcp.reverse.manager import AnalysisManager
+    except Exception:  # pragma: no cover - broken optional module
+        log.exception("static bridge unavailable")
+    else:
+        # the manager reads config.analysis_dir itself; auto-analyze is
+        # off by default so no background work starts unprompted
+        analysis = AnalysisManager(config)
+
     listener = PluginTcpListener(config, registry)
     await listener.start()
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
-            app = build_app(config, registry)
+            app = build_app(config, registry, analysis)
             if config.mcp_http:
                 await _serve_http(app, config)
             else:

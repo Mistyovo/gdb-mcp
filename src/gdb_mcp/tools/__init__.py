@@ -16,6 +16,7 @@ from . import (
     heap_tools,
     launch_tools,
     session_tools,
+    static_tools,
     state_tools,
 )
 
@@ -27,6 +28,7 @@ TOOL_MODULES = (
     breakpoint_tools,
     heap_tools,
     campaign_tools,
+    static_tools,
     experimental,
     crash_tools,
 )

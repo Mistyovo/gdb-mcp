@@ -17,6 +17,7 @@ State machine::
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -117,6 +118,22 @@ class Session:
             "notes": [],
         }
     )
+    #: 3.5 static bridge: attached analysis + last mapped runtime location
+    analysis_id: str | None = None
+    analysis_error: str | None = None
+    location: dict[str, Any] | None = None
+    target: str | None = None
+    #: last known debug snapshot used by the static location mapper
+    debug_state: dict[str, Any] | None = None
+
+    def update_debug_location(self, location: dict[str, Any]) -> None:
+        """3.5 static bridge: update the last mapped location while
+        preserving sibling state (e.g. the manager's stop_location)."""
+        state = self.debug_state
+        if not isinstance(state, dict):
+            state = {}
+            self.debug_state = state
+        state["last_location"] = copy.deepcopy(location)
 
     _next_id: int = field(default=1, init=False)
 

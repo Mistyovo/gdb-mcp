@@ -48,6 +48,11 @@ DEFAULTS = {
     "mcp_tls_cert": None,
     "mcp_tls_key": None,
     "mcp_tls_client_ca": None,
+    "ghidra_headless": "/usr/share/ghidra/support/analyzeHeadless",
+    "analysis_dir": None,
+    "analysis_timeout": 900.0,
+    "decompile_timeout": 120.0,
+    "auto_analyze": False,
 }
 
 
@@ -105,6 +110,15 @@ class Config:
     mcp_tls_cert: str | None = DEFAULTS["mcp_tls_cert"]
     mcp_tls_key: str | None = DEFAULTS["mcp_tls_key"]
     mcp_tls_client_ca: str | None = DEFAULTS["mcp_tls_client_ca"]
+    #: 3.5 static bridge: Ghidra headless analyzer + analysis cache dir.
+    #: auto_analyze defaults False here (the archive auto-started analyses
+    #: for every connected target; explicit analyze_binary calls keep the
+    #: server quiet by default)
+    ghidra_headless: str = DEFAULTS["ghidra_headless"]
+    analysis_dir: Path | None = DEFAULTS["analysis_dir"]
+    analysis_timeout: float = DEFAULTS["analysis_timeout"]
+    decompile_timeout: float = DEFAULTS["decompile_timeout"]
+    auto_analyze: bool = DEFAULTS["auto_analyze"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -244,6 +258,16 @@ class Config:
             mcp_tls_cert=env("MCP_TLS_CERT", str),
             mcp_tls_key=env("MCP_TLS_KEY", str),
             mcp_tls_client_ca=env("MCP_TLS_CLIENT_CA", str),
+            ghidra_headless=env("GHIDRA_HEADLESS", str)
+            or DEFAULTS["ghidra_headless"],
+            analysis_dir=Path(env("ANALYSIS_DIR", str))
+            if env("ANALYSIS_DIR", str)
+            else None,
+            analysis_timeout=env("ANALYSIS_TIMEOUT", float)
+            or DEFAULTS["analysis_timeout"],
+            decompile_timeout=env("DECOMPILE_TIMEOUT", float)
+            or DEFAULTS["decompile_timeout"],
+            auto_analyze=env_bool("AUTO_ANALYZE") or DEFAULTS["auto_analyze"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:
