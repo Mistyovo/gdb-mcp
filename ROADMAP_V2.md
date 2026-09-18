@@ -144,7 +144,9 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | 2.4 inferior I/O | ✅ 已在实验分支 exp/inferior-io 实现并合入（pty 通道 + io_setup/send/read/teardown，`--experimental` 启动参数门控，刻意无环境变量通路）；fuzz_loop 从此可全自动 |
 | A 补充：minimize/crash_check | ✅ exp/crash-minimizer 合入：delta debugging（信号一致性防漂移）复用 _fuzz_round |
 | E2 PyPI 发布 | ⏳ 需 PyPI 凭证与发布决策（元数据已齐：pyproject 完整） |
-| E3 bench | ⏳ 需 crackme 语料与评分器设计（B3 导出脚本即评分依据） |
+| E3 bench | 🟡 骨架完成并实测：DeepSeek 客户端（stdlib urllib，可跑在裸 WSL python3）+ agent 循环（FakeLLM 零消耗测试）+ win.c 靶标 + `run_win.py`（干跑验证基建 / `--go` 才花额度）。两次实测共 ~49k tokens：12 轮未解 / 14 轮放弃——deepseek-chat 在当前工具面下解不出 72 字节偏移链，调优方向（换 reasoner、加 payload 构造工具、放宽轮数）待用户决策 |
+| 3.4 时间旅行 | 🟡 exp/native-record 已合入：gdb 原生 record/reverse_*（零依赖，WSL2 可用；rr 因 PMU 不可用而放弃）。`continue_execution(mode="reverse_*")` + `execute_command('record full')` |
+| 语料扩容（win.c 之外） | ⏳ 与 E3 调优绑定：ret2libc（可用 build/glibc231）与 fmt 字符串靶标需各自的评分与工具面，等首轮调优决策后一起做 |
 | D2 会话多路 / E1 协议 v2 / E4 mTLS·scoped token | ⏳ 大型独立迭代，需专项设计与验证 |
 | 实验分支（合入后保留开关） | ✅ exp/inferior-io、exp/crash-minimizer、exp/libc-rop 三分支已按 1→2→3 顺序合入 main；libc 识别（C2 的 libc-database 部分以 libc.rip API 形态先行落地） |
 
