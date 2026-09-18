@@ -236,7 +236,8 @@ class _TimelineBreakpoint(gdb.Breakpoint):
 READER_VERBS = frozenset(["ping", "interrupt", "quit"])
 #: resume verbs: reply before executing, then emit running/stop notifications
 ASYNC_VERBS = frozenset(
-    ["continue", "step", "next", "stepi", "nexti", "finish", "until"]
+    ["continue", "step", "next", "stepi", "nexti", "finish", "until",
+     "reverse_continue", "reverse_step", "reverse_next"]
 )
 #: structured verbs rejected while the inferior is running
 GATED_VERBS = frozenset(
@@ -270,6 +271,11 @@ _CONTINUE_CMDS = {
     "stepi": "stepi",
     "nexti": "nexti",
     "finish": "finish",
+    # gdb native record/replay (start recording with `record full` first);
+    # reverse execution blocks exactly like the forward resume verbs
+    "reverse_continue": "reverse-continue",
+    "reverse_step": "reverse-step",
+    "reverse_next": "reverse-next",
 }
 _BP_TYPES = {
     gdb.BP_BREAKPOINT: "breakpoint",

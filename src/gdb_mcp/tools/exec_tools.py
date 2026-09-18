@@ -12,7 +12,21 @@ from gdb_mcp.sessions import RUNNING
 from ._common import check_stopped, config_from, resolve_gdb
 from .stop_context import collect_stop_context
 
-_MODES = ("continue", "step", "next", "stepi", "nexti", "finish", "until")
+_MODES = (
+    "continue",
+    "step",
+    "next",
+    "stepi",
+    "nexti",
+    "finish",
+    "until",
+    # gdb native record/replay (recording must be started first with
+    # execute_command('record full')); requires the reverse_* resume
+    # modes below
+    "reverse_continue",
+    "reverse_step",
+    "reverse_next",
+)
 
 _BATCH_LIMIT = 32
 
@@ -161,12 +175,14 @@ def register(app, registry, config) -> None:
         ctx: Context = None,
     ) -> dict:
         """Resume the inferior: continue / step / next / stepi / nexti /
-        finish / until. By default returns immediately ({'state':
-        'running'}). With wait=True the call blocks until the next stop
-        (or timeout_ms) and returns the stop reason; add
-        with_context=True to also get key registers, backtrace and
-        disassembly around PC in the same response — the one-call
-        breakpoint-hit pattern."""
+        finish / until, plus reverse_continue / reverse_step /
+        reverse_next under gdb native record (start recording first with
+        execute_command('record full') while stopped). By default returns
+        immediately ({'state': 'running'}). With wait=True the call
+        blocks until the next stop (or timeout_ms) and returns the stop
+        reason; add with_context=True to also get key registers,
+        backtrace and disassembly around PC in the same response — the
+        one-call breakpoint-hit pattern."""
         if mode not in _MODES:
             raise ValueError("mode must be one of %s" % ", ".join(_MODES))
         if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 100:

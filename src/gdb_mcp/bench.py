@@ -55,6 +55,23 @@ def load_api_key(
     return None
 
 
+def _post_json(
+    url: str, headers: dict, payload: dict, timeout: float
+) -> dict:
+    """Minimal stdlib JSON POST. Seam for tests; keeps the client
+    dependency-free so the bench also runs on bare WSL python3."""
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 class DeepSeekClient:
     """Thin OpenAI-compatible chat client with tool calling."""
 
@@ -82,8 +99,6 @@ class DeepSeekClient:
         self._tools = tools or None
 
     def chat(self, messages: list[dict]) -> dict:
-        import httpx
-
         payload: dict = {
             "model": self.model,
             "messages": messages,
@@ -91,14 +106,12 @@ class DeepSeekClient:
         }
         if self._tools:
             payload["tools"] = self._tools
-        response = httpx.post(
+        data = _post_json(
             self.base_url.rstrip("/") + "/chat/completions",
             headers={"Authorization": "Bearer " + self.api_key},
-            json=payload,
+            payload=payload,
             timeout=120.0,
         )
-        response.raise_for_status()
-        data = response.json()
         self.total_tokens += int((data.get("usage") or {}).get("total_tokens") or 0)
         message = data["choices"][0]["message"]
         tool_calls = []

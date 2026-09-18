@@ -60,7 +60,18 @@ READER_VERBS = frozenset({"ping", "interrupt", "quit"})
 # Execution verbs: the plugin replies immediately with {"state": "running"}
 # and the actual resume happens afterwards on the gdb main thread.
 ASYNC_VERBS = frozenset(
-    {"continue", "step", "next", "stepi", "nexti", "finish", "until"}
+    {
+        "continue",
+        "step",
+        "next",
+        "stepi",
+        "nexti",
+        "finish",
+        "until",
+        "reverse_continue",
+        "reverse_step",
+        "reverse_next",
+    }
 )
 
 # All request verbs the plugin understands.

@@ -712,6 +712,31 @@ class TestPolicies:
         resp = call(plugin, "policy", {"kind": "trace"})
         assert resp["error"]["code"] == "INFERIOR_RUNNING"
 
+
+class TestReverseVerbs:
+    def test_reverse_continue_maps_to_gdb_command(self, plugin):
+        set_inferior()
+        resp = call(plugin, "reverse_continue", {})
+        assert resp["result"] == {"state": "running"}
+        assert "reverse-continue" in mock_gdb.state.executed
+        assert plugin.state == "running"
+
+    def test_reverse_step_family(self, plugin):
+        set_inferior()
+        call(plugin, "reverse_step", {})
+        assert "reverse-step" in mock_gdb.state.executed
+        # the mock never fires a stop event, so reset the state the way
+        # a real stop would before the next resume
+        plugin.state = "stopped"
+        call(plugin, "reverse_next", {})
+        assert "reverse-next" in mock_gdb.state.executed
+
+    def test_reverse_verb_gated_while_running(self, plugin):
+        set_inferior()
+        plugin.state = "running"
+        resp = call(plugin, "reverse_continue", {})
+        assert resp["error"]["code"] == "INFERIOR_RUNNING"
+
 class _MemoryChannel:
     def __init__(self):
         self.slave_path = "/dev/fake-pts"
