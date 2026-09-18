@@ -131,32 +131,24 @@ class TestDeepSeekClient:
     def test_chat_accounts_usage_and_parses_tools(self, tmp_path, monkeypatch):
         captured = {}
 
-        def fake_post(url, headers=None, json=None, timeout=None):
+        def fake_post(url, headers=None, payload=None, timeout=None):
             captured["url"] = url
             captured["auth"] = headers["Authorization"]
-            captured["payload"] = json
+            captured["payload"] = payload
+            return {
+                "choices": [{"message": {
+                    "content": None,
+                    "tool_calls": [{"id": "call_1", "function": {
+                        "name": "run_payload",
+                        "arguments": "{\"payload\": \"AA\"}",
+                    }}],
+                }}],
+                "usage": {"total_tokens": 321},
+            }
 
-            class Response:
-                def raise_for_status(self):
-                    pass
+        from gdb_mcp import bench
 
-                def json(self):
-                    return {
-                        "choices": [{"message": {
-                            "content": None,
-                            "tool_calls": [{"id": "call_1", "function": {
-                                "name": "run_payload",
-                                "arguments": "{\"payload\": \"AA\"}",
-                            }}],
-                        }}],
-                        "usage": {"total_tokens": 321},
-                    }
-
-            return Response()
-
-        import httpx
-
-        monkeypatch.setattr(httpx, "post", fake_post)
+        monkeypatch.setattr(bench, "_post_json", fake_post)
         env_file = tmp_path / ".env"
         env_file.write_text("DEEPSEEK_API_KEY=sk-secret\n", encoding="utf-8")
         client = DeepSeekClient(env_file=env_file)

@@ -339,6 +339,21 @@ class TestExecTools:
             )
 
     @pytest.mark.asyncio
+    async def test_continue_reverse_mode_forwarded(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["continue_execution"],
+                {"mode": "reverse_step", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"state": "running"})
+        assert req["verb"] == "reverse_step"
+        assert await task == {"state": "running"}
+
+    @pytest.mark.asyncio
     async def test_interrupt_while_stopped_is_noop(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)

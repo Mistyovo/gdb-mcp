@@ -1,20 +1,24 @@
 """E3 bench runner #1: drive DeepSeek to solve bench/crackmes/win.c.
 
-Usage (from the repo root):
-    python bench/run_win.py            # dry plan: compiles, launches gdb,
-                                       # prints the tool set — NO API calls
-    python bench/run_win.py --go       # real run (spends quota)
+Run INSIDE WSL (it drives a local gdb and binds 127.0.0.1 there):
 
-Requires: WSL with gdb + the plugin reachable over the mirrored network,
-and DEEPSEEK_API_KEY in the environment or the repo-local .env.
+    wsl.exe -d kali-linux -- bash -lc \
+      'cd /mnt/c/Users/<you>/Develop/gdb-mcp && python3 bench/run_win.py'
+    # add --go to really call the API (spends quota)
 
 Cost guardrails: --max-turns (default 12), max_tokens per call (1024),
-and a single tool loop — a full solve typically costs a few cents.
+usage printed at the end. Without --go the runner validates the whole
+infrastructure (compile, gdb+plugin handshake, tool plumbing) and
+touches no API.
+
+Requires: gdb + python3 in WSL; DEEPSEEK_API_KEY in the environment or
+the repo-local .env (read via /mnt/c when invoked from the repo copy).
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -22,68 +26,88 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests" / "integration"))
 
 from gdb_mcp.bench import DeepSeekClient, run_agent  # noqa: E402
 
-DISTRO = "kali-linux"
+DISTRO_HINT = "wsl.exe -d <distro> -- bash -lc 'cd %s && python3 bench/run_win.py'" % ROOT
 PORT = 39410
-CRACKME_WSL = "/tmp/win_bench"
-LOG_WSL = "/tmp/win_bench_gdb.log"
+CRACKME = "/tmp/win_bench"
+LOG = "/tmp/win_bench_gdb.log"
 WIN_MARKER = "WIN{"
 
 
-def wsl_bash(script: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["wsl.exe", "-d", DISTRO, "--", "bash", "-lc", script],
+def compile_crackme() -> None:
+    source = ROOT / "bench" / "crackmes" / "win.c"
+    proc = subprocess.run(
+        ["gcc", "-g", "-O0", "-fno-stack-protector", "-no-pie",
+         "-o", CRACKME, str(source)],
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        raise SystemExit("compile failed: %s" % proc.stderr[-400:])
 
 
-def compile_crackme() -> None:
-    source = (ROOT / "bench" / "crackmes" / "win.c").resolve()
-    result = wsl_bash(
-        "gcc -g -O0 -fno-stack-protector -no-pie -o %s %s"
-        % (CRACKME_WSL, shlex.quote("/mnt/c/" + str(source)[3:].replace("\\", "/")))
+def launch_gdb(plugin_path: Path):
+    """Start gdb with the plugin; the tail|gdb pipeline keeps both alive.
+    Returns the Popen handle (the shell anchoring the pipeline)."""
+    script = (
+        "tail -f /dev/null | GDB_MCP_PORT=%d GDB_MCP_HOST=127.0.0.1 "
+        "gdb -q -nx -x %s > %s 2>&1 & wait"
+        % (PORT, shlex.quote(str(plugin_path)), shlex.quote(LOG))
     )
-    if result.returncode != 0:
-        raise SystemExit("compile failed: %s" % result.stderr[-400:])
+    return subprocess.Popen(["bash", "-lc", script])
+
+
+def tail_log(lines: int = 40) -> str:
+    proc = subprocess.run(["tail", "-n", str(lines), LOG],
+                          capture_output=True, text=True)
+    return proc.stdout
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--go", action="store_true", help="really call the API")
     parser.add_argument("--max-turns", type=int, default=12)
-    parser.add_argument("--plugin", default=None, help="WSL path of gdb_mcp_plugin.py")
     parser.add_argument("--model", default="deepseek-chat")
     args = parser.parse_args()
 
-    plugin_path = args.plugin
-    if not plugin_path:
-        default_plugin = ROOT / "src" / "gdb_mcp" / "plugin" / "gdb_mcp_plugin.py"
-        plugin_path = "/mnt/c/" + str(default_plugin.resolve())[3:].replace("\\", "/")
+    if os.name == "nt":
+        print("run this inside WSL:\n  " + DISTRO_HINT)
+        return 2
 
     compile_crackme()
-    print("[bench] crackme compiled at %s" % CRACKME_WSL)
-    print("[bench] gdb must be launched with the plugin, e.g.:")
-    print(
-        "  wsl.exe -d %s -- bash -lc "
-        "'tail -f /dev/null | GDB_MCP_PORT=%d GDB_MCP_HOST=127.0.0.1 "
-        "gdb -q -nx -x %s > %s 2>&1 &'"
-        % (DISTRO, PORT, shlex.quote(plugin_path), shlex.quote(LOG_WSL))
-    )
-    if not args.go:
-        print("[bench] dry plan only (no API calls). Re-run with --go.")
-        return 0
+    print("[bench] crackme compiled at %s" % CRACKME)
 
-    from tests.integration.fake_mcp_client import McpClient
+    gdb_proc = launch_gdb(ROOT / "src" / "gdb_mcp" / "plugin" / "gdb_mcp_plugin.py")
 
-    client = McpClient(PORT)
-    client.accept()
+    from fake_mcp_client import FakeServer
 
-    def tail_log(lines: int = 40) -> str:
-        out = wsl_bash("tail -n %d %s" % (lines, shlex.quote(LOG_WSL)))
-        return out.stdout
+    try:
+        client = FakeServer(PORT)
+        client.accept()
+        client.expect("hello")
+        client.send(
+            {
+                "type": "hello_ack",
+                "proto": 1,
+                "server_version": "0.1.0",
+                "session_id": "s-bench-win",
+                "heartbeat_sec": 30,
+            }
+        )
+        client.wait_for_event("ready")
+        print("[bench] plugin session ready")
+    except Exception as exc:
+        print("[bench] infrastructure failed: %s" % exc)
+        print("--- gdb.log ---")
+        try:
+            print(Path(LOG).read_text(encoding="utf-8", errors="replace")[-800:])
+        except OSError:
+            pass
+        gdb_proc.kill()
+        return 1
 
     def tool_run_payload(arguments: dict) -> dict:
         payload = str(arguments.get("payload", ""))
@@ -108,11 +132,23 @@ def main() -> int:
     def tool_read_registers(_arguments: dict) -> dict:
         return client.request("regs", {})
 
+    from gdb_mcp.campaign import cyclic_pattern, match_cyclic
+
+    def tool_cyclic_offset(arguments: dict) -> dict:
+        value = int(str(arguments.get("value", "0")), 16)
+        return {"match": match_cyclic(value)}
+
+    def tool_cyclic_pattern(arguments: dict) -> dict:
+        count = min(max(int(arguments.get("count", 200)), 1), 4096)
+        return {"pattern": cyclic_pattern(count)}
+
     tools = {
         "run_payload": tool_run_payload,
         "get_output": tool_get_output,
         "disassemble": tool_disassemble,
         "read_registers": tool_read_registers,
+        "cyclic_offset": tool_cyclic_offset,
+        "cyclic_pattern": tool_cyclic_pattern,
     }
     schemas = [
         {
@@ -123,9 +159,7 @@ def main() -> int:
                 "and return its output",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "payload": {"type": "string"},
-                    },
+                    "properties": {"payload": {"type": "string"}},
                     "required": ["payload"],
                 },
             },
@@ -161,29 +195,65 @@ def main() -> int:
                 "parameters": {"type": "object", "properties": {}},
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "cyclic_offset",
+                "description": "Given a hex value (e.g. a crashed PC or a "
+                "register), return the offset into the standard de Bruijn "
+                "cyclic pattern (lowercase, subsequence 4) that it "
+                "contains, if any",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cyclic_pattern",
+                "description": "Return a de Bruijn cyclic pattern string "
+                "of the requested length for payload construction",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                },
+            },
+        },
     ]
+
+    if not args.go:
+        print("[bench] infrastructure OK; tools: %s" % ", ".join(sorted(tools)))
+        print("[bench] dry run only (no API calls). Re-run with --go.")
+        gdb_proc.kill()
+        return 0
 
     llm = DeepSeekClient(model=args.model)
     llm.bind_tools(schemas)
-    result = run_agent(
-        llm,
-        tools,
-        task=(
-            "The binary /tmp/win_bench takes one argv argument into a "
-            "stack buffer. Find and execute the hidden win() function by "
-            "overflowing the buffer, using run_payload. You are done when "
-            "the output contains WIN{."
-        ),
-        system_prompt=(
-            "You are a binary exploitation agent. Work step by step; keep "
-            "payloads short; use cyclic-style patterns to find offsets."
-        ),
-        max_turns=args.max_turns,
-        check_solved=lambda name, observation: bool(
-            isinstance(observation, dict) and observation.get("win")
-        ),
-        solved_answer="win() executed",
-    )
+    try:
+        result = run_agent(
+            llm,
+            tools,
+            task=(
+                "The binary /tmp/win_bench takes one argv argument into a "
+                "stack buffer. Find and execute the hidden win() function by "
+                "overflowing the buffer, using run_payload. You are done when "
+                "the output contains WIN{."
+            ),
+            system_prompt=(
+                "You are a binary exploitation agent. Work step by step; keep "
+                "payloads short; use cyclic-style patterns to find offsets."
+            ),
+            max_turns=args.max_turns,
+            check_solved=lambda name, observation: bool(
+                isinstance(observation, dict) and observation.get("win")
+            ),
+            solved_answer="win() executed",
+        )
+    finally:
+        gdb_proc.kill()
     print(
         "[bench] solved=%s finish=%s turns=%d tool_calls=%d total_tokens=%d"
         % (
