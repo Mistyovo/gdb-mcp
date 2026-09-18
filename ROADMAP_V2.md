@@ -147,8 +147,11 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | E3 bench | 🟡 骨架完成并实测：DeepSeek 客户端（stdlib urllib，可跑在裸 WSL python3）+ agent 循环（FakeLLM 零消耗测试）+ win.c 靶标 + `run_win.py`（干跑/selftest 验证基建 / `--go` 才花额度）。**输出已按指令结构化**：verdict 来自协议 stop/exited 通知（ended/signal/pc/exit_code）、inferior 输出按字节偏移取本轮 output_lines、寄存器默认键子集、run 失败显式 ended=error；`--selftest` 免 API 验证全结构化路径。三次实测共 ~84k tokens：deepseek-chat 24 轮仍未解出 win.c（模型能力问题，非输出格式问题）——是否换 reasoner/继续投入待用户决策 |
 | 3.4 时间旅行 | 🟡 exp/native-record 已合入：gdb 原生 record/reverse_*（零依赖，WSL2 可用；rr 因 PMU 不可用而放弃）。`continue_execution(mode="reverse_*")` + `execute_command('record full')` |
 | 语料扩容（win.c 之外） | ⏳ 与 E3 调优绑定：ret2libc（可用 build/glibc231）与 fmt 字符串靶标需各自的评分与工具面，等首轮调优决策后一起做 |
-| D2 会话多路 / E1 协议 v2 / E4 mTLS·scoped token | ⏳ 大型独立迭代，需专项设计与验证 |
-| 实验分支（合入后保留开关） | ✅ exp/inferior-io、exp/crash-minimizer、exp/libc-rop 三分支已按 1→2→3 顺序合入 main；libc 识别（C2 的 libc-database 部分以 libc.rip API 形态先行落地） |
+| D2 会话多路（观察者） | ✅ 已合入：observer bearer token（`--observer-token`/env）经 HTTP 中间件派生 per-request 角色；allowlist 外的工具对观察者抛 OBSERVER_READONLY（default-deny）；controller 不受影响；stdio 单角色。发现并修复 http_hardening 与 roles 的同名双 ContextVar（会使门控失效） |
+| E1 协议 v2 | ✅ 已合入：hello_ack 广播 SERVER_CAPABILITIES（additive、v1 兼容）；插件 hello 携带动词全集，服务端握手期 PROTOCOL_MISMATCH 快速失败（修 G3 运行时漂移）；插件记录能力供 mcp status |
+| E4 mTLS + scoped token | ✅ 已合入：TLS/双向 TLS（cert/key/client_ca + config 校验）；launch 的 gdb 只持有会话级派生令牌（HMAC-SHA256(master,'session:id')），主令牌不出服务进程；重启重算即恢复握手。HTTP mTLS 端到端需真实证书环境（诚实标注） |
+| 3.5 静态桥 | ✅ 已合入：从 archive/reverse-tools-dashboard 复活 Ghidra headless 管线（GhidraRunner + AnalysisManager + ExportAnalysis.java + EventBroker），剥离 dashboard/web 耦合；16 个 static_* 查询工具（分析缓存按 SHA-256、sections/symbols/functions/strings/decompile/xrefs/callgraph/代码搜索/注记）；会话最小归档字段（analysis_id/location/target/debug_state）。GhidraRunner 端到端需本机 Ghidra（诚实标注未测）；manager 逻辑由 428 行复活的测试套件覆盖 |
+| 实验分支（合入后保留开关） | ✅ exp/inferior-io、exp/crash-minimizer、exp/libc-rop、exp/native-record 四分支全部按序合入 main；libc 识别（C2 的 libc-database 部分以 libc.rip API 形态先行落地） |
 
 ## 8. 反目标（延续并强化）
 
