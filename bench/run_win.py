@@ -18,10 +18,12 @@ the repo-local .env (read via /mnt/c when invoked from the repo copy).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +71,12 @@ def tail_log(lines: int = 40) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--go", action="store_true", help="really call the API")
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="exercise run_payload end-to-end and print the structured "
+        "result (no API calls)",
+    )
     parser.add_argument("--max-turns", type=int, default=12)
     parser.add_argument("--model", default="deepseek-chat")
     args = parser.parse_args()
@@ -98,7 +106,8 @@ def main() -> int:
             }
         )
         client.wait_for_event("ready")
-        print("[bench] plugin session ready")
+        client.request("file", {"path": CRACKME})
+        print("[bench] plugin session ready; target loaded")
     except Exception as exc:
         print("[bench] infrastructure failed: %s" % exc)
         print("--- gdb.log ---")
@@ -109,15 +118,77 @@ def main() -> int:
         gdb_proc.kill()
         return 1
 
+    def log_size() -> int:
+        try:
+            return os.path.getsize(LOG)
+        except OSError:
+            return 0
+
+    def read_log_from(offset: int) -> str:
+        try:
+            with open(LOG, "rb") as fh:
+                fh.seek(offset)
+                return fh.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def program_output_lines(log_text: str, limit: int = 30) -> list[str]:
+        """The inferior's own output lines: gdb prompts, banners and
+        blanks are noise for a model and are dropped."""
+        lines = []
+        for raw in log_text.splitlines():
+            line = raw.strip()
+            if not line or line == "(gdb)":
+                continue
+            lines.append(line)
+        return lines[-limit:]
+
+    def wait_run_result(client_obj, timeout: float = 60.0) -> dict:
+        """Structured end-of-run verdict straight from the protocol
+        notifications (never scraped from console text)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = client_obj.recv_msg(max(0.1, deadline - time.time()))
+            mtype = msg.get("type")
+            if mtype == "notification":
+                client_obj.notifications.append(msg)
+                event = msg.get("event")
+                if event in ("stop", "exited"):
+                    payload = msg.get("payload") or {}
+                    return {
+                        "ended": event,
+                        "signal": payload.get("signal"),
+                        "pc": payload.get("pc"),
+                        "exit_code": payload.get("exit_code"),
+                    }
+            if mtype == "response":
+                # send_only is only used for the run itself: an error
+                # response here means the run never started
+                if not msg.get("ok", True):
+                    error = msg.get("error") or {}
+                    return {
+                        "ended": "error",
+                        "error": error.get("message", "run failed"),
+                    }
+            # other events ("running"/"ready") are intentionally ignored
+        return {"ended": "timeout"}
+
     def tool_run_payload(arguments: dict) -> dict:
         payload = str(arguments.get("payload", ""))
+        offset = log_size()
         client.request("eval", {"command": "set args %s" % shlex.quote(payload)})
-        client.request("eval", {"command": "run"})
-        output = tail_log()
-        return {"output": output, "win": WIN_MARKER in output}
+        client.send_only("eval", {"command": "run"})
+        verdict = wait_run_result(client)
+        text = read_log_from(offset)
+        lines = program_output_lines(text)
+        return {
+            "verdict": verdict,
+            "output_lines": lines,
+            "win": WIN_MARKER in text,
+        }
 
     def tool_get_output(_arguments: dict) -> dict:
-        return {"output": tail_log()}
+        return {"output_lines": program_output_lines(tail_log())}
 
     def tool_disassemble(arguments: dict) -> dict:
         result = client.request(
@@ -127,10 +198,39 @@ def main() -> int:
                 "count": min(int(arguments.get("count", 24)), 64),
             },
         )
-        return {"instructions": result.get("instructions", [])}
+        return {
+            "start": result.get("start"),
+            "instructions": result.get("instructions", []),
+        }
 
-    def tool_read_registers(_arguments: dict) -> dict:
-        return client.request("regs", {})
+    key_register_names = {
+        "pc", "rip", "eip", "sp", "rsp", "esp", "bp", "rbp", "ebp",
+        "rax", "eax", "rbx", "ebx", "rcx", "ecx", "rdx", "edx",
+        "rsi", "esi", "rdi", "edi", "r8", "r9", "r10", "r11",
+        "r12", "r13", "r14", "r15",
+    }
+
+    def tool_read_registers(arguments: dict) -> dict:
+        regs = client.request("regs", {}).get("regs", {})
+        if arguments.get("full"):
+            return {"registers": regs}
+        subset = {k: v for k, v in regs.items() if k.lower() in key_register_names}
+        return {"registers": subset or regs, "note": "key subset; full=true for all"}
+
+    def tool_read_memory(arguments: dict) -> dict:
+        result = client.request(
+            "read_mem",
+            {
+                "addr": arguments.get("addr"),
+                "length": min(max(int(arguments.get("length", 64)), 1), 1024),
+            },
+        )
+        return {
+            "addr": result.get("addr"),
+            "hex": result.get("hex"),
+            "ascii": result.get("ascii"),
+            "unreadable": result.get("unreadable", []),
+        }
 
     from gdb_mcp.campaign import cyclic_pattern, match_cyclic
 
@@ -147,6 +247,7 @@ def main() -> int:
         "get_output": tool_get_output,
         "disassemble": tool_disassemble,
         "read_registers": tool_read_registers,
+        "read_memory": tool_read_memory,
         "cyclic_offset": tool_cyclic_offset,
         "cyclic_pattern": tool_cyclic_pattern,
     }
@@ -155,8 +256,10 @@ def main() -> int:
             "type": "function",
             "function": {
                 "name": "run_payload",
-                "description": "Run the binary with <payload> as argv[1] "
-                "and return its output",
+                "description": "Run the binary with <payload> as argv[1]. "
+                "Returns structured verdict {ended: stop|exited, signal, "
+                "pc, exit_code}, the inferior's own output_lines, and "
+                "win=true when the output contains the win marker",
                 "parameters": {
                     "type": "object",
                     "properties": {"payload": {"type": "string"}},
@@ -168,7 +271,8 @@ def main() -> int:
             "type": "function",
             "function": {
                 "name": "get_output",
-                "description": "Read the last inferior output",
+                "description": "Return the inferior's accumulated "
+                "output_lines from the gdb log",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -177,7 +281,8 @@ def main() -> int:
             "function": {
                 "name": "disassemble",
                 "description": "Disassemble instructions at an address or "
-                "symbol (default main)",
+                "symbol (default main). Returns start + instruction list "
+                "[{addr, size, asm}]",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -191,8 +296,28 @@ def main() -> int:
             "type": "function",
             "function": {
                 "name": "read_registers",
-                "description": "Read the current registers",
-                "parameters": {"type": "object", "properties": {}},
+                "description": "Read registers. Returns the key-register "
+                "subset by default; full=true returns every register",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"full": {"type": "boolean"}},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_memory",
+                "description": "Read inferior memory at an address or "
+                "symbol. Returns addr, hex and ascii rendering",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "addr": {"type": "string"},
+                        "length": {"type": "integer"},
+                    },
+                    "required": ["addr"],
+                },
             },
         },
         {
@@ -225,8 +350,21 @@ def main() -> int:
     ]
 
     if not args.go:
-        print("[bench] infrastructure OK; tools: %s" % ", ".join(sorted(tools)))
-        print("[bench] dry run only (no API calls). Re-run with --go.")
+        if args.selftest:
+            sample = tools["run_payload"]({"payload": "A" * 80})
+            verdict = sample["verdict"]
+            assert verdict["ended"] in ("stop", "exited"), sample
+            assert any(
+                "back from strcpy" in line for line in sample["output_lines"]
+            ), sample
+            print(json.dumps(sample, ensure_ascii=False, indent=1)[:1200])
+            print("[bench] selftest OK: structured verdict + output lines correct")
+        else:
+            print(
+                "[bench] infrastructure OK; tools: %s"
+                % ", ".join(sorted(tools))
+            )
+            print("[bench] dry run only (no API calls). Re-run with --go.")
         gdb_proc.kill()
         return 0
 

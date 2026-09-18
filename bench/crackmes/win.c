@@ -15,6 +15,9 @@ void win(void) {
 }
 
 int main(int argc, char **argv) {
+    /* stdout is fully buffered when redirected to a file; a crashing
+     * run would lose everything not yet flushed */
+    setvbuf(stdout, NULL, _IONBF, 0);
     char buf[64];
     if (argc < 2) {
         puts("usage: win_bench <payload>");
