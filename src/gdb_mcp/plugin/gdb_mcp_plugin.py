@@ -567,8 +567,8 @@ class Plugin(object):
         self.state = "disconnected"
         if kill_gdb:
             try:
-                gdb.execute("set confirm off", to_string=True)
-                gdb.execute("quit", to_string=True)
+                self._exec("set confirm off")
+                self._exec("quit")
             except Exception:
                 pass
 
@@ -844,7 +844,7 @@ class Plugin(object):
     def _do_interrupt(self):
         """Runs on gdb's main thread; interrupts the running inferior."""
         try:
-            gdb.execute("interrupt")
+            self._exec("interrupt", to_string=False)
         except Exception:
             # last resort (gdb >= 15): thread-safe interrupt API
             if "gdb_interrupt" in self.features:
@@ -1027,7 +1027,7 @@ class Plugin(object):
         self._send_response(req_id, True, result={"state": "running"})
         self.state = "running"
         try:
-            gdb.execute(cmd)
+            self._exec(cmd, to_string=False)
         except gdb.error as exc:
             self.state = "stopped"
             self._notify("prompt", {"note": "resume failed: %s" % exc})
@@ -1041,7 +1041,7 @@ class Plugin(object):
         window = _eval_window(params)
         _guard_unsafe_command(command)
         keep_ansi = bool(params.get("keep_ansi", False))
-        out = gdb.execute(str(command), to_string=True) or ""
+        out = self._exec(str(command)) or ""
         return _eval_output(out, strip=not keep_ansi, window=window)
 
     def _handle_read_mem(self, params):
@@ -1173,10 +1173,7 @@ class Plugin(object):
             )
         try:
             # gdb.Frame exposes read_register but no write_register API.
-            gdb.execute(
-                "set $%s = %s" % (name, str(value_expr)),
-                to_string=True,
-            )
+            self._exec("set $%s = %s" % (name, str(value_expr)))
         except (gdb.error, ValueError) as exc:
             raise PluginError("PLUGIN_ERROR", "write_register failed: %s" % exc)
         new = self._fmt_value(frame.read_register(name))
@@ -1366,7 +1363,7 @@ class Plugin(object):
         # done via the global "set breakpoint pending" setting.
         pending = bool(params.get("pending", False))
         if pending:
-            gdb.execute("set breakpoint pending on", to_string=True)
+            self._exec("set breakpoint pending on")
         try:
             bp = self._create_breakpoint(
                 str(location), bptype, bool(params.get("temporary", False))
@@ -1379,7 +1376,7 @@ class Plugin(object):
             raise PluginError("PLUGIN_ERROR", "failed to set breakpoint: %s" % exc)
         finally:
             if pending:
-                gdb.execute("set breakpoint pending auto", to_string=True)
+                self._exec("set breakpoint pending auto")
         commands = params.get("commands")
         if commands is not None and not isinstance(commands, list):
             raise PluginError("BAD_PARAMS", "commands must be a list of strings")
@@ -1448,24 +1445,21 @@ class Plugin(object):
         return {"number": number, "enabled": False}
 
     def _handle_mem_map(self, params):
-        out = gdb.execute("info proc mappings", to_string=True) or ""
+        out = self._exec("info proc mappings") or ""
         return _limited_output(out)
 
     def _handle_file(self, params):
         path = params.get("path")
         if not path:
             raise PluginError("BAD_PARAMS", "path is required")
-        out = gdb.execute("file %s" % shlex.quote(str(path)), to_string=True) or ""
+        out = self._exec("file %s" % shlex.quote(str(path))) or ""
         return _limited_output(out)
 
     def _handle_core(self, params):
         path = params.get("path")
         if not path:
             raise PluginError("BAD_PARAMS", "path is required")
-        out = (
-            gdb.execute("core-file %s" % shlex.quote(str(path)), to_string=True)
-            or ""
-        )
+        out = self._exec("core-file %s" % shlex.quote(str(path))) or ""
         return _limited_output(out)
 
     # -- checkpoints (registers + writable memory snapshots) -----------------
@@ -2004,6 +1998,11 @@ class Plugin(object):
         }
 
     # -- gdb events (main thread; never block) ------------------------------
+
+    def _exec(self, command, to_string=True):
+        """Single choke point for gdb CLI execution. All gdb.execute
+        calls live here so the plugin has exactly one line to audit."""
+        return gdb.execute(command, to_string=to_string)
 
     def _connect_events(self):
         ev = gdb.events
