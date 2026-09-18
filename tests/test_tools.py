@@ -1556,3 +1556,74 @@ class TestExperimentalGating:
                 ctx_for((registry, cfg, tools)),
             )
         assert ei.value.code == "BAD_PARAMS"
+
+
+class TestObserverGuard:
+    @staticmethod
+    def _env_with_observers(tmp_path):
+        from gdb_mcp.roles import CURRENT_ROLE
+
+        cfg = Config(
+            log_dir=tmp_path / "l",
+            experimental=True,
+            observer_tokens=("obs-token",),
+        )
+        registry = SessionRegistry(cfg)
+        app = build_app(cfg, registry)
+        tools = {
+            name: app._tool_manager._tools[name]
+            for name in app._tool_manager._tools
+        }
+        return cfg, registry, tools, CURRENT_ROLE
+
+    @pytest.mark.asyncio
+    async def test_observer_write_tool_rejected(self, tmp_path):
+        cfg, registry, tools, role = self._env_with_observers(tmp_path)
+        s = add_gdb_session(registry)
+        token = role.set("observer")
+        try:
+            with pytest.raises(GdbMcpError) as ei:
+                await run_tool(
+                    tools["write_memory"],
+                    {"address": "0x1000", "hex": "90", "session_id": s.session_id},
+                    ctx_for((registry, cfg, tools)),
+                )
+            assert ei.value.code == "OBSERVER_READONLY"
+            assert s.writer.sent == []
+        finally:
+            role.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_observer_read_tool_allowed(self, tmp_path):
+        cfg, registry, tools, role = self._env_with_observers(tmp_path)
+        s = add_gdb_session(registry)
+        token = role.set("observer")
+        try:
+            task = asyncio.create_task(
+                run_tool(
+                    tools["read_registers"],
+                    {"session_id": s.session_id},
+                    ctx_for((registry, cfg, tools)),
+                )
+            )
+            await respond_to(s, s.writer, {"regs": {"rax": "0x1"}})
+            result = await task
+            assert result["regs"] == {"rax": "0x1"}
+        finally:
+            role.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_controller_unaffected(self, tmp_path):
+        cfg, registry, tools, role = self._env_with_observers(tmp_path)
+        s = add_gdb_session(registry)
+        assert role.get() == "controller"
+        task = asyncio.create_task(
+            run_tool(
+                tools["write_memory"],
+                {"address": "0x1000", "hex": "90", "session_id": s.session_id},
+                ctx_for((registry, cfg, tools)),
+            )
+        )
+        req = await respond_to(s, s.writer, {"addr": 0x1000, "bytes_written": 1})
+        assert req["verb"] == "write_mem"
+        await task

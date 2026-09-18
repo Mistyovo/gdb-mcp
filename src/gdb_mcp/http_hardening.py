@@ -17,6 +17,7 @@ from __future__ import annotations
 import hmac
 
 from gdb_mcp.errors import ProtocolError
+from gdb_mcp.roles import CURRENT_ROLE
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -40,13 +41,17 @@ def check_http_request(
     bind_host: str,
     bind_port: int,
     token: str | None,
-) -> None:
-    """Raise :class:`ProtocolError` when the request fails hardening.
+    observer_tokens: tuple[str, ...] = (),
+) -> str:
+    """Validate the request and return the client role ("controller" or
+    "observer"). Raises :class:`ProtocolError` on failure.
 
     ``headers`` keys are lowercase. Header absence rules: ``Host`` is
     mandatory (HTTP/1.1); ``Origin`` is optional (non-browser clients
-    omit it); ``Authorization`` is required exactly when a token is
-    configured.
+    omit it); ``Authorization`` is required exactly when a controller
+    or observer token is configured. A bearer matching an observer
+    token yields the observer role; anything else must match the
+    controller token.
     """
     host = headers.get("host")
     if not host:
@@ -68,24 +73,46 @@ def check_http_request(
                     "MALFORMED",
                     f"cross-origin request from {origin!r} is not allowed",
                 )
-    if token is not None:
-        supplied = headers.get("authorization", "")
-        expected = "Bearer " + token
-        if not hmac.compare_digest(
+    supplied = headers.get("authorization", "")
+    expected = "Bearer " + (token or "")
+    role = "controller"
+    if token or observer_tokens:
+        matched = False
+        if token and hmac.compare_digest(
             supplied.encode("utf-8"), expected.encode("utf-8")
         ):
+            matched = True
+        for observer in observer_tokens:
+            if hmac.compare_digest(
+                supplied.encode("utf-8"),
+                ("Bearer " + observer).encode("utf-8"),
+            ):
+                matched = True
+                role = "observer"
+                break
+        if not matched:
             raise ProtocolError("MALFORMED", "missing or invalid bearer token")
+    return role
 
 
 class SecurityHeadersMiddleware:
     """Pure-ASGI wrapper applying :func:`check_http_request` to every
-    HTTP request before it reaches the MCP app."""
+    HTTP request before it reaches the MCP app, and binding the derived
+    client role to the request's context (D2 observer enforcement)."""
 
-    def __init__(self, app, bind_host: str, bind_port: int, token: str | None):
+    def __init__(
+        self,
+        app,
+        bind_host: str,
+        bind_port: int,
+        token: str | None,
+        observer_tokens: tuple[str, ...] = (),
+    ):
         self.app = app
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.token = token
+        self.observer_tokens = tuple(observer_tokens)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -96,7 +123,13 @@ class SecurityHeadersMiddleware:
             for key, value in scope.get("headers", [])
         }
         try:
-            check_http_request(headers, self.bind_host, self.bind_port, self.token)
+            role = check_http_request(
+                headers,
+                self.bind_host,
+                self.bind_port,
+                self.token,
+                self.observer_tokens,
+            )
         except ProtocolError as exc:
             body = exc.message.encode("utf-8")
             await send(
@@ -111,4 +144,5 @@ class SecurityHeadersMiddleware:
             )
             await send({"type": "http.response.body", "body": body})
             return
+        CURRENT_ROLE.set(role)
         await self.app(scope, receive, send)

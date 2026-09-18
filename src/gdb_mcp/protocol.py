@@ -74,6 +74,21 @@ ASYNC_VERBS = frozenset(
     }
 )
 
+# Server capabilities advertised in hello_ack. Additive by design: v1
+# plugins ignore unknown hello_ack fields, and these describe optional
+# server-side features rather than wire-format changes.
+SERVER_CAPABILITIES = frozenset(
+    {
+        "journal",
+        "campaign",
+        "checkpoints",
+        "policies",
+        "io",
+        "static",
+        "observer-roles",
+    }
+)
+
 # All request verbs the plugin understands.
 VERBS = frozenset(
     {
@@ -193,6 +208,7 @@ def build_hello_ack(
         "server_version": server_version,
         "session_id": session_id,
         "heartbeat_sec": heartbeat_sec,
+        "capabilities": sorted(SERVER_CAPABILITIES),
     }
 
 
@@ -244,6 +260,19 @@ def unwrap_token(msg: dict, token: str | None) -> dict:
     return msg
 
 
+def peek_session_id(envelope: dict) -> str | None:
+    """Best-effort session_id extraction from a possibly token-wrapped
+    hello envelope. Used ONLY to select which verification token to
+    apply — the envelope itself is still untrusted until unwrap."""
+    if not isinstance(envelope, dict):
+        return None
+    inner = envelope.get("msg")
+    if not isinstance(inner, dict):
+        inner = envelope
+    sid = inner.get("session_id")
+    return sid if isinstance(sid, str) else None
+
+
 def validate_hello(msg: dict) -> None:
     """Validate the plugin handshake before it enters the registry."""
     if msg.get("type") != "hello":
@@ -267,6 +296,24 @@ def validate_hello(msg: dict) -> None:
         or any(not isinstance(feature, str) for feature in features)
     ):
         raise ProtocolError("MALFORMED", "hello features must be a list of strings")
+    # E1: plugins built after the verb-table drift guard advertise their
+    # full verb set; a mismatch means plugin/server builds are paired
+    # incorrectly and every later request would fail — fail the
+    # handshake instead.
+    verbs = msg.get("verbs")
+    if verbs is not None:
+        if not isinstance(verbs, list) or any(
+            not isinstance(verb, str) for verb in verbs
+        ):
+            raise ProtocolError("MALFORMED", "hello verbs must be a list of strings")
+        mismatch = set(verbs).symmetric_difference(VERBS)
+        if mismatch:
+            raise ProtocolError(
+                "PROTOCOL_MISMATCH",
+                "plugin verb table does not match server (differing: %s); "
+                "update the plugin file to match the server build"
+                % ", ".join(sorted(mismatch))[:200],
+            )
 
 
 def validate_plugin_message(msg: dict) -> None:

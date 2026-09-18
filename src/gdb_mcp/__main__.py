@@ -57,6 +57,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="register experimental tools (unstable; the ONLY way to "
         "enable them - no environment variable exists for this)",
     )
+    p.add_argument(
+        "--observer-token",
+        action="append",
+        default=None,
+        dest="observer_tokens",
+        metavar="TOKEN",
+        help="read-only observer bearer token for the HTTP transport "
+        "(repeatable); observers may query state but mutating tools "
+        "reject them",
+    )
+    p.add_argument("--mcp-tls-cert", default=None, help="TLS certificate for MCP HTTPS")
+    p.add_argument("--mcp-tls-key", default=None, help="TLS private key for MCP HTTPS")
+    p.add_argument(
+        "--mcp-tls-client-ca",
+        default=None,
+        help="CA bundle to require client certificates (mutual TLS)",
+    )
     return p
 
 
@@ -84,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
                 "readonly": args.readonly,
                 "allow_unsafe": args.allow_unsafe,
                 "experimental": args.experimental,
+                "observer_tokens": tuple(args.observer_tokens or ()),
+                "mcp_tls_cert": args.mcp_tls_cert,
+                "mcp_tls_key": args.mcp_tls_key,
+                "mcp_tls_client_ca": args.mcp_tls_client_ca,
             }
         )
     except ValueError as exc:

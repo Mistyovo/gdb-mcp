@@ -137,3 +137,28 @@ class TestFromEnv:
         cfg = Config.from_env(overrides={"port": 5000, "token": None})
         assert cfg.port == 5000
         assert cfg.token is None
+
+
+class TestE4Options:
+    def test_tls_material_pairs(self):
+        with pytest.raises(ValueError):
+            Config(mcp_tls_cert="a.pem").validate()
+        with pytest.raises(ValueError):
+            Config(mcp_tls_key="a.key").validate()
+        with pytest.raises(ValueError):
+            Config(mcp_tls_client_ca="ca.pem").validate()
+        Config(mcp_tls_cert="a.pem", mcp_tls_key="a.key").validate()
+        Config(
+            mcp_tls_cert="a.pem", mcp_tls_key="a.key", mcp_tls_client_ca="ca.pem"
+        ).validate()
+
+    def test_observer_tokens_validation(self):
+        with pytest.raises(ValueError):
+            Config(token="m", observer_tokens=("m",)).validate()
+        with pytest.raises(ValueError):
+            Config(observer_tokens=("",)).validate()
+        Config(token="m", observer_tokens=("o",)).validate()
+
+    def test_observer_tokens_env_comma_list(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_OBSERVER_TOKENS", "a, b ,")
+        assert Config.from_env().observer_tokens == ("a", "b")

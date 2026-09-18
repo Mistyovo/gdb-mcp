@@ -8,6 +8,7 @@ from gdb_mcp.protocol import (
     HEARTBEAT_PING_ID,
     LineReader,
     READER_VERBS,
+    SERVER_CAPABILITIES,
     VERBS,
     build_hello_ack,
     build_ping,
@@ -192,6 +193,58 @@ class TestVerbSets:
 
     def test_all_verbs_known(self):
         assert READER_VERBS | ASYNC_VERBS <= VERBS
+
+    def test_plugin_verb_table_matches_protocol(self, plugin_mod):
+        """H5: the two hand-written verb tables must never drift."""
+        plugin_verbs = (
+            set(plugin_mod.VERB_HANDLERS)
+            | set(plugin_mod.ASYNC_VERBS)
+            | set(plugin_mod.READER_VERBS)
+        )
+        assert plugin_verbs == set(VERBS)
+        # every gated verb must be a dispatchable sync verb
+        assert set(plugin_mod.GATED_VERBS) <= set(plugin_mod.VERB_HANDLERS)
+        assert not (
+            set(plugin_mod.GATED_VERBS)
+            & (set(plugin_mod.ASYNC_VERBS) | set(plugin_mod.READER_VERBS))
+        )
+
+
+class TestProtocolV2:
+    def _hello(self, **extra):
+        hello = {
+            "type": "hello",
+            "proto": 1,
+            "pid": 5,
+            "features": ["gdb_interrupt"],
+            "verbs": sorted(VERBS),
+        }
+        hello.update(extra)
+        return hello
+
+    def test_matching_verbs_pass(self):
+        validate_hello(self._hello())
+
+    def test_mismatched_verbs_rejected(self):
+        with pytest.raises(ProtocolError) as ei:
+            validate_hello(self._hello(verbs=sorted(VERBS - {"eval"})))
+        assert ei.value.code == "PROTOCOL_MISMATCH"
+        assert "eval" in ei.value.message
+
+    def test_missing_verbs_is_backward_compatible(self):
+        hello = self._hello()
+        del hello["verbs"]
+        validate_hello(hello)
+
+    def test_malformed_verbs_rejected(self):
+        with pytest.raises(ProtocolError) as ei:
+            validate_hello(self._hello(verbs="eval"))
+        assert ei.value.code == "MALFORMED"
+
+    def test_hello_ack_advertises_capabilities(self):
+        ack = build_hello_ack("s-1", "0.1.0", 30.0)
+        assert ack["capabilities"] == sorted(SERVER_CAPABILITIES)
+        assert "journal" in ack["capabilities"]
 
     def test_plugin_verb_table_matches_protocol(self, plugin_mod):
         """H5: the two hand-written verb tables must never drift."""

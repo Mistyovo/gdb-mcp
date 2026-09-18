@@ -22,7 +22,14 @@ from pathlib import Path
 from gdb_mcp.config import Config
 from gdb_mcp.errors import LaunchError
 from gdb_mcp.output import tail_text_file
-from gdb_mcp.sessions import EXITED, RESERVED, RUNNING, Session, SessionRegistry
+from gdb_mcp.sessions import (
+    EXITED,
+    RESERVED,
+    RUNNING,
+    Session,
+    SessionRegistry,
+    derive_session_token,
+)
 
 log = logging.getLogger("gdb_mcp.launcher")
 
@@ -282,6 +289,7 @@ class Launcher:
         kind: str,
         marker: bool,
         distro_override: str | None = None,
+        session_token: str | None = None,
     ) -> Session:
         launcher = self.config.launcher
         if launcher == "docker":
@@ -313,7 +321,13 @@ class Launcher:
         session = self.registry.reserve(
             session_id, kind=kind, log_file=str(log_file)
         )
-        session.distro = await self.distro(distro_override) if launcher == "wsl" else None
+        session.distro = (
+            await self.distro(distro_override) if launcher == "wsl" else None
+        )
+        if session_token:
+            # E4: launched gdb sessions verify against a token scoped to
+            # this session; the master never reaches the launched process
+            session.token = session_token
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fh = open(log_file, "w", encoding="utf-8", errors="replace")
@@ -407,7 +421,10 @@ class Launcher:
             "GDB_MCP_MAX_ASYNC_LINE": str(self.config.max_async_line),
         })
         if self.config.token:
-            env_vars["GDB_MCP_TOKEN"] = self.config.token
+            # E4: session-scoped token; the master never reaches the child
+            env_vars["GDB_MCP_SESSION_TOKEN"] = derive_session_token(
+                self.config.token, session_id
+            )
         if self.config.allow_unsafe:
             env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
         log_file = self.config.log_dir / ("%s.log" % session_id)
@@ -420,6 +437,11 @@ class Launcher:
             kind="gdb",
             marker=True,
             distro_override=distro,
+            session_token=(
+                derive_session_token(self.config.token, session_id)
+                if self.config.token
+                else None
+            ),
         )
         deadline = time.monotonic() + max(0.1, timeout_ms / 1000.0)
         while time.monotonic() < deadline:
@@ -478,7 +500,11 @@ class Launcher:
             "GDB_MCP_MAX_ASYNC_LINE": str(self.config.max_async_line),
         })
         if self.config.token:
-            env_vars["GDB_MCP_TOKEN"] = self.config.token
+            # E4: the pwntools-spawned gdb inherits the session-scoped
+            # token bound to its reserved gdb session id
+            env_vars["GDB_MCP_SESSION_TOKEN"] = derive_session_token(
+                self.config.token, gdb_session_id
+            )
         if self.config.allow_unsafe:
             env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
         argv = [python, "-u", script_wsl] + list(args or [])
@@ -488,6 +514,10 @@ class Launcher:
             kind="gdb",
             launched=False,
         )
+        if self.config.token:
+            gdb_session.token = derive_session_token(
+                self.config.token, gdb_session_id
+            )
         try:
             session = await self._spawn(
                 argv,

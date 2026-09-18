@@ -46,6 +46,9 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
     app._config = config  # type: ignore[attr-defined]
     register_all(app, registry, config)
 
+    if config.observer_tokens:
+        _install_observer_guards(app)
+
     @app.resource("gdb://campaign/{session_id}")
     def campaign_resource(session_id: str) -> str:
         """Read-only view of a session's exploit-campaign state."""
@@ -65,27 +68,68 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
     return app
 
 
+def _install_observer_guards(app: FastMCP) -> None:
+    """D2: wrap every tool outside the observer allowlist so a
+    read-only observer client gets a clean OBSERVER_READONLY error.
+    Default-deny: tools registered later are observer-invisible until
+    allowlisted in roles.OBSERVER_ALLOWED_TOOLS."""
+    from gdb_mcp.errors import GdbMcpError
+    from gdb_mcp.roles import CURRENT_ROLE, observer_allowed
+
+    tools = app._tool_manager._tools
+    for name, tool in list(tools.items()):
+        if observer_allowed(name):
+            continue
+        original = tool.fn
+
+        def guarded(*args, _original=original, _name=name, **kwargs):
+            if CURRENT_ROLE.get() == "observer":
+                raise GdbMcpError(
+                    "OBSERVER_READONLY",
+                    "tool %r is not available to observer clients" % _name,
+                )
+            return _original(*args, **kwargs)
+
+        tool.fn = guarded
+
+
 async def _serve_http(app: FastMCP, config: Config) -> None:
     """Run the streamable-HTTP transport behind the security middleware."""
     import uvicorn
 
     from gdb_mcp.http_hardening import SecurityHeadersMiddleware
 
+    scheme = "https" if config.mcp_tls_cert else "http"
     log.info(
-        "MCP streamable HTTP on http://%s:%d/mcp (token %s)",
+        "MCP streamable HTTP on %s://%s:%d/mcp (token %s)",
+        scheme,
         config.mcp_host,
         config.mcp_port,
         "required" if config.token else "disabled",
     )
     hardened = SecurityHeadersMiddleware(
-        app.streamable_http_app(), config.mcp_host, config.mcp_port, config.token
+        app.streamable_http_app(),
+        config.mcp_host,
+        config.mcp_port,
+        config.token,
+        config.observer_tokens,
     )
+    uvicorn_kwargs: dict = {}
+    if config.mcp_tls_cert:
+        uvicorn_kwargs["ssl_certfile"] = config.mcp_tls_cert
+        uvicorn_kwargs["ssl_keyfile"] = config.mcp_tls_key
+        if config.mcp_tls_client_ca:
+            # E4: mutual TLS - the client must present a certificate
+            # signed by this CA
+            uvicorn_kwargs["ssl_ca_certs"] = config.mcp_tls_client_ca
+            uvicorn_kwargs["ssl_cert_reqs"] = 2  # ssl.CERT_REQUIRED
     server = uvicorn.Server(
         uvicorn.Config(
             hardened,
             host=config.mcp_host,
             port=config.mcp_port,
             log_level="info",
+            **uvicorn_kwargs,
         )
     )
     await server.serve()

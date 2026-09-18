@@ -21,6 +21,7 @@ from gdb_mcp.protocol import (
     build_ping,
     encode,
     parse_line,
+    peek_session_id,
     unwrap_token,
     validate_hello,
     validate_plugin_message,
@@ -98,7 +99,12 @@ class PluginTcpListener:
         raw = data.rstrip(b"\r\n")
         if len(raw) > self.config.max_async_line:
             raise ProtocolError("MALFORMED", "hello line too long")
-        msg = unwrap_token(parse_line(raw), self.config.token)
+        parsed = parse_line(raw)
+        # E4: a launched session verifies against its scoped token;
+        # unknown/external hellos fall back to the master token
+        sid = peek_session_id(parsed)
+        expected = self.registry.token_for(sid) or self.config.token
+        msg = unwrap_token(parsed, expected)
         validate_hello(msg)
         session = self.registry.register_hello(msg, writer)
         ack = build_hello_ack(

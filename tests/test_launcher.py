@@ -233,6 +233,55 @@ class TestLauncherLifecycle:
         await asyncio.sleep(0)
 
     @pytest.mark.asyncio
+    async def test_scoped_session_token_bound_and_exported(
+        self, monkeypatch, tmp_path
+    ):
+        """E4: the launched session verifies against a token scoped to
+        its session id; the master token must not appear in the child
+        environment."""
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import (
+            SessionRegistry,
+            derive_session_token,
+        )
+
+        config = Config(log_dir=tmp_path, token="master-secret")
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+        wait_forever = asyncio.Event()
+
+        class Proc:
+            returncode = None
+
+            async def wait(self):
+                await wait_forever.wait()
+
+        captured_env = {}
+
+        async def fake_spawn(*args, **kwargs):
+            # _spawn builds env before the call; recover it from the
+            # bash -lc script instead of the kwargs (env is embedded)
+            captured_env["script"] = args[-1]
+            return Proc()
+
+        async def fake_distro(override=None):
+            return "kali-linux"
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+        monkeypatch.setattr(launcher, "distro", fake_distro)
+        session = await launcher.launch_gdb(
+            program="/tmp/pwn", args=None, gdb_args=None, cwd=None,
+            env=None, run=False, timeout_ms=100,
+        )
+        expected = derive_session_token("master-secret", session.session_id)
+        assert session.token == expected
+        assert session.token != "master-secret"
+        # the master token is not in the launched shell script
+        assert "master-secret" not in captured_env.get("script", "")
+        registry.remove(session.session_id)
+
+    @pytest.mark.asyncio
     async def test_launch_script_uses_explicit_gdb_reservation(
         self, monkeypatch, tmp_path
     ):

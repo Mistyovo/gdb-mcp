@@ -202,3 +202,56 @@ async def test_token_wrong_rejected(listener):
     reader, writer = await _connect(port, wrapped)
     assert await asyncio.wait_for(reader.read(), 5) == b""
     writer.close()
+
+
+@pytest.mark.asyncio
+async def test_scoped_session_token_handshake(listener):
+    """E4: a launched session verifies against its scoped token; the
+    master token is refused for that session id."""
+    lis, registry, port = listener
+    lis.config.token = "master-secret"
+    session = registry.reserve("s-scoped")
+    from gdb_mcp.sessions import derive_session_token
+
+    scoped = derive_session_token("master-secret", "s-scoped")
+    session.token = scoped
+
+    # master token for a scoped session: refused
+    bad = encode(
+        {
+            "token": "master-secret",
+            "msg": {**json.loads(HELLO), "session_id": "s-scoped"},
+        }
+    )
+    reader, writer = await _connect(port, bad)
+    assert await asyncio.wait_for(reader.read(), 5) == b""
+    writer.close()
+
+    # scoped token: accepted and bound to the same reservation
+    good = encode(
+        {
+            "token": scoped,
+            "msg": {**json.loads(HELLO), "session_id": "s-scoped"},
+        }
+    )
+    reader2, writer2 = await _connect(port, good)
+    envelope = json.loads(await asyncio.wait_for(reader2.readline(), 5))
+    ack = envelope.get("msg", envelope)
+    assert ack["session_id"] == "s-scoped"
+    writer2.close()
+
+    # an unknown session id falls back to the master token
+    ext = encode(
+        {
+            "token": "master-secret",
+            "msg": {**json.loads(HELLO), "session_id": "s-external"},
+        }
+    )
+    reader3, writer3 = await _connect(port, ext)
+    envelope3 = json.loads(await asyncio.wait_for(reader3.readline(), 5))
+    ack3 = envelope3.get("msg", envelope3)
+    assert ack3["session_id"].startswith("s-")
+    writer3.close()
+
+    # after restart-style revival the scoped token is recomputed
+    registry.remove("s-scoped")

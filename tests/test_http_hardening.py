@@ -104,3 +104,83 @@ class TestSecurityHeadersMiddleware:
         scope = {"type": "lifespan"}
         await self._run(mw, scope)
         assert reached == [scope]
+
+
+class TestObserverRoles:
+    def test_observer_bearer_gets_observer_role(self):
+        role = check_http_request(
+            {"host": "127.0.0.1:8001", "authorization": "Bearer obs-1"},
+            "127.0.0.1",
+            8001,
+            "ctrl",
+            ("obs-1",),
+        )
+        assert role == "observer"
+
+    def test_controller_bearer_gets_controller_role(self):
+        role = check_http_request(
+            {"host": "127.0.0.1:8001", "authorization": "Bearer ctrl"},
+            "127.0.0.1",
+            8001,
+            "ctrl",
+            ("obs-1",),
+        )
+        assert role == "controller"
+
+    def test_unknown_bearer_rejected_even_with_observers(self):
+        with pytest.raises(ProtocolError):
+            check_http_request(
+                {"host": "127.0.0.1:8001", "authorization": "Bearer nope"},
+                "127.0.0.1",
+                8001,
+                "ctrl",
+                ("obs-1",),
+            )
+
+    def test_no_tokens_loopback_defaults_controller(self):
+        role = check_http_request({"host": "127.0.0.1:8001"}, "127.0.0.1", 8001, None)
+        assert role == "controller"
+
+    def test_middleware_sets_observer_role_in_context(self):
+        import asyncio
+
+        from gdb_mcp.http_hardening import SecurityHeadersMiddleware
+        from gdb_mcp.roles import CURRENT_ROLE
+
+        seen = []
+
+        async def app(scope, receive, send):
+            seen.append(CURRENT_ROLE.get())
+
+        mw = SecurityHeadersMiddleware(app, "127.0.0.1", 8001, None, ("obs",))
+        scope = {
+            "type": "http",
+            "headers": [
+                (b"host", b"127.0.0.1:8001"),
+                (b"authorization", b"Bearer obs"),
+            ],
+        }
+        asyncio.run(mw(scope, None, lambda m: asyncio.sleep(0)))
+        assert seen == ["observer"]
+
+    def test_middleware_controller_role_for_master(self):
+        import asyncio
+
+        from gdb_mcp.http_hardening import SecurityHeadersMiddleware
+        from gdb_mcp.roles import CURRENT_ROLE
+
+        seen = []
+
+        async def app(scope, receive, send):
+            seen.append(CURRENT_ROLE.get())
+
+        mw = SecurityHeadersMiddleware(app, "127.0.0.1", 8001, "ctrl", ("obs",))
+        scope = {
+            "type": "http",
+            "headers": [
+                (b"host", b"127.0.0.1:8001"),
+                (b"authorization", b"Bearer ctrl"),
+            ],
+        }
+        asyncio.run(mw(scope, None, lambda m: asyncio.sleep(0)))
+        assert seen == ["controller"]

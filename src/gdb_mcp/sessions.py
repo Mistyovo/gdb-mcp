@@ -17,6 +17,8 @@ State machine::
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -460,6 +462,13 @@ class SessionRegistry:
         except KeyError:
             raise NoSuchSessionError(session_id) from None
 
+    def token_for(self, session_id: str) -> str | None:
+        """The verification token a plugin for ``session_id`` must
+        present, or None when the session is unknown (callers fall back
+        to the configured master token)."""
+        session = self._sessions.get(session_id)
+        return session.token if session is not None else None
+
     def by_pid(self, pid: int) -> Session | None:
         sid = self._by_pid.get(pid)
         return self._sessions.get(sid) if sid else None
@@ -577,6 +586,12 @@ class SessionRegistry:
             # campaign content is re-injected into model context via the
             # stop briefs — never trust it verbatim from disk
             session.campaign = sanitize_campaign(entry.get("campaign"))
+            # launched sessions carry scoped tokens: recompute (never
+            # persist) so the revived plugin's token re-verifies
+            if session.launched and self.config.token:
+                session.token = derive_session_token(
+                    self.config.token, sid
+                )
             self._sessions[sid] = session
             self._attach_journal(session)
             restored += 1
@@ -619,6 +634,19 @@ class SessionRegistry:
 
 def make_registry(config: Config) -> SessionRegistry:
     return SessionRegistry(config)
+
+
+def derive_session_token(master: str, session_id: str) -> str:
+    """Deterministic per-session plugin token: HMAC-SHA256(master,
+    "session:<id>") truncated. A leaked plugin token therefore only
+    works for its one session; recomputable after server restarts so
+    revived sessions re-handshake cleanly."""
+    digest = hmac.new(
+        master.encode("utf-8"),
+        ("session:" + session_id).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return digest[:32]
 
 
 _HELLO_STR_KEYS = (

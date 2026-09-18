@@ -44,6 +44,10 @@ DEFAULTS = {
     "allow_unsafe": False,
     "experimental": False,
     "libc_rip_api": "https://libc.rip",
+    "observer_tokens": (),
+    "mcp_tls_cert": None,
+    "mcp_tls_key": None,
+    "mcp_tls_client_ca": None,
 }
 
 
@@ -94,6 +98,13 @@ class Config:
     experimental: bool = DEFAULTS["experimental"]
     #: libc.rip-compatible API endpoint for identify_libc
     libc_rip_api: str = DEFAULTS["libc_rip_api"]
+    #: read-only observer bearer tokens for the HTTP transport
+    #: (D2: observers may query state but every mutating tool rejects)
+    observer_tokens: tuple[str, ...] = DEFAULTS["observer_tokens"]
+    #: mTLS material for the HTTP transport; client_ca enables mutual TLS
+    mcp_tls_cert: str | None = DEFAULTS["mcp_tls_cert"]
+    mcp_tls_key: str | None = DEFAULTS["mcp_tls_key"]
+    mcp_tls_client_ca: str | None = DEFAULTS["mcp_tls_client_ca"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -135,6 +146,21 @@ class Config:
                 "a token is required when the MCP HTTP transport binds a "
                 "non-loopback address"
             )
+        # TLS material comes in pairs; a bare cert or key is a mistake
+        if bool(self.mcp_tls_cert) != bool(self.mcp_tls_key):
+            raise ValueError(
+                "mcp_tls_cert and mcp_tls_key must be provided together"
+            )
+        if self.mcp_tls_client_ca and not self.mcp_tls_cert:
+            raise ValueError(
+                "mcp_tls_client_ca requires mcp_tls_cert/mcp_tls_key (mTLS)"
+            )
+        for token in self.observer_tokens:
+            if not token or self.token == token:
+                raise ValueError(
+                    "observer tokens must be non-empty and differ from "
+                    "the controller token"
+                )
         minimum_line_size = max(self.eval_output_limit, self.max_mem_read * 2) + 4096
         if self.max_async_line < minimum_line_size:
             raise ValueError(
@@ -209,6 +235,15 @@ class Config:
             # on for every server start. Only --experimental enables it.
             experimental=False,
             libc_rip_api=env("LIBC_RIP_API", str) or DEFAULTS["libc_rip_api"],
+            observer_tokens=tuple(
+                t.strip()
+                for t in (os.environ.get(f"{_ENV_PREFIX}_OBSERVER_TOKENS") or "").split(",")
+                if t.strip()
+            )
+            or DEFAULTS["observer_tokens"],
+            mcp_tls_cert=env("MCP_TLS_CERT", str),
+            mcp_tls_key=env("MCP_TLS_KEY", str),
+            mcp_tls_client_ca=env("MCP_TLS_CLIENT_CA", str),
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:

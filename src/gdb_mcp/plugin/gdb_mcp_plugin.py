@@ -484,7 +484,11 @@ class Plugin(object):
     """Bridge between the gdb-mcp server socket and gdb's Python API."""
 
     def __init__(self):
-        self.token = os.environ.get("GDB_MCP_TOKEN")
+        # E4: session-scoped token (launch flow) wins over the master
+        self.token = (
+            os.environ.get("GDB_MCP_SESSION_TOKEN")
+            or os.environ.get("GDB_MCP_TOKEN")
+        )
         self.session_id = os.environ.get("GDB_MCP_SESSION_ID") or None
         port_env = os.environ.get("GDB_MCP_PORT", "")
         try:
@@ -513,6 +517,7 @@ class Plugin(object):
         self._io_seq = 0
         self._io_dropped = 0
         self._io_thread = None
+        self.server_capabilities = set()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -693,6 +698,10 @@ class Plugin(object):
             "features": sorted(self.features),
             "hostname": socket.gethostname(),
             "plugin_version": PLUGIN_VERSION,
+            # E1: let the server fail fast on plugin/server build mismatch
+            "verbs": sorted(
+                set(VERB_HANDLERS) | ASYNC_VERBS | READER_VERBS
+            ),
         }
         try:
             sock.sendall(self._encode_msg(hello))
@@ -771,6 +780,7 @@ class Plugin(object):
                 self.request_reconnect()
                 return
             self.session_id = msg.get("session_id") or self.session_id
+            self.server_capabilities = set(msg.get("capabilities") or [])
             heartbeat = msg.get("heartbeat_sec")
             if isinstance(heartbeat, (int, float)) and heartbeat > 0:
                 try:
