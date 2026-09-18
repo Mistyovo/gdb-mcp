@@ -141,7 +141,7 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | C4 Resources | ✅ MCP Resource 模板 `gdb://campaign/{session_id}`（只读 JSON 视图） |
 | A 委托执行 | ✅ 插件 `policy` 动词（GATED）：`trace`（有界单步、去重 PC、含起始 PC）、`heap_arm/read/disarm`（`gdb.Breakpoint.stop()` 探针记录参数、自动续跑不打断执行流）、`fuzz_loop`（snapshot 恢复 + payload 写入 + 临时断点保证停机 + 信号+PC 去重崩溃）；工具层 `run_policy` |
 | D1 diff_sessions | ✅ 跨会话寄存器差分 + 可选单内存区域差分（16 字节行，上限 128） |
-| 2.4 inferior I/O | ✅ 已在实验分支 exp/inferior-io 实现并合入（pty 通道 + io_setup/send/read/teardown，`GDB_MCP_EXPERIMENTAL=1` 门控）；fuzz_loop 从此可全自动 |
+| 2.4 inferior I/O | ✅ 已在实验分支 exp/inferior-io 实现并合入（pty 通道 + io_setup/send/read/teardown，`--experimental` 启动参数门控，刻意无环境变量通路）；fuzz_loop 从此可全自动 |
 | A 补充：minimize/crash_check | ✅ exp/crash-minimizer 合入：delta debugging（信号一致性防漂移）复用 _fuzz_round |
 | E2 PyPI 发布 | ⏳ 需 PyPI 凭证与发布决策（元数据已齐：pyproject 完整） |
 | E3 bench | ⏳ 需 crackme 语料与评分器设计（B3 导出脚本即评分依据） |

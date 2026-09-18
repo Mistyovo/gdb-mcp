@@ -31,6 +31,18 @@ class TestPhase3Options:
         assert cfg.allow_unsafe is True
         assert cfg.mcp_http is True
 
+    def test_experimental_never_from_env(self, monkeypatch):
+        """Regression: experimental tools are --experimental-only. A stray
+        environment variable must never enable them at server start."""
+        monkeypatch.setenv("GDB_MCP_EXPERIMENTAL", "1")
+        cfg = Config.from_env()
+        assert cfg.experimental is False
+
+    def test_experimental_via_cli_override(self):
+        cfg = Config.from_env(overrides={"experimental": True})
+        assert cfg.experimental is True
+        assert Config.from_env().experimental is False
+
     def test_launcher_env(self, monkeypatch):
         monkeypatch.setenv("GDB_MCP_LAUNCHER", "docker")
         monkeypatch.setenv("GDB_MCP_DOCKER_IMAGE", "gdb-mcp:dev")

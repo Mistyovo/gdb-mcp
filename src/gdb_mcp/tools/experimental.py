@@ -1,10 +1,12 @@
-"""Experimental tools — gated behind GDB_MCP_EXPERIMENTAL=1.
+"""Experimental tools — gated behind the ``--experimental`` launch flag.
 
-Anything in this module is subject to change or removal without a
-deprecation cycle. Current contents: the inferior stdio channel
-(send_to_inferior / read_inferior_output) that pairs with the plugin's
-io_* verbs, libc identification via a libc.rip-compatible API, and
-structured ROP gadget search via the ROPgadget CLI.
+There is deliberately no environment variable for this gate: a stray
+variable in a shell profile or MCP config would silently turn these
+tools on for every server start. Anything here is subject to change or
+removal without a deprecation cycle. Current contents: the inferior
+stdio channel (send_to_inferior / read_inferior_output) that pairs with
+the plugin's io_* verbs, libc identification via a libc.rip-compatible
+API, and structured ROP gadget search via the ROPgadget CLI.
 """
 
 from __future__ import annotations

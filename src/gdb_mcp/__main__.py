@@ -51,6 +51,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow gdb commands that escape the debugger (shell/!/python/...)",
     )
+    p.add_argument(
+        "--experimental",
+        action="store_true",
+        help="register experimental tools (unstable; the ONLY way to "
+        "enable them - no environment variable exists for this)",
+    )
     return p
 
 
@@ -77,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
                 "docker_image": args.docker_image,
                 "readonly": args.readonly,
                 "allow_unsafe": args.allow_unsafe,
+                "experimental": args.experimental,
             }
         )
     except ValueError as exc:

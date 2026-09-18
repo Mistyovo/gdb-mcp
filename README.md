@@ -182,7 +182,22 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 
 ## 实验性功能
 
-设 `GDB_MCP_EXPERIMENTAL=1` 后额外注册 6 个实验工具（可能在没有弃用周期的情况下变动）：
+**只在服务器启动参数 `--experimental` 显式开启**（刻意不提供环境变量——防止
+shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动）。在 MCP 配置中的
+用法：
+
+```json
+{
+  "mcpServers": {
+    "gdb-mcp": {
+      "command": "gdb-mcp",
+      "args": ["--experimental"]
+    }
+  }
+}
+```
+
+开启后额外注册 6 个实验工具（可能在没有弃用周期的情况下变动）：
 
 - **Inferior stdio 通道**：`io_setup` / `send_to_inferior` / `read_inferior_output` /
   `io_teardown` — 把 inferior 的 stdio 重定向到插件管理的 pty，无需 pwntools 即可

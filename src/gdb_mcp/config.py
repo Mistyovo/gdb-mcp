@@ -88,7 +88,9 @@ class Config:
     readonly: bool = DEFAULTS["readonly"]
     #: allow gdb commands that escape the debugger (shell/!/python/...)
     allow_unsafe: bool = DEFAULTS["allow_unsafe"]
-    #: register experimental tools (subject to change without notice)
+    #: register experimental tools (subject to change without notice).
+    #: CLI-only (--experimental) on purpose — never enabled by ambient
+    #: environment variables.
     experimental: bool = DEFAULTS["experimental"]
     #: libc.rip-compatible API endpoint for identify_libc
     libc_rip_api: str = DEFAULTS["libc_rip_api"]
@@ -202,8 +204,10 @@ class Config:
             mcp_port=env("MCP_PORT", int) or DEFAULTS["mcp_port"],
             readonly=env_bool("READONLY") or DEFAULTS["readonly"],
             allow_unsafe=env_bool("ALLOW_UNSAFE") or DEFAULTS["allow_unsafe"],
-            experimental=env_bool("EXPERIMENTAL")
-            or DEFAULTS["experimental"],
+            # experimental is deliberately NOT env-configurable: a stray
+            # variable in a shell profile would silently turn the tools
+            # on for every server start. Only --experimental enables it.
+            experimental=False,
             libc_rip_api=env("LIBC_RIP_API", str) or DEFAULTS["libc_rip_api"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
