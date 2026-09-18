@@ -160,3 +160,40 @@ def is_empty(data: dict) -> bool:
     return not any(
         (data or {}).get(section) for section in _SECTIONS
     )
+
+
+def sanitize_campaign(data) -> dict:
+    """Validate a campaign dict loaded from persistence (or anywhere
+    outside this module). Campaign content is re-injected into model
+    context via stop briefs, so nothing malformed or oversized is
+    trusted: malformed sections/entries are dropped, strings clamped."""
+    clean = new_campaign()
+    if not isinstance(data, dict):
+        return clean
+    for section in _SECTIONS[:4]:
+        bucket = data.get(section)
+        if not isinstance(bucket, dict):
+            continue
+        for key, entry in list(bucket.items())[:_SECTION_CAP]:
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                continue
+            value = entry.get("value")
+            if not isinstance(value, str) or not value:
+                continue
+            if len(value) > 2048:
+                value = value[:2048] + "...<+%d chars>" % (len(value) - 2048)
+            clean_entry = {
+                "value": value,
+                "ts": entry.get("ts"),
+            }
+            if isinstance(entry.get("evidence"), str):
+                clean_entry["evidence"] = entry["evidence"][:256]
+            clean[section][key[:128]] = clean_entry
+    notes = data.get("notes")
+    if isinstance(notes, list):
+        for note in notes[-_NOTES_CAP:]:
+            if isinstance(note, dict) and isinstance(note.get("text"), str):
+                clean["notes"].append(
+                    {"text": note["text"][:512], "ts": note.get("ts")}
+                )
+    return clean

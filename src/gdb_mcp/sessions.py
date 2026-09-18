@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections import deque
@@ -26,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gdb_mcp.campaign import sanitize_campaign
 from gdb_mcp.config import Config
 from gdb_mcp.errors import (
     AmbiguousSessionError,
@@ -537,9 +539,11 @@ class SessionRegistry:
         try:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._persist_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            fd = os.open(
+                str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
             )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False))
             tmp.replace(self._persist_path)
         except OSError:
             log.warning("session persistence write failed", exc_info=True)
@@ -563,16 +567,16 @@ class SessionRegistry:
                 session_id=sid,
                 kind="gdb",
                 state=DISCONNECTED,
-                hello=entry.get("hello"),
+                hello=_sanitize_hello(entry.get("hello")),
                 log_file=entry.get("log_file"),
                 distro=entry.get("distro"),
                 launched=bool(entry.get("launched")),
                 token=self.config.token,
             )
             session.stop_info = entry.get("stop_info")
-            campaign = entry.get("campaign")
-            if isinstance(campaign, dict):
-                session.campaign = campaign
+            # campaign content is re-injected into model context via the
+            # stop briefs — never trust it verbatim from disk
+            session.campaign = sanitize_campaign(entry.get("campaign"))
             self._sessions[sid] = session
             self._attach_journal(session)
             restored += 1
@@ -615,6 +619,33 @@ class SessionRegistry:
 
 def make_registry(config: Config) -> SessionRegistry:
     return SessionRegistry(config)
+
+
+_HELLO_STR_KEYS = (
+    "gdb_version",
+    "python_version",
+    "arch",
+    "inferior",
+    "hostname",
+)
+
+
+def _sanitize_hello(hello: Any) -> dict | None:
+    """Validate a hello payload loaded from persistence: only known keys
+    with sane types survive, strings are bounded. Anything else is
+    dropped rather than trusted."""
+    if not isinstance(hello, dict):
+        return None
+    clean: dict = {"proto": 1, "session_id": None}
+    for key in _HELLO_STR_KEYS:
+        value = hello.get(key)
+        if isinstance(value, str):
+            clean[key] = value[:512]
+    pid = hello.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid >= 1:
+        clean["pid"] = pid
+    clean["pwndbg"] = bool(hello.get("pwndbg"))
+    return clean
 
 
 __all__ = [

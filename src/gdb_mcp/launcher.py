@@ -83,6 +83,9 @@ def bash_quote(s: str) -> str:
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def build_bash_command(
     argv: list[str],
     env: dict[str, str] | None = None,
@@ -90,11 +93,20 @@ def build_bash_command(
     marker: str | None = None,
 ) -> str:
     """Assemble the payload for ``bash -lc``: env exports, cd, then the
-    command (with argv[0] renamed to ``marker`` via ``exec -a``)."""
+    command (with argv[0] renamed to ``marker`` via ``exec -a``).
+
+    Env keys are interpolated into shell syntax and therefore validated
+    against the POSIX name charset — values are single-quote escaped,
+    keys must be, or the script would allow command injection through
+    the launch tools' ``env`` parameter."""
     parts = []
     for key, value in (env or {}).items():
         if value is None:
             continue
+        if not _ENV_KEY_RE.match(key):
+            raise ValueError(
+                "invalid environment variable name: %r" % key[:64]
+            )
         parts.append("export %s=%s" % (key, bash_quote(value)))
     if cwd:
         parts.append("cd %s" % bash_quote(cwd))

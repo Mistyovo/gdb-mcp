@@ -102,3 +102,28 @@ class TestCampaignState:
         data = new_campaign()
         assert campaign_detect(data, {"pc": "0x401000"}) is None
         assert data["primitives"] == {}
+
+
+class TestSanitizeCampaign:
+    def test_malformed_is_dropped(self):
+        from gdb_mcp.campaign import sanitize_campaign
+
+        dirty = {
+            "offsets": {"ok": {"value": "0x1000", "ts": 1},
+                        "bad": "not-a-dict",
+                        "huge": {"value": "X" * 9999}},
+            "primitives": "not-a-dict",
+            "notes": [{"text": "fine"}, "junk", 42],
+        }
+        clean = sanitize_campaign(dirty)
+        assert clean["offsets"]["ok"]["value"] == "0x1000"
+        assert "bad" not in clean["offsets"]
+        assert clean["offsets"]["huge"]["value"].endswith("...<+7951 chars>")
+        assert clean["primitives"] == {}
+        assert [n["text"] for n in clean["notes"]] == ["fine"]
+
+    def test_non_dict_input_returns_fresh(self):
+        from gdb_mcp.campaign import sanitize_campaign
+
+        clean = sanitize_campaign("injected instructions")
+        assert clean["notes"] == [] and clean["offsets"] == {}

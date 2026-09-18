@@ -106,12 +106,18 @@ class DeepSeekClient:
         }
         if self._tools:
             payload["tools"] = self._tools
-        data = _post_json(
-            self.base_url.rstrip("/") + "/chat/completions",
-            headers={"Authorization": "Bearer " + self.api_key},
-            payload=payload,
-            timeout=120.0,
-        )
+        try:
+            data = _post_json(
+                self.base_url.rstrip("/") + "/chat/completions",
+                headers={"Authorization": "Bearer " + self.api_key},
+                payload=payload,
+                timeout=120.0,
+            )
+        except Exception as exc:
+            # never let the key ride along in an exception message
+            raise RuntimeError(
+                "deepseek request failed: %s" % redact(str(exc), self.api_key)
+            ) from exc
         self.total_tokens += int((data.get("usage") or {}).get("total_tokens") or 0)
         message = data["choices"][0]["message"]
         tool_calls = []

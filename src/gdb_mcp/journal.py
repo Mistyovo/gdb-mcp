@@ -67,6 +67,10 @@ class Journal:
         self.head_truncated = False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # journals carry target data and exploit payloads; keep them
+            # private where the OS supports it (POSIX)
+            if not self.path.exists():
+                self.path.touch(mode=0o600)
         except OSError:
             pass
         if load_existing:
