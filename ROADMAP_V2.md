@@ -143,8 +143,8 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | D1 diff_sessions | ✅ 跨会话寄存器差分 + 可选单内存区域差分（16 字节行，上限 128） |
 | 2.4 inferior I/O | ✅ 已在实验分支 exp/inferior-io 实现并合入（pty 通道 + io_setup/send/read/teardown，`--experimental` 启动参数门控，刻意无环境变量通路）；fuzz_loop 从此可全自动 |
 | A 补充：minimize/crash_check | ✅ exp/crash-minimizer 合入：delta debugging（信号一致性防漂移）复用 _fuzz_round |
-| E2 PyPI 发布 | ⏳ 需 PyPI 凭证与发布决策（元数据已齐：pyproject 完整） |
-| E3 bench | 🟡 骨架完成并实测：DeepSeek 客户端（stdlib urllib，可跑在裸 WSL python3）+ agent 循环（FakeLLM 零消耗测试）+ win.c 靶标 + `run_win.py`（干跑验证基建 / `--go` 才花额度）。两次实测共 ~49k tokens：12 轮未解 / 14 轮放弃——deepseek-chat 在当前工具面下解不出 72 字节偏移链，调优方向（换 reasoner、加 payload 构造工具、放宽轮数）待用户决策 |
+| E2 PyPI 发布 | ❌ 取消（用户决策 2026-09-18：不做 PyPI 发布） |
+| E3 bench | 🟡 骨架完成并实测：DeepSeek 客户端（stdlib urllib，可跑在裸 WSL python3）+ agent 循环（FakeLLM 零消耗测试）+ win.c 靶标 + `run_win.py`（干跑/selftest 验证基建 / `--go` 才花额度）。**输出已按指令结构化**：verdict 来自协议 stop/exited 通知（ended/signal/pc/exit_code）、inferior 输出按字节偏移取本轮 output_lines、寄存器默认键子集、run 失败显式 ended=error；`--selftest` 免 API 验证全结构化路径。三次实测共 ~84k tokens：deepseek-chat 24 轮仍未解出 win.c（模型能力问题，非输出格式问题）——是否换 reasoner/继续投入待用户决策 |
 | 3.4 时间旅行 | 🟡 exp/native-record 已合入：gdb 原生 record/reverse_*（零依赖，WSL2 可用；rr 因 PMU 不可用而放弃）。`continue_execution(mode="reverse_*")` + `execute_command('record full')` |
 | 语料扩容（win.c 之外） | ⏳ 与 E3 调优绑定：ret2libc（可用 build/glibc231）与 fmt 字符串靶标需各自的评分与工具面，等首轮调优决策后一起做 |
 | D2 会话多路 / E1 协议 v2 / E4 mTLS·scoped token | ⏳ 大型独立迭代，需专项设计与验证 |
