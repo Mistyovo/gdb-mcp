@@ -25,11 +25,18 @@ const listEl = document.getElementById("session-list");
 const countEl = document.getElementById("session-count");
 const emptyEl = document.getElementById("no-sessions");
 const timelineEl = document.getElementById("timeline");
+const noEventsEl = document.getElementById("no-events");
 const connEl = document.getElementById("conn");
 const seqEl = document.getElementById("seq");
 
 /** session_id -> <article> card element (rebuilt content on update) */
 const cards = new Map();
+/** session_id -> latest view (snapshot info() or event info()) */
+const views = new Map();
+/** session_ids whose detail panel is expanded (survives re-renders) */
+const expanded = new Set();
+/** session_id -> generation counter guarding async detail fills */
+const detailGen = new Map();
 let lastSeq = 0;
 
 // -- tiny DOM helpers --------------------------------------------------------
@@ -88,15 +95,29 @@ function buildCard(info) {
   return card;
 }
 
-/** Rebuild a card's content from an info() dict; extras (pending_requests,
- *  age_sec, journal_entries, last_event) are present only on snapshot
- *  views and are skipped gracefully when absent. */
+/** Rebuild a card's compact content from an info() dict; extras
+ *  (pending_requests, age_sec, journal_entries, last_event) are present
+ *  only on snapshot views and are skipped gracefully when absent.
+ *  An expanded detail node is carried over instead of being rebuilt, so
+ *  frequent event-driven re-renders never blank the deep view. */
 function renderCard(card, view) {
+  const sid = view.session_id;
+  views.set(sid, view);
+  const oldDetail = card.querySelector(":scope > .detail");
   card.textContent = "";
 
   const head = el("div", "card-head");
-  head.appendChild(el("span", "sid mono", shortSid(view.session_id)));
-  head.appendChild(el("span", "badge st-" + view.state, view.state));
+  const left = el("div", "head-left");
+  const title = el("span", "sid mono", shortSid(sid));
+  title.title = "toggle details";
+  title.addEventListener("click", () => toggleDetail(sid));
+  const toggle = el("button", "toggle", expanded.has(sid) ? "\u25be" : "\u25b8");
+  toggle.type = "button";
+  toggle.title = "toggle details";
+  toggle.setAttribute("aria-expanded", String(expanded.has(sid)));
+  toggle.addEventListener("click", () => toggleDetail(sid));
+  left.append(title, toggle);
+  head.append(left, el("span", "badge st-" + view.state, view.state));
   card.appendChild(head);
 
   const rows = el("dl", "rows");
@@ -129,6 +150,17 @@ function renderCard(card, view) {
     stopSummary(view);
   card.appendChild(rows);
   if (summary) card.appendChild(el("div", "last-line", summary));
+
+  if (expanded.has(sid)) {
+    if (oldDetail) {
+      card.appendChild(oldDetail);
+    } else {
+      const shell = el("div", "detail", "loading\u2026");
+      shell.dataset.sid = sid;
+      card.appendChild(shell);
+      refreshDetail(sid);
+    }
+  }
 }
 
 function renderSnapshot(snap) {
@@ -147,6 +179,9 @@ function renderSnapshot(snap) {
     if (!seen.has(sid)) {
       card.remove();
       cards.delete(sid);
+      views.delete(sid);
+      expanded.delete(sid);
+      detailGen.delete(sid);
     }
   }
   const n = (snap.sessions || []).length;
@@ -159,9 +194,163 @@ async function fetchSnapshot() {
     const r = await fetch("/api/v1/snapshot");
     if (!r.ok) throw new Error("HTTP " + r.status);
     renderSnapshot(await r.json());
+    // keep deep views of expanded cards fresh (details are not in events)
+    for (const sid of expanded) refreshDetail(sid);
   } catch (e) {
     setConn("offline");
   }
+}
+
+// -- detail panel (Phase 3) ----------------------------------------------------
+
+function toggleDetail(sid) {
+  if (expanded.has(sid)) {
+    expanded.delete(sid);
+    detailGen.delete(sid);
+  } else {
+    expanded.add(sid);
+  }
+  const card = cards.get(sid);
+  const view = views.get(sid);
+  if (card && view) renderCard(card, view);
+}
+
+/** Fetch detail + journal tail for an expanded card and fill its box.
+ *  Generation-guarded: a newer refresh, a collapse, or a card removal
+ *  happening mid-flight cancels the fill instead of clobbering. */
+async function refreshDetail(sid) {
+  const card = cards.get(sid);
+  const box = card && card.querySelector(":scope > .detail");
+  if (!box) return;
+  const gen = (detailGen.get(sid) || 0) + 1;
+  detailGen.set(sid, gen);
+  const base = "/api/v1/sessions/" + encodeURIComponent(sid);
+  try {
+    const [dResp, jResp] = await Promise.all([
+      fetch(base),
+      fetch(base + "/journal?last=30"),
+    ]);
+    if (!dResp.ok || !jResp.ok) throw new Error("HTTP error");
+    const [detail, journal] = await Promise.all([dResp.json(), jResp.json()]);
+    if (detailGen.get(sid) !== gen || !box.isConnected) return;
+    renderDetail(box, detail, journal);
+  } catch (e) {
+    if (detailGen.get(sid) === gen && box.isConnected) {
+      box.textContent = "";
+      box.appendChild(el("span", "dim", "detail unavailable"));
+    }
+  }
+}
+
+function detailSection(title, content) {
+  const section = el("div", "detail-section");
+  section.appendChild(el("div", "detail-title", title));
+  const body = el("div", "detail-body");
+  if (content) body.appendChild(content);
+  section.appendChild(body);
+  return section;
+}
+
+function kvRows(dict) {
+  const dl = el("dl", "rows");
+  for (const [key, value] of Object.entries(dict || {})) {
+    if (value === null || value === undefined || value === "") continue;
+    const text =
+      typeof value === "object" ? safeJson(value) : String(value);
+    dl.appendChild(el("dt", null, key));
+    dl.appendChild(el("dd", "mono", text));
+  }
+  return dl;
+}
+
+function safeJson(value, cap) {
+  try {
+    const s = JSON.stringify(value);
+    return s.length > (cap || 90) ? s.slice(0, cap || 90) + "\u2026" : s;
+  } catch (e) {
+    return "";
+  }
+}
+
+function renderDetail(box, detail, journal) {
+  box.textContent = "";
+
+  if (detail.stop) {
+    box.appendChild(detailSection("stop", kvRows(detail.stop)));
+  }
+
+  const camp = detail.campaign || {};
+  const counts = camp.counts || {};
+  const parts = [];
+  if (counts.primitives) parts.push(counts.primitives + " primitives");
+  if (counts.offsets) parts.push(counts.offsets + " offsets");
+  if (counts.libc) parts.push(counts.libc + " libc facts");
+  if (counts.notes) parts.push(counts.notes + " notes");
+  const prot = camp.protections || {};
+  const protText = Object.keys(prot)
+    .map((k) => k + (prot[k] ? " \u2713" : " \u2717"))
+    .join("   ");
+  const campLines = camp.summary || [];
+  if (campLines.length || protText || parts.length) {
+    const body = el("div");
+    if (protText) body.appendChild(el("div", "mono prot", protText));
+    for (const line of campLines) body.appendChild(el("div", "camp-line", line));
+    if (parts.length) {
+      body.appendChild(el("div", "dim mono", "(" + parts.join(", ") + ")"));
+    }
+    box.appendChild(detailSection("campaign", body));
+  }
+
+  const ring = detail.recent_events || [];
+  if (ring.length) {
+    const ol = el("ol", "mini-events");
+    for (const ev of ring.slice(-8).reverse()) {
+      const li = el("li");
+      li.appendChild(el("span", "tl-time", fmtTime(ev.ts)));
+      li.appendChild(el("span", "tl-evt", ev.event));
+      const reason = ev.payload && (ev.payload.reason || ev.payload.signal);
+      if (reason) li.appendChild(el("span", "tl-dur", reason));
+      ol.appendChild(li);
+    }
+    box.appendChild(detailSection("events \u00b7 " + ring.length, ol));
+  }
+
+  const jList = el("ol", "journal");
+  const entries = (journal.entries || []).slice().reverse();
+  for (const entry of entries) jList.appendChild(journalLine(entry));
+  const jTitle =
+    "journal \u00b7 " + (journal.total || 0) +
+    (journal.head_truncated ? " (head truncated)" : "");
+  box.appendChild(
+    detailSection(
+      jTitle,
+      entries.length ? jList : el("span", "dim", "no entries yet")
+    )
+  );
+}
+
+function journalLine(entry) {
+  const li = el("li", "jl");
+  li.appendChild(el("span", "tl-time", fmtTime(entry.ts)));
+  if (entry.kind === "request") {
+    li.appendChild(el("span", null, entry.verb || "?"));
+    const params = safeJson(entry.params, 70);
+    if (params) li.appendChild(el("span", "tl-dur", params));
+    if (entry.ok) {
+      const result = safeJson(entry.result, 60);
+      li.appendChild(el("span", "tl-ok", result ? "\u2713 " + result : "\u2713"));
+    } else {
+      li.appendChild(el("span", "tl-err", "\u2717 " + (entry.error || "failed")));
+    }
+  } else if (entry.kind === "notification") {
+    li.appendChild(el("span", "tl-evt", "\u2190 " + (entry.event || "?")));
+    const payload = entry.payload || {};
+    const bits = payload.reason || payload.signal || "";
+    if (bits) li.appendChild(el("span", "tl-dur", bits));
+  } else {
+    li.appendChild(el("span", null, entry.kind));
+  }
+  return li;
 }
 
 // -- timeline -----------------------------------------------------------------
@@ -198,6 +387,7 @@ function timelineAdd(frame) {
 
   timelineEl.prepend(li); // newest on top
   while (timelineEl.children.length > TIMELINE_CAP) timelineEl.lastChild.remove();
+  noEventsEl.classList.add("hidden");
 }
 
 // -- SSE wiring ----------------------------------------------------------------

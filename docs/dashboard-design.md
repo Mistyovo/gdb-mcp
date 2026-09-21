@@ -1,6 +1,6 @@
-# Session Dashboard 设计（Phase 1：数据层 + 只读 API；Phase 2：最小前端）
+# Session Dashboard 设计（Phase 1：数据层 + 只读 API；Phase 2：最小前端；Phase 3：深度视图）
 
-日期：2026-09-21（Phase 1）/ 2026-09-22（Phase 2） · 状态：均已实施
+日期：2026-09-21（Phase 1）/ 2026-09-22（Phase 2、Phase 3） · 状态：均已实施
 关联：`archive/reverse-tools-dashboard` 归档分支（前身）、ROADMAP_V2「D5 实时看板」
 
 ## 1. 问题
@@ -64,6 +64,33 @@ gdb_version/pwndbg/log_file/distro/launched/proc_running/proc_returncode/last_st
 `session.request` **刻意不携带 params/results**：写内存的 hex payload 可达 MB 级
 （deepcopy 会伤生产路径），且全文已在 journal——看板时间线只需 verb + 耗时 + 结果。
 
+### 3.3 深度视图（Phase 3）
+
+`GET /api/v1/sessions/{sid}`：
+
+```json
+{
+  "session": { /* SessionView（= 3.1 的会话对象） */ },
+  "stop": { /* 完整 stop payload 或 null */ },
+  "recent_events": [ /* 事件环尾部，默认 20 条 */ ],
+  "campaign": {
+    "summary": ["campaign primitives: ...", ...],   // campaign_summary 摘要行
+    "protections": { "nx": true, ... },
+    "counts": { "primitives": 2, "offsets": 5, "libc": 3, "notes": 4 }
+  }
+}
+```
+
+`GET /api/v1/sessions/{sid}/journal?last=N`（默认 30，钳制 1..500）：
+
+```json
+{ "session_id": "...", "total": 123, "head_truncated": false,
+  "returned": 30, "entries": [ /* journal 镜像尾部，条目已在写入时 trim */ ] }
+```
+
+journal 尾随天然覆盖 bp_stats 等策略结果（`run_policy` 的结果就落在 request
+条目里），不做专用解析器。未知 sid 返回 404 `{"error": {"code": "NO_SESSION"}}`。
+
 ## 4. API 与安全
 
 - `GET /`：看板页面（`web_static/index.html`，Phase 2）
@@ -103,5 +130,7 @@ gdb_version/pwndbg/log_file/distro/launched/proc_running/proc_returncode/last_st
 
 - Phase 2（✅ 2026-09-22）：最小前端已实施，浏览器实测通过（双会话卡片实时
   增删、SSE 时间线 9 帧按序到达、视觉评审无渲染缺陷）。
-- Phase 3：深度视图（journal 尾随、stop 详情、bp_stats）。
+- Phase 3（✅ 2026-09-22）：深度视图已实施——卡片可展开 stop/campaign/事件环/
+  journal 尾随四个分区（展开态跨事件重渲染保留、异步填充带代际守卫），
+  浏览器实测 + 视觉评审通过。
 - Phase 4（可选）：交互动作（同源 + CSRF 防护，复用归档版 mutating guard）。

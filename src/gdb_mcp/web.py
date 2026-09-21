@@ -12,6 +12,9 @@ Endpoints (GET only - mutating actions are a deliberate non-goal here):
 * ``/api/v1/health``    - liveness + dashboard status
 * ``/api/v1/snapshot``  - full state: every session + broker sequence
 * ``/api/v1/events``    - SSE stream of EventBroker events (15s keepalive)
+* ``/api/v1/sessions/{sid}`` - deep view: stop payload, event ring,
+  campaign digest (Phase 3)
+* ``/api/v1/sessions/{sid}/journal?last=N`` - journal tail (Phase 3)
 
 Security posture matches the archived workbench: loopback-only bind
 (enforced by ``Config.validate``), Host/Origin header validation via the
@@ -24,6 +27,7 @@ trade-off the archived dashboard made.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -34,7 +38,9 @@ from starlette.applications import Starlette
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from gdb_mcp.campaign import campaign_summary
 from gdb_mcp.config import Config
+from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.events import EventBroker
 from gdb_mcp.http_hardening import SecurityHeadersMiddleware
 from gdb_mcp.sessions import Session, SessionRegistry
@@ -52,6 +58,11 @@ _STATIC_FILES = {
 #: SSE comment line cadence - keeps proxies/browsers from idling the
 #: stream out while adding zero data events
 KEEPALIVE_SEC = 15.0
+
+#: detail view sizing (Phase 3): event-ring rows and journal tail
+DETAIL_EVENTS = 20
+JOURNAL_PAGE_DEFAULT = 30
+JOURNAL_PAGE_MAX = 500
 
 
 def session_view(session: Session) -> dict[str, Any]:
@@ -71,6 +82,32 @@ def session_view(session: Session) -> dict[str, Any]:
         }
     )
     return view
+
+
+def session_detail(session: Session) -> dict[str, Any]:
+    """Everything the expanded card shows (Phase 3): the snapshot view,
+    the full stop payload, the event-ring tail, and a compact campaign
+    digest. The journal tail has its own endpoint - it can be long."""
+    campaign = session.campaign or {}
+    primitives = campaign.get("primitives") or {}
+    offsets = campaign.get("offsets") or {}
+    libc = campaign.get("libc") or {}
+    notes = campaign.get("notes") or []
+    return {
+        "session": session_view(session),
+        "stop": copy.deepcopy(session.stop_info),
+        "recent_events": session.recent_events(DETAIL_EVENTS),
+        "campaign": {
+            "summary": campaign_summary(campaign),
+            "protections": copy.deepcopy(campaign.get("protections") or {}),
+            "counts": {
+                "primitives": len(primitives),
+                "offsets": len(offsets),
+                "libc": len(libc),
+                "notes": len(notes),
+            },
+        },
+    }
 
 
 async def sse_stream(
@@ -186,6 +223,16 @@ class DashboardServer:
                 Route("/api/v1/health", self._health, methods=["GET"]),
                 Route("/api/v1/snapshot", self._snapshot, methods=["GET"]),
                 Route("/api/v1/events", self._events, methods=["GET"]),
+                Route(
+                    "/api/v1/sessions/{session_id}",
+                    self._session_detail,
+                    methods=["GET"],
+                ),
+                Route(
+                    "/api/v1/sessions/{session_id}/journal",
+                    self._session_journal,
+                    methods=["GET"],
+                ),
             ]
         )
 
@@ -272,5 +319,49 @@ class DashboardServer:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # -- Phase 3: per-session deep views ------------------------------------
 
-__all__ = ["DashboardServer", "session_view", "sse_stream"]
+    def _session_or_error(self, session_id: str):
+        """Registry lookup mapped to a JSON error response (NO_SESSION
+        is a 404; any other GdbMcpError a 400)."""
+        try:
+            return self.registry.get(session_id), None
+        except GdbMcpError as exc:
+            status = 404 if exc.code == "NO_SESSION" else 400
+            return None, JSONResponse(
+                {"error": {"code": exc.code, "message": exc.message}},
+                status_code=status,
+            )
+
+    async def _session_detail(self, request) -> JSONResponse:
+        session, error = self._session_or_error(request.path_params["session_id"])
+        if error is not None:
+            return error
+        return JSONResponse(session_detail(session))
+
+    async def _session_journal(self, request) -> JSONResponse:
+        session, error = self._session_or_error(request.path_params["session_id"])
+        if error is not None:
+            return error
+        raw = request.query_params.get("last", str(JOURNAL_PAGE_DEFAULT))
+        try:
+            last = int(raw)
+        except ValueError:
+            last = JOURNAL_PAGE_DEFAULT
+        last = max(1, min(last, JOURNAL_PAGE_MAX))
+        journal = session.journal
+        entries = list(journal.entries()[-last:]) if journal is not None else []
+        return JSONResponse(
+            {
+                "session_id": session.session_id,
+                "total": len(journal) if journal is not None else 0,
+                "head_truncated": (
+                    bool(journal.head_truncated) if journal is not None else False
+                ),
+                "returned": len(entries),
+                "entries": entries,
+            }
+        )
+
+
+__all__ = ["DashboardServer", "session_view", "session_detail", "sse_stream"]

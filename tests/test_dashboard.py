@@ -264,6 +264,71 @@ def test_assets_served_with_content_types(client):
     assert "EventSource" in js.text  # the live wiring is actually there
 
 
+# -- deep views (Phase 3) ---------------------------------------------------
+
+
+def test_session_detail_endpoint(client, wired):
+    broker, registry = wired
+    session = registry.register_hello(_hello(pid=5), FakeWriter())
+    asyncio.run(
+        session.push_notification(
+            "stop", {"reason": "breakpoint-hit", "pc": "0x40119b", "signal": None}
+        )
+    )
+    session.campaign["protections"] = {
+        "nx": True,
+        "pie": False,
+        "canary": False,
+        "relro": "partial",
+    }
+    session.campaign["primitives"] = {"arb_write": {"source": "note"}}
+
+    response = client.get("/api/v1/sessions/" + session.session_id)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session"]["gdb_pid"] == 5
+    assert body["stop"]["reason"] == "breakpoint-hit"
+    assert any(e["event"] == "stop" for e in body["recent_events"])
+    assert body["campaign"]["protections"]["nx"] is True
+    assert body["campaign"]["counts"]["primitives"] == 1
+    assert any("arb_write" in line for line in body["campaign"]["summary"])
+    assert client.get("/api/v1/sessions/nope").status_code == 404
+
+
+def test_session_journal_endpoint(client, wired):
+    broker, registry = wired
+    session = registry.register_hello(_hello(), FakeWriter())
+
+    async def do_request():
+        task = asyncio.ensure_future(session.request("ping", timeout=1.0))
+        for _ in range(200):
+            if session.pending:
+                break
+            await asyncio.sleep(0.005)
+        req_id = next(iter(session.pending))
+        await session.complete_response(
+            req_id,
+            {"type": "response", "id": req_id, "ok": True, "result": {"pong": True}},
+        )
+        return await task
+
+    asyncio.run(do_request())
+
+    response = client.get("/api/v1/sessions/%s/journal" % session.session_id)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] >= 1
+    assert body["returned"] == len(body["entries"])
+    pings = [e for e in body["entries"] if e.get("verb") == "ping"]
+    assert pings and pings[-1]["ok"] is True
+    assert pings[-1]["result"]["pong"] is True
+
+    one = client.get("/api/v1/sessions/%s/journal?last=1" % session.session_id)
+    assert one.json()["returned"] == 1
+
+    assert client.get("/api/v1/sessions/nope/journal").status_code == 404
+
+
 # -- configuration ----------------------------------------------------------
 
 

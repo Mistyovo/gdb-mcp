@@ -83,7 +83,19 @@ main {
 
 .card { border: 1px solid var(--panel-edge); border-radius: 6px; padding: 10px 12px; }
 .card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.card .sid { font-weight: 600; }
+.card .sid { font-weight: 600; cursor: pointer; }
+.head-left { display: flex; gap: 7px; align-items: center; }
+
+.toggle {
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.toggle:hover { color: var(--text); }
 
 .rows {
   display: grid;
@@ -122,6 +134,46 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* -- detail panel (Phase 3) -------------------------------------------- */
+
+.detail {
+  margin-top: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--panel-edge);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detail-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+/* detail kv tables share one label rhythm (cards keep their own) */
+.detail .rows { grid-template-columns: 110px 1fr; }
+.detail .rows dt { font-family: var(--mono); }
+
+.prot { color: #f2c977; margin-bottom: 4px; }
+.camp-line { font-family: var(--mono); font-size: 12px; margin-bottom: 2px; }
+
+.mini-events, .journal {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mini-events li { display: flex; gap: 10px; }
+.journal li { display: flex; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.tl-evt { color: var(--accent); }
 
 /* state badges */
 .badge {
