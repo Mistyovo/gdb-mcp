@@ -634,6 +634,141 @@ class TestCrashReport:
         assert ei.value.code == "INFERIOR_RUNNING"
 
 
+class TestTriageCrash:
+    CRASH_STOP = {"signal": "SIGSEGV", "pc": "0x401000", "fault_addr": "0x41414141"}
+
+    @pytest.mark.asyncio
+    async def test_verifies_then_reports(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", {"signal": "SIGTERM"})
+        task = asyncio.create_task(
+            run_tool(
+                tools["triage_crash"],
+                {
+                    "session_id": s.session_id,
+                    "payload_hex": "41" * 80,
+                    "buffer_addr": "0x7ffff7ff0000",
+                    "stop_location": "main",
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"survived": False, "error": None,
+                                             "stop": dict(self.CRASH_STOP)})
+        assert req["verb"] == "policy"
+        assert req["params"]["kind"] == "crash_check"
+        assert req["params"]["payload"] == "41" * 80
+        for _verb, result in CRASH_SCRIPT:
+            await respond_to(s, s.writer, result)
+        r = await task
+        assert r["reproduced"] is True
+        assert r["signal"] == "SIGSEGV"
+        assert r["fault_addr"] == "0x41414141"
+        # the report was built from the AUTHORITATIVE replay stop, not
+        # from the pre-existing session stop
+        assert r["report"]["signal"] == "SIGSEGV"
+        assert r["evidence_file"]
+        evidence = open(r["evidence_file"], encoding="utf-8").read()
+        assert "4141" in evidence
+        assert s.campaign["notes"]  # campaign note recorded
+
+    @pytest.mark.asyncio
+    async def test_surviving_payload_short_circuits(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", {"signal": "SIGSEGV"})
+        task = asyncio.create_task(
+            run_tool(
+                tools["triage_crash"],
+                {
+                    "session_id": s.session_id,
+                    "payload_hex": "41" * 8,
+                    "buffer_addr": "0x1000",
+                    "stop_location": "main",
+                },
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"survived": True, "error": None,
+                                       "stop": None})
+        r = await task
+        assert r["reproduced"] is False
+        assert "nothing to triage" in r["note"]
+        assert "report" not in r
+
+    @pytest.mark.asyncio
+    async def test_verify_error_falls_back_to_current_stop(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", dict(self.CRASH_STOP))
+        task = asyncio.create_task(
+            run_tool(
+                tools["triage_crash"],
+                {
+                    "session_id": s.session_id,
+                    "payload_hex": "42" * 8,
+                    "buffer_addr": "0x1000",
+                    "stop_location": "main",
+                },
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, error="PLUGIN_ERROR")  # crash_check fails
+        for _verb, result in CRASH_SCRIPT:
+            await respond_to(s, s.writer, result)
+        r = await task
+        assert r["reproduced"] is None
+        assert r["verify_error"]
+        assert r["signal"] == "SIGSEGV"  # triaged the current stop anyway
+
+    @pytest.mark.asyncio
+    async def test_minimize_runs_after_report(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", {"signal": "SIGSEGV"})
+        task = asyncio.create_task(
+            run_tool(
+                tools["triage_crash"],
+                {
+                    "session_id": s.session_id,
+                    "payload_hex": "43" * 64,
+                    "buffer_addr": "0x1000",
+                    "stop_location": "main",
+                    "minimize": True,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(s, s.writer, {"survived": False, "error": None,
+                                             "stop": dict(self.CRASH_STOP)})
+        for _verb, result in CRASH_SCRIPT:
+            await respond_to(s, s.writer, result)
+        req = await respond_to(s, s.writer, {"minimized_hex": "43", "reduced": True})
+        assert req["verb"] == "policy"
+        assert req["params"]["kind"] == "minimize"
+        r = await task
+        assert r["minimized"]["minimized_hex"] == "43"
+
+    @pytest.mark.asyncio
+    async def test_no_payload_triages_current_stop(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        await s.push_notification("stop", dict(self.CRASH_STOP))
+        task = asyncio.create_task(
+            run_tool(
+                tools["triage_crash"], {"session_id": s.session_id}, ctx_for(env)
+            )
+        )
+        req = await respond_to(s, s.writer, CRASH_SCRIPT[0][1])
+        assert req["verb"] == "backtrace"  # no verification round-trip
+        for _verb, result in CRASH_SCRIPT[1:]:
+            await respond_to(s, s.writer, result)
+        r = await task
+        assert r["reproduced"] is None
+        assert r["signal"] == "SIGSEGV"
+
+
 class TestSessionResolution:
     @pytest.mark.asyncio
     async def test_ambiguous_session_error(self, env):
