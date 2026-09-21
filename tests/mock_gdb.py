@@ -330,6 +330,11 @@ def execute(cmd, to_string=False):
         if action[0] == "bp":
             last = state.breakpoints[-1] if state.breakpoints else None
             events.stop.fire(FakeBreakHitEvent([last] if last else []))
+        elif action[0] == "bp_num":
+            target = next(
+                (b for b in state.breakpoints if b.number == action[1]), None
+            )
+            events.stop.fire(FakeBreakHitEvent([target] if target else []))
         elif action[0] == "sig":
             if state.newest_frame is not None:
                 state.newest_frame._pc += action[2] if len(action) > 2 else 0x10

@@ -712,6 +712,122 @@ class TestPolicies:
         resp = call(plugin, "policy", {"kind": "trace"})
         assert resp["error"]["code"] == "INFERIOR_RUNNING"
 
+    def test_bp_stats_passes_then_disarms(self, plugin):
+        plugin._connect_events()
+        set_inferior()
+        mock_gdb.state.continue_script = [("bp",), ("bp",)]
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "bp_stats",
+                "locations": ["fn_a", "fn_b"],
+                "stop_location": "main",
+                "max_passes": 2,
+            },
+        )["result"]
+        assert r["armed"] == ["fn_a", "fn_b"]
+        assert r["passes"] == 2
+        assert r["stop_reason"] == "max_passes"
+        # the mock fires stop events without calling probe.stop(), so
+        # the counting itself is exercised in test_stats_breakpoint_*
+        assert r["total_hits"] == 0
+        assert mock_gdb.state.breakpoints == []
+
+    def test_bp_stats_hit_budget_stops_at_probe(self, plugin):
+        plugin._connect_events()
+        set_inferior()
+        # reset() rewound the counter: the two probes are numbers 1, 2
+        mock_gdb.state.continue_script = [("bp_num", 1)]
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "bp_stats",
+                "locations": ["fn_a", "fn_b"],
+                "stop_location": "main",
+            },
+        )["result"]
+        assert r["stop_reason"] == "max_hits"
+        assert mock_gdb.state.breakpoints == []
+
+    def test_bp_stats_inferior_stop_reported(self, plugin):
+        plugin._connect_events()
+        set_inferior()
+        mock_gdb.state.continue_script = [("sig", "SIGSEGV")]
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "bp_stats",
+                "locations": ["fn_a"],
+                "stop_location": "main",
+            },
+        )["result"]
+        assert r["stop_reason"] == "inferior_stop"
+        assert r["stop"]["signal"] == "SIGSEGV"
+        assert mock_gdb.state.breakpoints == []
+
+    def test_bp_stats_param_validation(self, plugin):
+        set_inferior()
+        resp = call(
+            plugin, "policy", {"kind": "bp_stats", "locations": ["main"]}
+        )
+        assert resp["error"]["code"] == "BAD_PARAMS"  # no stop_location
+        resp = call(
+            plugin,
+            "policy",
+            {"kind": "bp_stats", "stop_location": "main", "locations": []},
+        )
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_stats_breakpoint_counts_and_budget(self, plugin, plugin_mod):
+        set_inferior()
+        counts = {}
+        total = [0]
+        bp = plugin_mod._StatsBreakpoint("fn_a", counts, total, 2)
+        assert bp.stop() is False  # hit 1 of 2
+        assert counts == {"fn_a": 1}
+        assert bp.stop() is True  # hit 2 reaches the budget: stop
+        assert counts == {"fn_a": 2}
+        assert total == [2]
+        assert bp.stop() is True  # over budget: keep stopping
+
+    def test_stats_breakpoint_separate_locations(self, plugin, plugin_mod):
+        set_inferior()
+        counts = {}
+        total = [0]
+        bp_a = plugin_mod._StatsBreakpoint("fn_a", counts, total, 100)
+        bp_b = plugin_mod._StatsBreakpoint("fn_b", counts, total, 100)
+        bp_a.stop()
+        bp_b.stop()
+        bp_b.stop()
+        assert counts == {"fn_a": 1, "fn_b": 2}
+        assert total == [3]
+
+
+class TestResolveAddr:
+    def test_hex_decimal_and_raw_number(self, plugin):
+        assert plugin._resolve_addr("0x401000") == 0x401000
+        assert plugin._resolve_addr("4096") == 4096
+        assert plugin._resolve_addr(4096) == 4096
+
+    def test_function_symbol_via_ampersand_fallback(self, plugin):
+        # bare function names evaluate to function values that refuse
+        # int(); "&name" is the plain-pointer fallback
+        mock_gdb.state.expr_map["&main"] = mock_gdb.MockValue(0x401234)
+        assert plugin._resolve_addr("main") == 0x401234
+
+    def test_unknown_symbol_raises_bad_params(self, plugin):
+        from mock_gdb import error as gdb_error
+
+        import pytest
+        with pytest.raises(Exception) as ei:
+            plugin._resolve_addr("no_such_symbol")
+        assert "not an address" in str(ei.value) or isinstance(
+            ei.value, gdb_error
+        )
+
 
 class TestReverseVerbs:
     def test_reverse_continue_maps_to_gdb_command(self, plugin):

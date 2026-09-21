@@ -142,6 +142,8 @@ POLICY_TRACE_CAP = 512
 POLICY_TIMELINE_READ = 256
 POLICY_MAX_PAYLOADS = 64
 POLICY_MAX_CRASHES = 32
+POLICY_MAX_LOCATIONS = 32
+POLICY_MAX_HITS = 1_000_000
 IO_BUFFER_CHUNKS = 1024
 IO_READ_CHUNK = 4096
 IO_MAX_CHUNKS_PER_READ = 64
@@ -231,6 +233,26 @@ class _TimelineBreakpoint(gdb.Breakpoint):
         except Exception:
             pass
         return False
+
+
+class _StatsBreakpoint(gdb.Breakpoint):
+    """Hit counter: tallies hits per location and auto-continues until
+    the shared hit budget is exhausted (the budget-exhausting hit then
+    stops the inferior so it can be inspected at native speed)."""
+
+    def __init__(self, location, counts, total, max_hits):
+        gdb.Breakpoint.__init__(self, location, gdb.BP_BREAKPOINT)
+        self._counts = counts  # location string -> hit count
+        self._total = total  # single-element list shared by all probes
+        self._max = max_hits
+
+    def stop(self):
+        if self._total[0] >= self._max:
+            return True
+        key = str(self.location)
+        self._counts[key] = self._counts.get(key, 0) + 1
+        self._total[0] += 1
+        return self._total[0] >= self._max
 
 #: handled entirely on the reader thread
 READER_VERBS = frozenset(["ping", "interrupt", "quit"])
@@ -980,6 +1002,14 @@ class Plugin(object):
             except Exception:
                 addr = None
         if addr is None:
+            # function / minimal symbols (incl. plain asm labels): the
+            # bare name evaluates to a function value that refuses
+            # int(), but &name is a plain pointer
+            try:
+                addr = int(gdb.parse_and_eval("&" + s))
+            except Exception:
+                addr = None
+        if addr is None:
             raise PluginError(
                 "BAD_PARAMS", "expression %r is not an address" % expr
             )
@@ -1658,6 +1688,7 @@ class Plugin(object):
             "fuzz_loop": self._policy_fuzz_loop,
             "crash_check": self._policy_crash_check,
             "minimize": self._policy_minimize,
+            "bp_stats": self._policy_bp_stats,
         }
         handler = handlers.get(kind)
         if handler is None:
@@ -2011,6 +2042,106 @@ class Plugin(object):
             "rounds": rounds,
             "reduced": len(payload) < initial_len,
             "rounds_truncated": rounds >= max_rounds,
+        }
+
+    def _policy_bp_stats(self, params):
+        """Hit-count probes at ``locations`` plus a temporary marker at
+        ``stop_location``; resumes until the hit budget, the pass count
+        or the inferior's own stop ends the run, then reports per-
+        location counts. Probes auto-continue, so the loop runs at
+        native speed without any per-hit round-trip."""
+        locations = params.get("locations")
+        if not isinstance(locations, list) or not locations:
+            raise PluginError(
+                "BAD_PARAMS", "locations must be a non-empty list"
+            )
+        if len(locations) > POLICY_MAX_LOCATIONS:
+            raise PluginError(
+                "BAD_PARAMS",
+                "too many locations (max %d)" % POLICY_MAX_LOCATIONS,
+            )
+        if "stop_location" not in params:
+            raise PluginError(
+                "BAD_PARAMS", "bp_stats requires stop_location"
+            )
+        stop_location = str(params.get("stop_location"))
+        max_hits = _bounded_int(
+            params.get("max_hits"), 10_000, 1, POLICY_MAX_HITS
+        )
+        max_passes = _bounded_int(params.get("max_passes"), 1, 1, 1024)
+        counts: dict = {}
+        total = [0]
+        armed, skipped = [], []
+        probes = []
+        for loc in locations:
+            try:
+                probes.append(
+                    _StatsBreakpoint(str(loc), counts, total, max_hits)
+                )
+            except gdb.error as exc:
+                skipped.append({"location": str(loc), "reason": str(exc)})
+                continue
+            armed.append(str(loc))
+        if not armed:
+            raise PluginError(
+                "PLUGIN_ERROR", "no location could be armed"
+            )
+        probe_numbers = {bp.number for bp in probes}
+        passes = 0
+        stop_reason = "max_passes"
+        final_stop = None
+        while True:
+            marker = self._handle_break(
+                {"location": stop_location, "temporary": True}
+            )
+            try:
+                self._handle_continue_family(0, "continue", {})
+            except PluginError as exc:
+                stop_reason = "error:%s" % exc.code
+                try:
+                    self._handle_bp_delete({"number": marker["number"]})
+                except PluginError:
+                    pass
+                break
+            stop = self.stop_info or {}
+            stopped_at = set(stop.get("breakpoints") or [])
+            if marker["number"] in stopped_at:
+                passes += 1
+                try:
+                    self._handle_bp_delete({"number": marker["number"]})
+                except PluginError:
+                    pass  # temporary breakpoint consumed itself
+                if total[0] >= max_hits:
+                    stop_reason = "max_hits"
+                    break
+                if passes >= max_passes:
+                    stop_reason = "max_passes"
+                    break
+                continue
+            # stopped away from the marker: probe budget or crash/exit
+            final_stop = stop
+            try:
+                self._handle_bp_delete({"number": marker["number"]})
+            except PluginError:
+                pass
+            stop_reason = (
+                "max_hits" if stopped_at & probe_numbers else "inferior_stop"
+            )
+            break
+        for bp in probes:
+            try:
+                bp.delete()
+            except Exception:
+                pass
+        return {
+            "counts": counts,
+            "total_hits": total[0],
+            "passes": passes,
+            "armed": armed,
+            "skipped": skipped,
+            "max_hits": max_hits,
+            "stop_reason": stop_reason,
+            "stop": final_stop,
         }
 
     # -- gdb events (main thread; never block) ------------------------------

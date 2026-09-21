@@ -67,7 +67,12 @@ def register(app, registry, config) -> None:
           crashing form (params: snapshot_id, payload, buffer_addr,
           stop_location, max_rounds); removals that change the crash
           signal are rejected so the minimizer cannot drift to another
-          bug."""
+          bug.
+        - bp_stats: hit-count probes at locations (auto-continue) plus
+          a temporary marker at stop_location; resumes until the hit
+          budget (max_hits), max_passes marker hits, or the inferior's
+          own stop — then reports per-location counts. The long-run
+          version of manual breakpoint hit counting."""
         session = resolve_gdb(ctx, session_id)
         check_stopped(session)
         policy_params = dict(params or {})
