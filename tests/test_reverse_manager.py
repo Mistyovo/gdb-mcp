@@ -406,3 +406,12 @@ def test_search_validation(tmp_path):
     assert manager.search_code(analysis_id, "return", False, 20)["results"][0]["line"] == 2
     with pytest.raises(GdbMcpError, match="invalid regex"):
         manager.search_code(analysis_id, "[", True, 20)
+
+
+def test_manager_starts_without_analysis_dir():
+    """Regression: the default config (analysis_dir=None) must not crash
+    the server at startup - no cache dir configured means nothing to
+    recover or load; the static bridge just stays dormant."""
+    manager = AnalysisManager(Config())
+    assert manager.backend_status["status"] == "unknown"
+    assert manager.list_analyses() == []

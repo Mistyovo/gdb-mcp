@@ -88,7 +88,7 @@ class AnalysisManager:
     def _recover_cache_promotions(self) -> None:
         """Restore a cache hidden by a process crash during directory promotion."""
         root = self.config.analysis_dir
-        if not root.is_dir():
+        if root is None or not root.is_dir():
             return
         for backup in root.glob(".a-[0-9a-f]*.backup"):
             analysis_id = backup.name[1:-7]
@@ -104,7 +104,7 @@ class AnalysisManager:
 
     def _load_cache(self) -> None:
         root = self.config.analysis_dir
-        if not root.is_dir():
+        if root is None or not root.is_dir():
             return
         for manifest_path in root.glob("a-*/manifest.json"):
             try:
