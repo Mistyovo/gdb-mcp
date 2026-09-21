@@ -25,3 +25,4 @@ logs/
 # Local tool state
 .mimosa/
 .claude/settings.local.json
+bench/*.json
