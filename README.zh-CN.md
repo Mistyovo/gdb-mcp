@@ -168,17 +168,16 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（36 个）
+## 工具一览（37 个）
 
 | 类别 | 工具 |
 |---|---|
 | 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script`（journal → 可重放 gdbscript）`diff_sessions`（跨会话寄存器/内存差分） |
 | 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`get_stop_reason` `read_result` `batch_commands`（多命令一次往返） |
-| 崩溃定位 | `crash_report` |
+| 崩溃定位 | `crash_report`（信号/故障地址/寄存器/回溯/PC·SP·故障地址内存/内存映射一屏拿全）`triage_crash`（checkpoint 重放崩溃 payload → 完整报告 → 可选最小化 → 证据落盘） |
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
-| 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
-| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
+| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop / crash_check / minimize / bp_stats——循环下沉插件原生速度）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
 
 ## 实验性功能
 

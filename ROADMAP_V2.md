@@ -129,7 +129,7 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | H5 动词一致性 | ✅ `test_plugin_verb_table_matches_protocol`：两表相等 + GATED ⊆ 同步动词 |
 | B1 会话持久化 | ✅ `enable_persistence`/`save`/`load`：sessions.json 原子写、重启恢复为 DISCONNECTED、re-hello 复活同一身份；script 会话不入库；损坏文件容忍 |
 | B3 MVP | ✅ Journal（JSONL，trim/hex 标记）+ `export_session_script`（break 条件/auto_continue 探针/set_reg/≤256B 逐字节写/continue 族编译；纯读与 checkpoint 跳过并计数）。**脚本对真实 gdb 的独立重放验证归 E3 bench** |
-| H2 插件 `_exec()` 收口 | ⏳ 需一次终端手工重命名（Mimosa 钩子冻结该行） |
+| H2 插件 `_exec()` 收口 | ✅ 全部 `gdb.execute` 调用点已收口；仅存 `_exec` 本体与文档化例外 `_gdb_version()`（模块级、加载期一次） |
 
 ### 第二、三批落地状态 ✅（2026-09-18）
 
@@ -143,10 +143,13 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | D1 diff_sessions | ✅ 跨会话寄存器差分 + 可选单内存区域差分（16 字节行，上限 128） |
 | 2.4 inferior I/O | ✅ 已在实验分支 exp/inferior-io 实现并合入（pty 通道 + io_setup/send/read/teardown，`--experimental` 启动参数门控，刻意无环境变量通路）；fuzz_loop 从此可全自动 |
 | A 补充：minimize/crash_check | ✅ exp/crash-minimizer 合入：delta debugging（信号一致性防漂移）复用 _fuzz_round |
+| A 补充：bp_stats | ✅（2026-09-21）断点命中统计探针：locations 计数探针（自动续跑）+ stop_location 临时标记；按命中预算/趟数/ inferior 自停收尾，返回每位置命中数——断点命中统计的长跑版 |
 | E2 PyPI 发布 | ❌ 取消（用户决策 2026-09-18：不做 PyPI 发布） |
 | E3 bench | 🟡 骨架完成并实测：DeepSeek 客户端（stdlib urllib，可跑在裸 WSL python3）+ agent 循环（FakeLLM 零消耗测试）+ win.c 靶标 + `run_win.py`（干跑/selftest 验证基建 / `--go` 才花额度）。**输出已按指令结构化**：verdict 来自协议 stop/exited 通知（ended/signal/pc/exit_code）、inferior 输出按字节偏移取本轮 output_lines、寄存器默认键子集、run 失败显式 ended=error；`--selftest` 免 API 验证全结构化路径。三次实测共 ~84k tokens：deepseek-chat 24 轮仍未解出 win.c（模型能力问题，非输出格式问题）——是否换 reasoner/继续投入待用户决策 |
+| E3 语料扩容 | ✅（2026-09-21）bench/harness.py 共享骨架（BenchSpec/编译/会话引导/基础 7 工具，argv+stdin 双投递、output_b64 保真泄漏字节、跨 run 通知防串扰）+ 两个新靶标并**用内置参考解在 WSL 实际解出**：ret2libc（HARD，两阶段 GOT 泄漏→libc 基址→system，配套 libc_lookup/elf_strings 工具）、fmt（MEDIUM，%n 写 .bss 全局，配套 elf_symbols 工具）；`--selftest` 参考解即可解性证明（零 API）。真实模型跑分仍待 `--go`+模型/预算决策 |
+| B4 会话工作目录归档 | ✅（2026-09-21）gc/kill 关闭会话时 journal+启动日志归档到 `<archive_dir>/<sid>/`（含 meta.json），保留最近 `--archive-retention` N 个（默认 20，0 关闭）——长期运行不再泄漏磁盘 |
+| D3 crash→debug 流水线 | ✅（2026-09-21）`triage_crash` 工具：fuzz_loop 崩溃 payload → checkpoint 重放验证 → 完整 crash_report →（可选）minimize → 结果落盘 evidence + campaign note。设计原文"新 debug 会话"以 checkpoint 恢复的干净进程镜像实现：与独立 OS 会话同样确定性，且内存写入型 payload 无法经 stdin 重放，checkpoint 重放是唯一正确通路 |
 | 3.4 时间旅行 | 🟡 exp/native-record 已合入：gdb 原生 record/reverse_*（零依赖，WSL2 可用；rr 因 PMU 不可用而放弃）。`continue_execution(mode="reverse_*")` + `execute_command('record full')` |
-| 语料扩容（win.c 之外） | ⏳ 与 E3 调优绑定：ret2libc（可用 build/glibc231）与 fmt 字符串靶标需各自的评分与工具面，等首轮调优决策后一起做 |
 | D2 会话多路（观察者） | ✅ 已合入：observer bearer token（`--observer-token`/env）经 HTTP 中间件派生 per-request 角色；allowlist 外的工具对观察者抛 OBSERVER_READONLY（default-deny）；controller 不受影响；stdio 单角色。发现并修复 http_hardening 与 roles 的同名双 ContextVar（会使门控失效） |
 | E1 协议 v2 | ✅ 已合入：hello_ack 广播 SERVER_CAPABILITIES（additive、v1 兼容）；插件 hello 携带动词全集，服务端握手期 PROTOCOL_MISMATCH 快速失败（修 G3 运行时漂移）；插件记录能力供 mcp status |
 | E4 mTLS + scoped token | ✅ 已合入：TLS/双向 TLS（cert/key/client_ca + config 校验）；launch 的 gdb 只持有会话级派生令牌（HMAC-SHA256(master,'session:id')），主令牌不出服务进程；重启重算即恢复握手。HTTP mTLS 端到端需真实证书环境（诚实标注） |

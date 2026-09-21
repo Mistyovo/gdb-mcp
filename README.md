@@ -96,16 +96,16 @@ One call. Full picture.
 
 ## Tool Catalog
 
-**36 core tools**, grouped by job:
+**37 core tools**, grouped by job:
 
 | Group | Tools |
 |---|---|
 | Sessions | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script` `diff_sessions` |
 | Execution | `execute_command` (raw gdb, pwndbg-compatible, paginated + spilled to disk) `continue_execution` (`wait`/`with_context`) `interrupt` `wait_for_stop` `get_stop_reason` `read_result` `batch_commands` |
-| Crash triage | `crash_report` — signal, fault addr, registers, backtrace, disasm, memory at PC/SP/fault, structured memory map |
+| Crash triage | `crash_report` — signal, fault addr, registers, backtrace, disasm, memory at PC/SP/fault, structured memory map · `triage_crash` — replay a crashing payload from a checkpoint, collect the full report, optionally minimize, store evidence |
 | State | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` (structured) `load_target` |
 | Breakpoints | `set_breakpoint` (sw/hw/watch/condition/temporary + `commands`/`auto_continue` probes) `list_breakpoints` `manage_breakpoint` |
-| Pwn workflow | `heap_bins` (pwndbg bins → JSON) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize) `campaign` (state machine + cyclic oracle) |
+| Pwn workflow | `heap_bins` (pwndbg bins → JSON) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize / crash_check / bp_stats — bounded loops at native speed) `campaign` (state machine + cyclic oracle) |
 
 **6 experimental tools** (behind `--experimental`): inferior stdio channel
 (`io_setup` / `send_to_inferior` / `read_inferior_output` / `io_teardown`),
@@ -122,7 +122,7 @@ answer to *"why not just write a gdbscript?"* in one artifact.
 ## Architecture
 
 ```
-Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (36+ tools)
+Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (37+ tools)
         ▲  campaign state · journals · policies · static bridge
         │
         │ TCP JSON-lines (scoped session tokens, heartbeats)

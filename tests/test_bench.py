@@ -184,3 +184,66 @@ class TestLoadApiKey:
 
     def test_missing_everywhere(self, tmp_path):
         assert load_api_key(env={}, env_file=tmp_path / "nope.env") is None
+
+
+class TestHarnessParsers:
+    """Pure helpers from bench/harness.py (no gdb, no WSL needed)."""
+
+    @staticmethod
+    def _harness():
+        import sys
+        from pathlib import Path as P
+        bench_dir = P(__file__).resolve().parents[1] / "bench"
+        if str(bench_dir) not in sys.path:
+            sys.path.insert(0, str(bench_dir))
+        import harness
+        return harness
+
+    def test_parse_plt_address(self):
+        h = self._harness()
+        insns = [
+            {"addr": "0x401136", "asm": "endbr64"},
+            {"addr": "0x401140", "asm": "call 0x401040 <puts@plt>"},
+            {"addr": "0x401145", "asm": "call 0x401030 <printf@plt>"},
+        ]
+        assert h.parse_plt_address(insns, "puts") == 0x401040
+        assert h.parse_plt_address(insns, "printf") == 0x401030
+        assert h.parse_plt_address(insns, "system") is None
+
+    def test_parse_got_address(self):
+        h = self._harness()
+        insns = [
+            {"addr": "0x401040", "asm": "endbr64"},
+            {
+                "addr": "0x401044",
+                "asm": "bnd jmp QWORD PTR [rip+0x2fe9] "
+                       "# 0x404030 <puts@got.plt>",
+            },
+        ]
+        assert h.parse_got_address(insns, "puts") == 0x404030
+        assert h.parse_got_address(insns, "system") is None
+
+    def test_parse_objdump_strings(self):
+        h = self._harness()
+        newline = chr(10)
+        dump = (
+            "Contents of section .rodata:" + newline
+            + " 4006a0 48656c6c 6f20776f 726c6400 00000000  "
+            "Hello world....." + newline
+            + " 4006b0 6563686f 2050574e 7b6f6b7d 00        "
+            " echo PWN{ok}.  " + newline
+        )
+        strings = {s["text"]: s["addr"] for s in h.parse_objdump_strings(dump)}
+        assert strings["Hello world"] == "0x4006a0"
+        assert strings["echo PWN{ok}"] == "0x4006b0"
+
+    def test_find_arg_index(self):
+        import base64
+        h = self._harness()
+        line = b"0x1|0x7ffff700|(nil)|0x4141414141414141|"
+        observed = {
+            "output_b64": base64.b64encode(b"prefix\n" + line + b"\n").decode()
+        }
+        marker = b"AAAAAAAA"  # little-endian 0x4141414141414141
+        assert h.find_arg_index(observed, marker) == 9
+        assert h.find_arg_index(observed, b"ZZZZZZZZ") is None
