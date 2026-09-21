@@ -1,14 +1,17 @@
 """Read-only session dashboard: loopback HTTP + SSE event stream.
 
-Phase 1 (data layer) of docs/dashboard-design.md. The API below is the
-stability boundary: the Phase 2 frontend will consume exactly these
-endpoints, no more.
+Phase 1 (data layer) of docs/dashboard-design.md, plus the Phase 2
+frontend (web_static/, dependency-free vanilla JS). The API below is
+the stability boundary; the frontend consumes exactly these endpoints,
+no more.
 
 Endpoints (GET only - mutating actions are a deliberate non-goal here):
 
-* ``/api/v1/health``   - liveness + dashboard status
-* ``/api/v1/snapshot`` - full state: every session + broker sequence
-* ``/api/v1/events``   - SSE stream of EventBroker events (15s keepalive)
+* ``/``                 - dashboard page (web_static/index.html)
+* ``/app.css`` / ``/app.js`` - its assets, fixed-name routes
+* ``/api/v1/health``    - liveness + dashboard status
+* ``/api/v1/snapshot``  - full state: every session + broker sequence
+* ``/api/v1/events``    - SSE stream of EventBroker events (15s keepalive)
 
 Security posture matches the archived workbench: loopback-only bind
 (enforced by ``Config.validate``), Host/Origin header validation via the
@@ -24,10 +27,11 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from gdb_mcp.config import Config
@@ -36,6 +40,14 @@ from gdb_mcp.http_hardening import SecurityHeadersMiddleware
 from gdb_mcp.sessions import Session, SessionRegistry
 
 log = logging.getLogger("gdb_mcp.web")
+
+_STATIC_DIR = Path(__file__).resolve().parent / "web_static"
+
+#: fixed-name asset routes; no path parameters => nothing to traverse
+_STATIC_FILES = {
+    "app.css": "text/css; charset=utf-8",
+    "app.js": "application/javascript; charset=utf-8",
+}
 
 #: SSE comment line cadence - keeps proxies/browsers from idling the
 #: stream out while adding zero data events
@@ -87,14 +99,18 @@ async def sse_stream(
 
 
 class _StaticHeadersMiddleware:
-    """Pure-ASGI wrapper adding hardened response headers (nosniff,
-    no-referrer, deny-all CSP - loosened to 'self' when Phase 2 serves
-    static assets)."""
+    """Pure-ASGI wrapper adding hardened response headers: nosniff,
+    no-referrer, and a deny-by-default CSP that allows exactly the
+    same-origin script/style/connect the dashboard page needs."""
 
     _HEADERS = [
         (b"x-content-type-options", b"nosniff"),
         (b"referrer-policy", b"no-referrer"),
-        (b"content-security-policy", b"default-src 'none'; frame-ancestors 'none'"),
+        (
+            b"content-security-policy",
+            b"default-src 'none'; script-src 'self'; style-src 'self'; "
+            b"connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'",
+        ),
     ]
 
     def __init__(self, app):
@@ -164,6 +180,9 @@ class DashboardServer:
     def build_app(self) -> Starlette:
         return Starlette(
             routes=[
+                Route("/", self._index, methods=["GET"]),
+                Route("/app.css", self._asset, methods=["GET"]),
+                Route("/app.js", self._asset, methods=["GET"]),
                 Route("/api/v1/health", self._health, methods=["GET"]),
                 Route("/api/v1/snapshot", self._snapshot, methods=["GET"]),
                 Route("/api/v1/events", self._events, methods=["GET"]),
@@ -230,6 +249,15 @@ class DashboardServer:
                 pass
 
     # -- handlers -----------------------------------------------------------
+
+    async def _index(self, request) -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / "index.html", media_type="text/html; charset=utf-8"
+        )
+
+    async def _asset(self, request) -> FileResponse:
+        name = request.url.path.lstrip("/")
+        return FileResponse(_STATIC_DIR / name, media_type=_STATIC_FILES[name])
 
     async def _health(self, request) -> JSONResponse:
         return JSONResponse({"ok": self._running, **self.status()})

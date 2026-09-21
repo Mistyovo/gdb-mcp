@@ -237,6 +237,33 @@ def test_hardened_headers_and_host_validation(client):
     assert rejected.status_code == 403
 
 
+# -- frontend (Phase 2) -----------------------------------------------------
+
+
+def test_index_served_with_asset_links(client):
+    index = client.get("/")
+    assert index.status_code == 200
+    assert index.headers["content-type"].startswith("text/html")
+    assert "session dashboard" in index.text
+    # CSP must allow exactly the same-origin assets the page loads
+    csp = index.headers["content-security-policy"]
+    for directive in ("script-src 'self'", "style-src 'self'", "connect-src 'self'"):
+        assert directive in csp
+    # every asset the page references is a fixed-name route we serve
+    for asset in ("/app.css", "/app.js"):
+        assert asset in index.text
+        served = client.get(asset)
+        assert served.status_code == 200
+
+
+def test_assets_served_with_content_types(client):
+    css = client.get("/app.css")
+    assert css.headers["content-type"].startswith("text/css")
+    js = client.get("/app.js")
+    assert js.headers["content-type"].startswith("application/javascript")
+    assert "EventSource" in js.text  # the live wiring is actually there
+
+
 # -- configuration ----------------------------------------------------------
 
 

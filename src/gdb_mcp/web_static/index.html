@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gdb-mcp &middot; session dashboard</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <div class="brand">gdb-mcp <span class="dim">session dashboard</span></div>
+    <div class="header-right">
+      <span id="conn" class="conn conn-connecting">connecting&hellip;</span>
+      <span id="seq" class="dim mono"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="sessions-panel">
+      <h2>Sessions <span id="session-count" class="dim"></span></h2>
+      <div id="session-list" class="cards"></div>
+      <p id="no-sessions" class="empty">No gdb sessions yet &mdash; launch one
+        (launch_gdb) or start gdb with the plugin loaded.</p>
+    </section>
+
+    <section class="panel" id="timeline-panel">
+      <h2>Event timeline</h2>
+      <ol id="timeline" class="timeline"></ol>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

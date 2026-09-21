@@ -1,6 +1,6 @@
-# Session Dashboard 设计（Phase 1：数据层 + 只读 API）
+# Session Dashboard 设计（Phase 1：数据层 + 只读 API；Phase 2：最小前端）
 
-日期：2026-09-21 · 状态：已实施（Phase 1）
+日期：2026-09-21（Phase 1）/ 2026-09-22（Phase 2） · 状态：均已实施
 关联：`archive/reverse-tools-dashboard` 归档分支（前身）、ROADMAP_V2「D5 实时看板」
 
 ## 1. 问题
@@ -15,10 +15,16 @@ gdb-mcp 接入 Agent 后不可观测：Agent 通过 MCP 驱动多个 gdb session
 - 只读 HTTP API：全量快照 + SSE 增量事件流。
 - 端到端可验收：`--dashboard` 启动 + `tests/dashboard_demo.py` 模拟插件 + curl 验证。
 
+**目标（Phase 2，已实施 2026-09-22）**
+- 最小前端（`web_static/`，无构建工具、无框架、零 npm 依赖的原生 JS）：
+  session 卡片列表（状态徽章 + 快照增补字段）+ 实时事件时间线，
+  消费且仅消费本 API。事件驱动即时更新 + 5s 快照轮询补齐事件里没有的
+  增补字段；seq 断档或 resync 一律回拉快照。DOM 全部 createElement/textContent
+  构建（目标机可控字符串无法注入 markup，严格 CSP 可满足）。
+
 **非目标（后续 Phase）**
-- 前端页面（Phase 2，消费同一 API——本 API 即稳定性边界）。
-- 交互动作（POST 断点/continue 等，归档版有，刻意延后）。
 - journal 全文浏览、bp_stats 等深度视图（Phase 3）。
+- 交互动作（POST 断点/continue 等，归档版有，刻意延后，Phase 4）。
 
 ## 3. 数据契约
 
@@ -60,13 +66,15 @@ gdb_version/pwndbg/log_file/distro/launched/proc_running/proc_returncode/last_st
 
 ## 4. API 与安全
 
+- `GET /`：看板页面（`web_static/index.html`，Phase 2）
+- `GET /app.css` / `GET /app.js`：页面资源（固定名字路由，无路径参数即无穿越面）
 - `GET /api/v1/health`：`{ok, ...dashboard.status()}`
 - `GET /api/v1/snapshot`：见 3.1
 - `GET /api/v1/events`：SSE（text/event-stream，15s keepalive 注释行）
 - 复用 `http_hardening.check_http_request`（Host/Origin 校验，防 DNS rebinding），
   token=None / observer=() —— 与归档版一致的 loopback 免鉴权姿态；
   响应统一加 `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` /
-  CSP `default-src 'none'; frame-ancestors 'none'`（Phase 2 出静态页时再放宽到 'self'）。
+  CSP（`default-src 'none'` + 仅 `script/style/connect/img 'self'`，Phase 2 起生效）。
 - 绑定地址**硬约束 loopback**（`Config.validate` 拒绝非 loopback，同归档版 web_host 规则）。
   远程查看走 SSH 隧道，不开远程面。
 
@@ -93,6 +101,7 @@ gdb_version/pwndbg/log_file/distro/launched/proc_running/proc_returncode/last_st
 
 ## 7. 后续
 
-- Phase 2：最小前端（session 列表 + 状态 + 事件时间线），静态文件随 dashboard 端口分发。
+- Phase 2（✅ 2026-09-22）：最小前端已实施，浏览器实测通过（双会话卡片实时
+  增删、SSE 时间线 9 帧按序到达、视觉评审无渲染缺陷）。
 - Phase 3：深度视图（journal 尾随、stop 详情、bp_stats）。
 - Phase 4（可选）：交互动作（同源 + CSRF 防护，复用归档版 mutating guard）。
