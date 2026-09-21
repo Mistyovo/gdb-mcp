@@ -1,6 +1,7 @@
 """Tests for the server-side session model and registry."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -470,3 +471,61 @@ class TestPersistence:
         r1.remove("s-p2")
         r2 = SessionRegistry(Config())
         assert r2.enable_persistence(path) == 0
+
+    def _registry(self, tmp_path, retention=20):
+        cfg = Config(
+            log_dir=tmp_path / "logs",
+            archive_retention=retention,
+            archive_dir=tmp_path / "archive",
+        )
+        ids = iter(f"s-{i:03d}" for i in range(100))
+        return SessionRegistry(cfg, session_id_factory=lambda: next(ids))
+
+    def test_remove_archives_journal_and_log(self, tmp_path):
+        reg = self._registry(tmp_path)
+        s = reg.register_hello(hello(), FakeWriter())
+        log_file = tmp_path / "logs" / (s.session_id + ".log")
+        log_file.write_text("gdb output", encoding="utf-8")
+        s.log_file = str(log_file)
+        journal_path = Path(s.journal.path)
+        assert journal_path.exists()
+        reg.remove(s.session_id)
+        dest = tmp_path / "archive" / s.session_id
+        assert (dest / "meta.json").exists()
+        assert (dest / journal_path.name).exists()
+        assert (dest / log_file.name).read_text(encoding="utf-8") == "gdb output"
+        assert not journal_path.exists()
+        assert not log_file.exists()
+        # the registry entry is gone too
+        with pytest.raises(NoSuchSessionError):
+            reg.get(s.session_id)
+
+    def test_archive_prunes_beyond_retention(self, tmp_path):
+        reg = self._registry(tmp_path, retention=2)
+        removed = []
+        for _ in range(3):
+            s = reg.register_hello(hello(), FakeWriter())
+            removed.append(s.session_id)
+            reg.remove(s.session_id)
+        archived = sorted(
+            p.name for p in (tmp_path / "archive").iterdir() if p.is_dir()
+        )
+        # newest retention=2 survive, the oldest is pruned
+        assert archived == removed[-2:]
+
+    def test_retention_zero_disables_archiving(self, tmp_path):
+        reg = self._registry(tmp_path, retention=0)
+        s = reg.register_hello(hello(), FakeWriter())
+        journal_path = Path(s.journal.path)
+        reg.remove(s.session_id)
+        assert journal_path.exists()  # artifacts stay where they are
+        assert not (tmp_path / "archive").exists()
+
+    def test_archive_outside_log_dir_untouched(self, tmp_path):
+        reg = self._registry(tmp_path)
+        s = reg.register_hello(hello(), FakeWriter())
+        s.log_file = str(tmp_path / "elsewhere.log")
+        reg.remove(s.session_id)
+        dest = tmp_path / "archive" / s.session_id
+        # the server only collects logs it owns (under its log dir)
+        assert not list(dest.glob("*.log"))

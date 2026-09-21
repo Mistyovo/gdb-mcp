@@ -19,6 +19,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--token", default=None, help="optional shared token for gdb plugins")
     p.add_argument("--log-dir", default=None, help="launched-process log directory")
     p.add_argument(
+        "--archive-retention",
+        type=int,
+        default=None,
+        metavar="N",
+        help="keep the newest N closed sessions' journals+logs in the "
+        "archive (default 20; 0 disables archiving)",
+    )
+    p.add_argument(
         "--no-mcp",
         action="store_true",
         help="run the TCP listener only, without the stdio MCP transport "
@@ -91,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
                 "port": args.port,
                 "token": args.token,
                 "log_dir": Path(args.log_dir) if args.log_dir else None,
+                "archive_retention": args.archive_retention,
                 "mcp_transport": not args.no_mcp,
                 "mcp_http": args.http,
                 "mcp_host": args.mcp_host,

@@ -162,3 +162,14 @@ class TestE4Options:
     def test_observer_tokens_env_comma_list(self, monkeypatch):
         monkeypatch.setenv("GDB_MCP_OBSERVER_TOKENS", "a, b ,")
         assert Config.from_env().observer_tokens == ("a", "b")
+
+
+    def test_archive_retention_validation(self):
+        Config(archive_retention=20).validate()
+        Config(archive_retention=0).validate()
+        with pytest.raises(ValueError):
+            Config(archive_retention=-1).validate()
+
+    def test_archive_retention_env(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_ARCHIVE_RETENTION", "5")
+        assert Config.from_env().archive_retention == 5

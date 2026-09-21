@@ -23,6 +23,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from collections import deque
@@ -524,11 +525,61 @@ class SessionRegistry:
 
     def remove(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
-        if session is not None and session.hello:
-            pid = session.hello.get("pid")
-            if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
-                self._by_pid.pop(pid, None)
+        if session is not None:
+            if session.hello:
+                pid = session.hello.get("pid")
+                if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
+                    self._by_pid.pop(pid, None)
+            self._archive_session(session)
         self.save()
+
+    # -- B4: per-session artifact archiving ---------------------------------
+    #
+    # Journals and launched-process logs used to live forever: gc dropped
+    # the registry entry but left the files. Closed sessions are now
+    # collected into ``<archive_dir>/<session_id>/`` (journal + log +
+    # meta.json), keeping the newest ``archive_retention`` sessions.
+
+    def _archive_session(self, session: Session) -> None:
+        retention = self.config.archive_retention
+        if retention <= 0:
+            return
+        try:
+            archive_root = self.config.archive_dir or (
+                self.config.log_dir.parent / "archive"
+            )
+            dest = archive_root / session.session_id
+            dest.mkdir(parents=True, exist_ok=True)
+            journal, session.journal = session.journal, None
+            if journal is not None and Path(journal.path).exists():
+                src = Path(journal.path)
+                shutil.move(str(src), str(dest / src.name))
+            if session.log_file:
+                src = Path(session.log_file)
+                # only collect files under the server's own log dir; a
+                # user-launched gdb's log path is the user's business
+                if (
+                    src.exists()
+                    and src.parent == self.config.log_dir
+                ):
+                    shutil.move(str(src), str(dest / src.name))
+            meta = {
+                "session_id": session.session_id,
+                "kind": session.kind,
+                "state_at_close": session.state,
+                "inferior": (session.hello or {}).get("inferior"),
+                "archived_at": round(time.time(), 3),
+            }
+            (dest / "meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+            entries = [p for p in archive_root.iterdir() if p.is_dir()]
+            entries.sort(key=lambda p: p.stat().st_mtime)
+            for stale in entries[: max(0, len(entries) - retention)]:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            log.warning("archiving session %s failed", session.session_id,
+                        exc_info=True)
 
     # -- persistence ----------------------------------------------------------
     #

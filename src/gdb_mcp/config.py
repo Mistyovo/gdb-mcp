@@ -53,6 +53,8 @@ DEFAULTS = {
     "analysis_timeout": 900.0,
     "decompile_timeout": 120.0,
     "auto_analyze": False,
+    "archive_retention": 20,
+    "archive_dir": None,
 }
 
 
@@ -119,6 +121,11 @@ class Config:
     analysis_timeout: float = DEFAULTS["analysis_timeout"]
     decompile_timeout: float = DEFAULTS["decompile_timeout"]
     auto_analyze: bool = DEFAULTS["auto_analyze"]
+    #: B4: closed sessions' journals + launched-process logs are moved to
+    #: archive_dir, keeping the newest ``archive_retention`` sessions
+    #: (0 disables archiving; artifacts then stay where they are)
+    archive_retention: int = DEFAULTS["archive_retention"]
+    archive_dir: Path | None = DEFAULTS["archive_dir"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -144,6 +151,8 @@ class Config:
         for name in ("attach_timeout_ms", "launch_timeout_ms"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.archive_retention < 0:
+            raise ValueError("archive_retention must not be negative")
         if self.tool_profile not in ("core", "full"):
             raise ValueError("tool_profile must be 'core' or 'full'")
         if self.result_inline_limit < 1:
@@ -268,6 +277,12 @@ class Config:
             decompile_timeout=env("DECOMPILE_TIMEOUT", float)
             or DEFAULTS["decompile_timeout"],
             auto_analyze=env_bool("AUTO_ANALYZE") or DEFAULTS["auto_analyze"],
+            archive_retention=env("ARCHIVE_RETENTION", int)
+            if env("ARCHIVE_RETENTION", int) is not None
+            else DEFAULTS["archive_retention"],
+            archive_dir=Path(env("ARCHIVE_DIR", str))
+            if env("ARCHIVE_DIR", str)
+            else None,
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:
