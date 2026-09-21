@@ -40,6 +40,7 @@ from gdb_mcp.errors import (
     NoSuchSessionError,
     RequestTimeoutError,
 )
+from gdb_mcp.events import EventBroker
 from gdb_mcp.journal import Journal
 from gdb_mcp.protocol import (
     ASYNC_VERBS,
@@ -109,6 +110,8 @@ class Session:
     event_seq: int = 0
     #: per-session JSONL journal (audit + gdbscript export), if enabled
     journal: Any = None
+    #: optional dashboard event fan-out (None => no dashboard subscribers)
+    events: EventBroker | None = field(default=None, repr=False)
     #: structured exploit-campaign state (campaign tool / brief injection)
     campaign: dict = field(
         default_factory=lambda: {
@@ -148,7 +151,12 @@ class Session:
         *,
         locked: bool = False,
     ) -> dict:
-        """Send a request to the plugin and await its response.
+        """Send a request to the plugin and await its response, publishing
+        ``session.request`` started/finished events to the dashboard broker.
+
+        Params/results are deliberately NOT part of the events: write
+        payloads reach megabytes and the journal already holds the full
+        detail — the timeline only needs verb/duration/outcome.
 
         Returns the ``result`` payload on success. Raises
         :class:`GdbMcpError` on plugin-reported errors,
@@ -159,6 +167,35 @@ class Session:
         by composite tools like crash_report to keep a multi-request
         sequence atomic).
         """
+        self._publish_request("started", verb)
+        started = time.monotonic()
+        try:
+            result = await self._request_impl(verb, params, timeout, locked=locked)
+        except GdbMcpError as exc:
+            self._publish_request(
+                "finished",
+                verb,
+                ok=False,
+                error=exc.code,
+                duration_ms=round((time.monotonic() - started) * 1000, 1),
+            )
+            raise
+        self._publish_request(
+            "finished",
+            verb,
+            ok=True,
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+        )
+        return result
+
+    async def _request_impl(
+        self,
+        verb: str,
+        params: dict | None = None,
+        timeout: float | None = None,
+        *,
+        locked: bool = False,
+    ) -> dict:
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -245,6 +282,43 @@ class Session:
 
     # -- notifications ------------------------------------------------------
 
+    def publish(self, event: str, payload: dict | None = None) -> None:
+        """Fan a lifecycle transition out to dashboard subscribers as one
+        ``session.updated`` event carrying the refreshed ``info()`` snapshot
+        (subscribers never need a second fetch to re-render)."""
+        if self.events is not None:
+            self.events.publish(
+                "session.updated",
+                {
+                    "session_id": self.session_id,
+                    "event": event,
+                    "payload": payload or {},
+                    "session": self.info(),
+                },
+            )
+
+    def _publish_request(
+        self,
+        phase: str,
+        verb: str,
+        ok: bool = True,
+        error: str | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
+        if self.events is None:
+            return
+        data: dict = {
+            "session_id": self.session_id,
+            "verb": verb,
+            "phase": phase,
+            "ok": ok,
+        }
+        if error is not None:
+            data["error"] = error
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
+        self.events.publish("session.request", data)
+
     def record_event(self, event: str, payload: dict) -> None:
         """Append to the per-session event ring (get_events reads it)."""
         self.event_seq += 1
@@ -289,6 +363,8 @@ class Session:
             await self._wake_stop_waiters()
         else:
             log.debug("session %s: unknown notification event %r", self.session_id, event)
+        if isinstance(event, str):
+            self.publish(event, payload)
 
     async def _wake_stop_waiters(self) -> None:
         async with self.stop_cond:
@@ -337,6 +413,7 @@ class Session:
                 )
         self.pending.clear()
         await self._wake_stop_waiters()
+        self.publish("disconnected")
 
     def info(self) -> dict:
         """Compact dict for list_sessions / session_status tools."""
@@ -366,11 +443,14 @@ class SessionRegistry:
         self,
         config: Config,
         session_id_factory: Any = None,
+        events: EventBroker | None = None,
     ):
         self.config = config
         self._factory = session_id_factory or (
             lambda: "s-" + uuid.uuid4().hex[:8]
         )
+        #: shared dashboard event fan-out; every Session gets this broker
+        self.events = events
         self._sessions: dict[str, Session] = {}
         self._by_pid: dict[int, str] = {}
         self._persist_path: Path | None = None
@@ -402,9 +482,11 @@ class SessionRegistry:
             launched=launched,
             log_file=log_file,
             token=self.config.token,
+            events=self.events,
         )
         self._sessions[session_id] = session
         self._attach_journal(session)
+        session.publish("reserved")
         self.save()
         return session
 
@@ -439,6 +521,7 @@ class SessionRegistry:
                 kind="gdb",
                 launched=False,
                 token=self.config.token,
+                events=self.events,
             )
             self._sessions[session.session_id] = session
         old_pid = (session.hello or {}).get("pid")
@@ -447,6 +530,7 @@ class SessionRegistry:
         session.hello = hello
         session.writer = writer
         session.token = self.config.token
+        session.events = self.events
         session.state = CONNECTING
         session.reserved = False
         session.connected_at = time.monotonic()
@@ -470,6 +554,7 @@ class SessionRegistry:
             hello.get("arch"),
             session.session_id,
         )
+        session.publish("connected")
         return session
 
     # -- lookup -------------------------------------------------------------
@@ -531,6 +616,7 @@ class SessionRegistry:
                 if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
                     self._by_pid.pop(pid, None)
             self._archive_session(session)
+            session.publish("removed")
         self.save()
 
     # -- B4: per-session artifact archiving ---------------------------------
@@ -649,6 +735,7 @@ class SessionRegistry:
                 distro=entry.get("distro"),
                 launched=bool(entry.get("launched")),
                 token=self.config.token,
+                events=self.events,
             )
             session.stop_info = entry.get("stop_info")
             # campaign content is re-injected into model context via the

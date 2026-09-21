@@ -55,6 +55,9 @@ DEFAULTS = {
     "auto_analyze": False,
     "archive_retention": 20,
     "archive_dir": None,
+    "dashboard": False,
+    "dashboard_host": "127.0.0.1",
+    "dashboard_port": 3940,
 }
 
 
@@ -126,6 +129,14 @@ class Config:
     #: (0 disables archiving; artifacts then stay where they are)
     archive_retention: int = DEFAULTS["archive_retention"]
     archive_dir: Path | None = DEFAULTS["archive_dir"]
+    #: read-only session dashboard (loopback HTTP + SSE event stream).
+    #: CLI-only (--dashboard) on purpose, same discipline as
+    #: ``experimental``: opening an HTTP surface must be an explicit act
+    #: by whoever starts the server. Host/port are plain knobs and stay
+    #: env-overridable; the bind address is hard-restricted to loopback.
+    dashboard: bool = DEFAULTS["dashboard"]
+    dashboard_host: str = DEFAULTS["dashboard_host"]
+    dashboard_port: int = DEFAULTS["dashboard_port"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -196,6 +207,16 @@ class Config:
             raise ValueError(
                 "a token is required when GDB_MCP_HOST_BIND is not a loopback address"
             )
+        if not 0 <= self.dashboard_port <= 65535:
+            raise ValueError("dashboard_port must be between 0 and 65535")
+        if self.dashboard and self.dashboard_host.lower() not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            # the dashboard serves debugger session metadata with no auth;
+            # remote viewing goes through an SSH tunnel, not a wider bind
+            raise ValueError("dashboard_host must be a loopback address")
 
     @classmethod
     def from_env(cls, overrides: dict | None = None) -> "Config":
@@ -284,6 +305,12 @@ class Config:
             if env("ARCHIVE_DIR", str)
             else None,
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
+            # dashboard is deliberately NOT env-configurable (same
+            # discipline as experimental): enabling an HTTP surface must
+            # be an explicit act by whoever starts the server.
+            dashboard=False,
+            dashboard_host=env("DASHBOARD_HOST", str) or DEFAULTS["dashboard_host"],
+            dashboard_port=env("DASHBOARD_PORT", int) or DEFAULTS["dashboard_port"],
         )
         if overrides:
             for key, value in overrides.items():

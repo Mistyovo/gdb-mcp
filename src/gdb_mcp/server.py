@@ -10,9 +10,11 @@ from mcp.server.fastmcp import FastMCP
 
 from gdb_mcp import __version__
 from gdb_mcp.config import Config
+from gdb_mcp.events import EventBroker
 from gdb_mcp.sessions import SessionRegistry
 from gdb_mcp.tcp_listener import PluginTcpListener
 from gdb_mcp.tools import register_all
+from gdb_mcp.web import DashboardServer
 
 log = logging.getLogger("gdb_mcp.server")
 
@@ -156,7 +158,10 @@ async def serve(config: Config) -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     config.ensure_dirs()
-    registry = SessionRegistry(config)
+    # one broker fans session lifecycle + request + analysis events to
+    # dashboard subscribers (docs/dashboard-design.md)
+    broker = EventBroker()
+    registry = SessionRegistry(config, events=broker)
     registry.enable_persistence(config.log_dir / "sessions.json")
 
     analysis = None
@@ -167,10 +172,13 @@ async def serve(config: Config) -> None:
     else:
         # the manager reads config.analysis_dir itself; auto-analyze is
         # off by default so no background work starts unprompted
-        analysis = AnalysisManager(config)
+        analysis = AnalysisManager(config, events=broker)
 
     listener = PluginTcpListener(config, registry)
     await listener.start()
+    dashboard = DashboardServer(config, registry, broker)
+    if config.dashboard:
+        dashboard.start()  # records bind errors itself; never fatal
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
@@ -191,4 +199,5 @@ async def serve(config: Config) -> None:
         gc_task.cancel()
         with suppress(asyncio.CancelledError):
             await gc_task
+        await dashboard.stop()
         await listener.stop()

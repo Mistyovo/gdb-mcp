@@ -82,6 +82,24 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="CA bundle to require client certificates (mutual TLS)",
     )
+    p.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="serve the read-only session dashboard (loopback HTTP + SSE "
+        "event stream; the ONLY way to enable it - no environment "
+        "variable exists for this)",
+    )
+    p.add_argument(
+        "--dashboard-host",
+        default=None,
+        help="dashboard bind address (loopback only; default 127.0.0.1)",
+    )
+    p.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=None,
+        help="dashboard port (default 3940; 0 = ephemeral)",
+    )
     return p
 
 
@@ -114,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
                 "mcp_tls_cert": args.mcp_tls_cert,
                 "mcp_tls_key": args.mcp_tls_key,
                 "mcp_tls_client_ca": args.mcp_tls_client_ca,
+                "dashboard": args.dashboard,
+                "dashboard_host": args.dashboard_host,
+                "dashboard_port": args.dashboard_port,
             }
         )
     except ValueError as exc:

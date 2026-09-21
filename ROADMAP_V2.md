@@ -155,6 +155,7 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | E4 mTLS + scoped token | ✅ 已合入：TLS/双向 TLS（cert/key/client_ca + config 校验）；launch 的 gdb 只持有会话级派生令牌（HMAC-SHA256(master,'session:id')），主令牌不出服务进程；重启重算即恢复握手。HTTP mTLS 端到端需真实证书环境（诚实标注） |
 | 3.5 静态桥 | ✅ 已合入：从 archive/reverse-tools-dashboard 复活 Ghidra headless 管线（GhidraRunner + AnalysisManager + ExportAnalysis.java + EventBroker），剥离 dashboard/web 耦合；16 个 static_* 查询工具（分析缓存按 SHA-256、sections/symbols/functions/strings/decompile/xrefs/callgraph/代码搜索/注记）；会话最小归档字段（analysis_id/location/target/debug_state）。GhidraRunner 端到端需本机 Ghidra（诚实标注未测）；manager 逻辑由 428 行复活的测试套件覆盖 |
 | 实验分支（合入后保留开关） | ✅ exp/inferior-io、exp/crash-minimizer、exp/libc-rop、exp/native-record 四分支全部按序合入 main；libc 识别（C2 的 libc-database 部分以 libc.rip API 形态先行落地） |
+| D5 实时看板 Phase 1（数据层） | ✅（2026-09-21）设计 docs/dashboard-design.md；session 生命周期 + 请求执行全量接入共享 EventBroker（`session.updated` 内嵌最新快照、`session.request` 只带 verb/时长/成败——params/results 刻意不入流）；只读 API `/api/v1/{health,snapshot,events}`（SSE，starlette+uvicorn 零新增依赖；复用 http_hardening Host/Origin 校验 + 硬化响应头）；`--dashboard` CLI-only 门控（无 env 通路，同 --experimental 纪律）+ loopback 硬约束；tests/dashboard_demo.py 端到端验收通过（双会话状态正确、SSE 实时流）。顺带修复 main 既有启动崩溃：默认 `analysis_dir=None` 时 AnalysisManager 初始化 AttributeError（裸启动必崩）。Phase 2 前端待做 |
 
 ## 8. 反目标（延续并强化）
 
