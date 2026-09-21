@@ -8,7 +8,6 @@ then interrupt/inspect it.
     python3 examples/pwntools_attach.py
 """
 import os
-import time
 
 from pwn import context, gdb, log, process
 

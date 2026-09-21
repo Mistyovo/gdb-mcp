@@ -13,7 +13,6 @@ tries GDB_MCP_HOST, then 127.0.0.1, then the /etc/resolv.conf nameserver
 (WSL2 NAT mode host IP).
 """
 import os
-import time
 
 from pwn import context, gdb, log
 
