@@ -38,7 +38,13 @@ from gdb_mcp.bench import DeepSeekClient, run_agent  # noqa: E402
 #: per-crackme ports keep parallel runners out of each other's way
 PORT_BASE = 39410
 
-RAW_OUTPUT_B64_BYTES = 4096
+#: observation budgets. The b64 raw view exists for binary leaks (fmt
+#: probe ~400 bytes); 512 covers it while keeping ~1.4k tokens/run off
+#: the context - the first ret2libc run billed 205k cumulative tokens
+#: and degraded (malformed tool args) near the limit. Lines: inferior
+#: output beyond a dozen lines is noise for the model.
+RAW_OUTPUT_B64_BYTES = 512
+OUTPUT_LINES = 12
 
 
 @dataclass
@@ -78,7 +84,7 @@ def p64(value: int) -> bytes:
     return struct.pack("<Q", value)
 
 
-def program_output_lines(log_text: str, limit: int = 30) -> list[str]:
+def program_output_lines(log_text: str, limit: int = OUTPUT_LINES) -> list[str]:
     """The inferior's own output lines: gdb prompts, banners and blanks
     are noise for a model and are dropped."""
     lines = []
@@ -178,7 +184,7 @@ class OutputCapture:
         except OSError:
             return b""
 
-    def observation(self, offset: int, limit: int = 30) -> dict:
+    def observation(self, offset: int, limit: int = OUTPUT_LINES) -> dict:
         raw = self.read_from(offset)
         text = raw.decode("utf-8", "replace")
         return {
@@ -395,13 +401,25 @@ def make_base_tools(spec: BenchSpec, client, output: OutputCapture):
         return output.observation(0)
 
     def tool_disassemble(arguments: dict) -> dict:
-        result = client.request(
-            "disasm",
-            {
-                "start": arguments.get("start", "main"),
-                "count": min(int(arguments.get("count", 24)), 128),
-            },
-        )
+        start = arguments.get("start", "main")
+        count = min(int(arguments.get("count", 24)), 128)
+        try:
+            result = client.request("disasm", {"start": start, "count": count})
+        except Exception:
+            # the plugin rejects symbol expressions it cannot parse
+            # (puts@plt, main+16, ...) that gdb's own evaluator happily
+            # resolves - and models reach for exactly those (v4-pro
+            # burned 3 of its 11 calls on puts@plt BAD_PARAMS before
+            # giving up). Resolve through eval, disassemble at the hex.
+            resolved = client.request("eval", {"command": "p/x &(%s)" % start})
+            match = re.search(
+                r"=\s*(0x[0-9a-fA-F]+)", str(resolved.get("output", ""))
+            )
+            if not match:
+                raise
+            result = client.request(
+                "disasm", {"start": match.group(1), "count": count}
+            )
         return {
             "start": result.get("start"),
             "instructions": result.get("instructions", []),
@@ -599,6 +617,13 @@ def run_spec(spec: BenchSpec, argv: list[str] | None = None) -> int:
     parser.add_argument("--max-turns", type=int, default=12)
     parser.add_argument("--model", default="deepseek-chat")
     parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=4096,
+        help="output token cap per turn (default 4096; models that "
+        "reason in-channel get truncated into empty answers at 1024)",
+    )
+    parser.add_argument(
         "--dump",
         default=None,
         metavar="PATH",
@@ -637,7 +662,7 @@ def run_spec(spec: BenchSpec, argv: list[str] | None = None) -> int:
                 print("[bench] dry run only (no API calls). Re-run with --go.")
             return 0
 
-        llm = DeepSeekClient(model=args.model)
+        llm = DeepSeekClient(model=args.model, max_tokens=args.max_tokens)
         llm.bind_tools(schemas)
         try:
             result = run_agent(
