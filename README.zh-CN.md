@@ -143,24 +143,6 @@ token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 
 并计数）——审计、复现、分享都靠它。服务器重启后，已持久化的 gdb 会话身份
 （session_id/日志/启动信息）保留，插件重连即自动复活同一会话。
 
-## 实时看板
-
-Agent 接入后会话就"看不见"了。加 **`--dashboard`** 启动参数（刻意只走 CLI、
-无环境变量通路，与 `--experimental` 同一纪律），浏览器打开
-`http://127.0.0.1:3940` 即可实时观测：
-
-- **会话卡片** —— 状态、pid、inferior、在途请求数、journal 体量；由 SSE
-  事件流驱动，非轮询。
-- **事件时间线** —— 按序呈现每次生命周期转换与每个完成的插件请求
-  （verb / 耗时 / 成败）。
-- **可展开深度视图** —— 完整 stop payload、campaign 摘要（protections、
-  primitives/offsets/libc/notes 计数）、journal 实时尾随；`run_policy`
-  （含 bp_stats）等策略结果天然落在 journal 里，无需专用解析器。
-
-只读（纯 GET）、绑定强制 loopback、Host/Origin 校验；与任意 MCP 传输并存
-（包括默认的 stdio）。API 契约与决策记录见
-[docs/dashboard-design.md](docs/dashboard-design.md)。
-
 ## 安全分级
 
 - `GDB_MCP_READONLY=1`（`--readonly`）：不注册 `write_memory`/`write_register`。
@@ -260,7 +242,6 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 | `GDB_MCP_TOOL_PROFILE` / `GDB_MCP_RESULT_INLINE_LIMIT` | 服务器 | 工具分档（core/full）与大结果内联阈值（字符数） |
 | `GDB_MCP_LAUNCHER` / `GDB_MCP_SSH_HOST` / `GDB_MCP_DOCKER_IMAGE` | 服务器 | 启动后端（wsl/native/docker/ssh）及其参数 |
 | `GDB_MCP_MCP_HTTP` / `GDB_MCP_MCP_HOST` / `GDB_MCP_MCP_PORT` | 服务器 | MCP streamable HTTP 传输（默认关，127.0.0.1:8001） |
-| `GDB_MCP_DASHBOARD_HOST` / `GDB_MCP_DASHBOARD_PORT` | 服务器 | 看板地址与端口（默认 127.0.0.1:3940；**启用只经 `--dashboard`**，强制 loopback） |
 | `GDB_MCP_READONLY` / `GDB_MCP_ALLOW_UNSAFE` | 两侧 | 只读模式；放行逃逸调试器的命令（双层拦截的开关） |
 | `GDB_MCP_MAX_MEM_READ` / `GDB_MCP_MAX_ASYNC_LINE` | 两侧 | 内存读取与协议帧上限 |
 

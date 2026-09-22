@@ -155,27 +155,6 @@ validation, bearer tokens, TLS and mutual-TLS options.
 - **Session = asset.** Journals persist across restarts; sessions re-attach
   with their identity intact; everything exports to replayable gdbscript.
 
-## Session Dashboard
-
-Once an agent drives the sessions, they are hard to see. Start the server
-with **`--dashboard`** (CLI-only on purpose — no environment variable, same
-discipline as `--experimental`) and watch them live at
-`http://127.0.0.1:3940`:
-
-- **Session cards** — state, pid, inferior, in-flight request count,
-  journal volume; driven by an SSE event stream, not polling.
-- **Event timeline** — every lifecycle transition and every finished
-  plugin request (verb / duration / outcome) in order.
-- **Expandable deep view** — full stop payload, campaign digest
-  (protections, primitives/offsets/libc/notes counts) and a live journal
-  tail; policy results (`run_policy` incl. bp_stats) ride the journal,
-  so no extra parser exists to drift.
-
-Read-only by construction (GET only), loopback-only bind (enforced),
-Host/Origin-validated responses. Runs alongside every MCP transport —
-including plain stdio. API contract and decisions:
-[docs/dashboard-design.md](docs/dashboard-design.md).
-
 ## Launchers
 
 | Backend | Target | Notes |

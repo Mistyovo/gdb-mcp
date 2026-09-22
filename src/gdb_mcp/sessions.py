@@ -110,7 +110,7 @@ class Session:
     event_seq: int = 0
     #: per-session JSONL journal (audit + gdbscript export), if enabled
     journal: Any = None
-    #: optional dashboard event fan-out (None => no dashboard subscribers)
+    #: optional event fan-out (None => no external subscribers)
     events: EventBroker | None = field(default=None, repr=False)
     #: structured exploit-campaign state (campaign tool / brief injection)
     campaign: dict = field(
@@ -152,7 +152,7 @@ class Session:
         locked: bool = False,
     ) -> dict:
         """Send a request to the plugin and await its response, publishing
-        ``session.request`` started/finished events to the dashboard broker.
+        ``session.request`` started/finished events to the event broker.
 
         Params/results are deliberately NOT part of the events: write
         payloads reach megabytes and the journal already holds the full
@@ -283,7 +283,7 @@ class Session:
     # -- notifications ------------------------------------------------------
 
     def publish(self, event: str, payload: dict | None = None) -> None:
-        """Fan a lifecycle transition out to dashboard subscribers as one
+        """Fan a lifecycle transition out to broker subscribers as one
         ``session.updated`` event carrying the refreshed ``info()`` snapshot
         (subscribers never need a second fetch to re-render)."""
         if self.events is not None:
@@ -449,7 +449,7 @@ class SessionRegistry:
         self._factory = session_id_factory or (
             lambda: "s-" + uuid.uuid4().hex[:8]
         )
-        #: shared dashboard event fan-out; every Session gets this broker
+        #: shared event fan-out; every Session gets this broker
         self.events = events
         self._sessions: dict[str, Session] = {}
         self._by_pid: dict[int, str] = {}

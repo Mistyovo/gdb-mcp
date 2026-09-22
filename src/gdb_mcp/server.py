@@ -14,7 +14,6 @@ from gdb_mcp.events import EventBroker
 from gdb_mcp.sessions import SessionRegistry
 from gdb_mcp.tcp_listener import PluginTcpListener
 from gdb_mcp.tools import register_all
-from gdb_mcp.web import DashboardServer
 
 log = logging.getLogger("gdb_mcp.server")
 
@@ -158,8 +157,8 @@ async def serve(config: Config) -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     config.ensure_dirs()
-    # one broker fans session lifecycle + request + analysis events to
-    # dashboard subscribers (docs/dashboard-design.md)
+    # one broker fans session lifecycle events to in-process subscribers
+    # (the static-bridge AnalysisManager tracks sessions this way)
     broker = EventBroker()
     registry = SessionRegistry(config, events=broker)
     registry.enable_persistence(config.log_dir / "sessions.json")
@@ -176,9 +175,6 @@ async def serve(config: Config) -> None:
 
     listener = PluginTcpListener(config, registry)
     await listener.start()
-    dashboard = DashboardServer(config, registry, broker)
-    if config.dashboard:
-        dashboard.start()  # records bind errors itself; never fatal
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
@@ -199,5 +195,4 @@ async def serve(config: Config) -> None:
         gc_task.cancel()
         with suppress(asyncio.CancelledError):
             await gc_task
-        await dashboard.stop()
         await listener.stop()

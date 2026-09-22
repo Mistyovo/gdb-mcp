@@ -33,7 +33,7 @@ MCP 层的价值必须靠 **gdbscript 拿不到的东西** 证明：上下文聚
 | `execute_command` 输出回读 | `tools/exec_tools.py` + 插件 `_eval_output` | ✅ `offset`/`limit` 行段读取；响应始终带 `total_lines`，截断显式标记 |
 | 收敛实验分支 | git 标签 `archive/reverse-tools-dashboard` | ✅ 分支已删除、内容以标签归档（Ghidra 导出器留待 Phase 3.5 复活） |
 | README 对比表 | 根目录 | ✅ 与 signal-slot/yywz1999/BeaCox/RocketMaDev 的差异表 |
-| `.gitignore` | 根目录 | ✅ `tests/bridge/`、`tests/ezheap/`、`tests/dashboard_demo.py`、`.mimosa/` 等本地产物 |
+| `.gitignore` | 根目录 | ✅ `tests/bridge/`、`tests/ezheap/`、`.mimosa/` 等本地产物 |
 
 ## Phase 1 (v0.2) — Token 经济学（主线 A）✅ 已完成（2026-09-17）
 

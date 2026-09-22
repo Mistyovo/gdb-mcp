@@ -20,7 +20,6 @@ logs/
 # Local experiment artifacts (core dumps, fixture binaries, throwaway harnesses)
 /tests/bridge/
 /tests/ezheap/
-/tests/dashboard_demo.py
 
 # Local tool state
 .mimosa/

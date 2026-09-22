@@ -1,4 +1,4 @@
-"""Non-blocking event fan-out for sessions, analysis jobs, and the dashboard."""
+"""Non-blocking event fan-out for sessions and analysis jobs."""
 
 from __future__ import annotations
 
