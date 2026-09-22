@@ -216,7 +216,6 @@ variable — a stray shell variable must never destabilize your server):
 python -m pytest tests/ -q                       # 519 unit tests (no gdb needed)
 wsl bash tests/integration/run_wsl_integration.sh # real-gdb end-to-end suite
 wsl bash tests/integration/run_io_smoke.sh        # inferior-stdio pty smoke
-python bench/run_win.py --selftest               # bench harness self-check
 ```
 
 ## Roadmap

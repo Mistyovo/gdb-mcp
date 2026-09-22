@@ -128,7 +128,7 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | H4 instructions 刷新 | ✅ 覆盖 one-call/pwn 工作流/export |
 | H5 动词一致性 | ✅ `test_plugin_verb_table_matches_protocol`：两表相等 + GATED ⊆ 同步动词 |
 | B1 会话持久化 | ✅ `enable_persistence`/`save`/`load`：sessions.json 原子写、重启恢复为 DISCONNECTED、re-hello 复活同一身份；script 会话不入库；损坏文件容忍 |
-| B3 MVP | ✅ Journal（JSONL，trim/hex 标记）+ `export_session_script`（break 条件/auto_continue 探针/set_reg/≤256B 逐字节写/continue 族编译；纯读与 checkpoint 跳过并计数）。**脚本对真实 gdb 的独立重放验证归 E3 bench** |
+| B3 MVP | ✅ Journal（JSONL，trim/hex 标记）+ `export_session_script`（break 条件/auto_continue 探针/set_reg/≤256B 逐字节写/continue 族编译；纯读与 checkpoint 跳过并计数）。**脚本对真实 gdb 的独立重放验证曾由 E3 bench 承担（该 harness 已于 2026-09-22 移除）** |
 | H2 插件 `_exec()` 收口 | ✅ 全部 `gdb.execute` 调用点已收口；仅存 `_exec` 本体与文档化例外 `_gdb_version()`（模块级、加载期一次） |
 
 ### 第二、三批落地状态 ✅（2026-09-18）
@@ -145,8 +145,8 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
 | A 补充：minimize/crash_check | ✅ exp/crash-minimizer 合入：delta debugging（信号一致性防漂移）复用 _fuzz_round |
 | A 补充：bp_stats | ✅（2026-09-21）断点命中统计探针：locations 计数探针（自动续跑）+ stop_location 临时标记；按命中预算/趟数/ inferior 自停收尾，返回每位置命中数——断点命中统计的长跑版 |
 | E2 PyPI 发布 | ❌ 取消（用户决策 2026-09-18：不做 PyPI 发布） |
-| E3 bench | 🟡 骨架 + 实测矩阵（2026-09-22）：DeepSeek 客户端 + agent 循环（FakeLLM 零消耗）+ 三靶标 + `--selftest` 参考解自证 + `--dump` 轨迹落盘。**重大修正**：win.c 原靶标无解（argv/strcpy 投递——C 字符串不能携带 NUL，main 返回地址是 libc 侧 0x00007f...，高字节残留使 3 字节部分覆盖必然失败；4 次真实运行全死在 pc=0x7fff00401156 差两字节），9 月"模型能力问题"结论误判；v2 改 stdin 投递 + 参考解自证可解（offset 72 ret2win）。harness 改进：stop verdict 附 rsp + 栈窗 48B（返回槽观测——chat 的取胜路径上实际使用：先 cyclic_offset 得 64（rbp 槽）再从栈窗修正 72）。**矩阵**（--go 实弹）：win v2 chat ✓ 7 轮/22k tokens；fmt chat ✓ 14 轮/62k；ret2libc 四战未破——chat ×2（21 轮/205k、24 轮/38 调用/221k：offset ✓、GOT 泄漏 ✓、libc_lookup ✓，多阶段链组装未完成）、v4-pro ×2（修复前 9 轮 no_tool 早弃；修复后 24 轮跑满预算/162k，但全程静态侦察未 run 目标，GOT 读到的是惰性绑定初值，后期退化）；**flash 4/4 no_tool 早弃（7/12/4/5 轮，2 次空答案，含已证可解的靶标）——不适合该循环**。第二轮 harness 改进（2026-09-22）：观测减负（output_b64 4096→512B、output_lines 30→12——chat 二战因此从 24→38 次调用）、disassemble 符号表达式兜底（插件拒绝 puts@plt/main+16 时经 `p/x &()` 解析后重试——v4-pro 曾 3 连 BAD_PARAMS 后弃赛）、--max-tokens（默认 4096，防通道内推理模型被 1024 截断成空答案）。结论：EASY/MEDIUM 由 chat 稳定解出（产品论题首批正样本）；HARD 的瓶颈是**策略组装**而非观测缺失——下一步要么更强推理模型，要么给 run_policy 级别的链条辅助
-| E3 语料扩容 | ✅（2026-09-21）bench/harness.py 共享骨架（BenchSpec/编译/会话引导/基础 7 工具，argv+stdin 双投递、output_b64 保真泄漏字节、跨 run 通知防串扰）+ 两个新靶标并**用内置参考解在 WSL 实际解出**：ret2libc（HARD，两阶段 GOT 泄漏→libc 基址→system，配套 libc_lookup/elf_strings 工具）、fmt（MEDIUM，%n 写 .bss 全局，配套 elf_symbols 工具）；`--selftest` 参考解即可解性证明（零 API）。真实模型跑分仍待 `--go`+模型/预算决策 |
+| E3 bench | 🗑 已移除（2026-09-22 用户决策"彻底删除测试 Harness"：bench/ 全目录 + src/gdb_mcp/bench.py（DeepSeek 客户端 + agent 循环）+ tests/test_bench.py；靶标与全部提交在 git 历史可恢复）。**移除前最终结论**：win.c 原靶标无解（argv/strcpy 不能携带 NUL，9 月"模型能力"结论系误判；v2 改 stdin 后自证可解）；deepseek-chat 解出 EASY（win，7 轮/22k）与 MEDIUM（fmt，14 轮/62k）——产品论题首批正样本；HARD（ret2libc）四战未破，瓶颈在策略组装而非观测缺失；flash 不适合工具循环（4/4 早弃） |
+| E3 语料扩容 | 🗑 随 E3 harness 一并移除（2026-09-22）；三靶标（win/fmt/ret2libc，均带参考解自证）在 git 历史（提交 5f9abd22、178d328）中可恢复 |
 | B4 会话工作目录归档 | ✅（2026-09-21）gc/kill 关闭会话时 journal+启动日志归档到 `<archive_dir>/<sid>/`（含 meta.json），保留最近 `--archive-retention` N 个（默认 20，0 关闭）——长期运行不再泄漏磁盘 |
 | D3 crash→debug 流水线 | ✅（2026-09-21）`triage_crash` 工具：fuzz_loop 崩溃 payload → checkpoint 重放验证 → 完整 crash_report →（可选）minimize → 结果落盘 evidence + campaign note。设计原文"新 debug 会话"以 checkpoint 恢复的干净进程镜像实现：与独立 OS 会话同样确定性，且内存写入型 payload 无法经 stdin 重放，checkpoint 重放是唯一正确通路 |
 | 3.4 时间旅行 | 🟡 exp/native-record 已合入：gdb 原生 record/reverse_*（零依赖，WSL2 可用；rr 因 PMU 不可用而放弃）。`continue_execution(mode="reverse_*")` + `execute_command('record full')` |
