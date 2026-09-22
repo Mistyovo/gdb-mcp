@@ -40,7 +40,9 @@ with none of the prompt-scraping fragility.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
 - **Verified against reality** — 519 unit tests plus end-to-end suites driving
-  real gdb 17.2 in WSL, and a live bench that scores models on real crackmes.
+  real gdb 17.2 in WSL, and a versioned acceptance benchmark
+(`bench/`, selfcheck 42/42) that proves every task solvable before any
+model runs on it.
 
 ## Quick Start
 

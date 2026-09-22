@@ -145,7 +145,9 @@ class PluginTcpListener:
                 pass
 
     async def _dispatch(self, session: Session, msg: dict) -> None:
-        msg = unwrap_token(msg, self.config.token)
+        # launched sessions keep presenting their session-scoped token on
+        # every message — unwrap with the session's token, not the master
+        msg = unwrap_token(msg, session.token or self.config.token)
         validate_plugin_message(msg)
         session.update_seen()
         mtype = msg.get("type")

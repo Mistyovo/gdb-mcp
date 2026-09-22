@@ -100,6 +100,30 @@ class TestRegisterHello:
         assert s2 is s1
         assert s2.state == CONNECTING
 
+    @pytest.mark.asyncio
+    async def test_hello_keeps_scoped_token_of_launched_session(self):
+        # E4 regression: a launched session presents its derived token on
+        # EVERY message; register_hello must not reset the session's token
+        # to the master or the reader loop rejects them all.
+        from gdb_mcp.sessions import derive_session_token
+
+        reg = SessionRegistry(
+            Config(token="master-secret"), session_id_factory=lambda: "s-tok"
+        )
+        reserved = reg.reserve("s-tok")
+        reserved.token = derive_session_token("master-secret", "s-tok")
+        s = reg.register_hello(hello(session_id="s-tok"), FakeWriter())
+        assert s is reserved
+        assert s.token == derive_session_token("master-secret", "s-tok")
+
+    @pytest.mark.asyncio
+    async def test_hello_sets_master_token_for_external_sessions(self):
+        reg = SessionRegistry(
+            Config(token="master-secret"), session_id_factory=lambda: "s-ext"
+        )
+        s = reg.register_hello(hello(), FakeWriter())
+        assert s.token == "master-secret"
+
 
 class TestResolve:
     @pytest.mark.asyncio

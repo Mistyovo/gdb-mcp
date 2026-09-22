@@ -529,7 +529,11 @@ class SessionRegistry:
             self._by_pid.pop(old_pid, None)
         session.hello = hello
         session.writer = writer
-        session.token = self.config.token
+        if session.token is None:
+            # keep a launched session's scoped token: the plugin keeps
+            # presenting it on every message; resetting to the master here
+            # would make the reader loop reject them all
+            session.token = self.config.token
         session.events = self.events
         session.state = CONNECTING
         session.reserved = False

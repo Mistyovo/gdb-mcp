@@ -24,3 +24,7 @@ logs/
 # Local tool state
 .mimosa/
 .claude/settings.local.json
+
+# bench artifacts (regenerable)
+bench/targets_out/
+bench/results/

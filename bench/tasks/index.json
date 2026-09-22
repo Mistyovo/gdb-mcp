@@ -1,0 +1,14 @@
+{
+  "bench_version": "1.0.0",
+  "families": [
+    "breakpoints",
+    "crash",
+    "lifecycle",
+    "multistep",
+    "optimize",
+    "pie",
+    "threads"
+  ],
+  "index_hash": "73bc2dc84fdd2838d1180fe42a4e34cbf457f915805b81f277dc9701ddb8cd8c",
+  "task_count": 42
+}
