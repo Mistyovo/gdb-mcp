@@ -103,6 +103,48 @@ agent 只收恒定大小的摘要——这是 LLM 驱动动态分析的架构级
   能力"的参照系，这是社区credibility的护城河。
 - **E4 安全演进**：会话级 scoped token、mTLS（HTTP 模式）、audit 导出（B2 副产品）。
 
+## 5.5 主题 F：内核执行闭环 — kernel pwn 的基础设施（2026-09-26 立项，层① 已 PoC）
+
+**动机**：ExploitGym（2026）已把 Linux kernel LPE 纳入 AI 利用评测；现有 pwn 原语
+（campaign/policy/checkpoint）在内核场景天然复用，WSL2 后端顺路。四层路线：
+
+1. **执行闭环**（本层）——QEMU gdbstub 启动 + `savevm/loadvm` 快照秒级 revert +
+   vmlinux 符号加载 + KASLR slide 修正；
+2. **工具链**——extract-vmlinux（已有雏形 `kernel/vmlinux.py`）、内核版 checksec
+   （从 cpu flags + 版本推 KASLR/SMEP/SMAP/KPTI）、模块符号（`add-symbol-file`，
+   运行时地址取 `/sys/module/<name>/sections/`）；
+3. **知识层**——kernel pwn playbook skill + writeup 语料，随做随沉淀；
+4. **评测**——BenchSpec 增 kernel target 类型，分级（无 SMEP ret2usr → ROP →
+   KPTI → UAF/slab → cross-cache），判定 = 提权读 flag；exploit 可挂死 VM，
+   必须 watchdog + 快照 revert。
+
+**层① PoC 已端到端验证**（`tests/integration/run_kernel_smoke.py`，qemu 11.1 +
+kali 7.1.5 内核）：
+
+* `kernel/qemu_runner.py`：QEMU 命令组装（`-gdb tcp::N` + `-S` 冻结 + HMP unix
+  monitor + `-no-reboot`）、常驻 keep-alive 启动器、`savevm/loadvm` 快照；
+* 实验工具 `kernel_launch` / `kernel_snapshot`（`--experimental` 门控，
+  CLI-only，无环境变量通路）；
+* `kernel/vmlinux.py`：bzImage 内嵌压缩载荷探测/解压 + System.map 符号地址 +
+  KASLR slide 计算（解压支持 gzip/xz/lzma，bzip2/lz4/zstd 显式报缺 CLI）。
+
+**三件用真机换来的工程事实**（勿凭直觉推翻）：
+
+1. **WSL 会回收"detached"进程**——启动 bash 退出后 QEMU 随实例一起死；启动器必须
+   `wait $QPID` 常驻持有（它同时是 Windows 侧的句柄），且 stderr 要在 `&` 之前
+   重定向（否则首条 stderr 写入触发 SIGPIPE）；
+2. **子进程必须 `stdin=DEVNULL`**——常驻 wsl.exe 会继承并消费服务器的 MCP stdio
+   流，之后所有请求静默饿死（最小复现：session_status 60s 无响应）；
+3. **gdb 不刷新 loadvm 后的寄存器缓存**——savevm 时 stub 会发 stop 事件所以寄存器
+   是真的；loadvm 后 gdb 仍回旧值，回滚验证要用 `monitor info registers`
+   （HMP 才是仿真器的真值源；实模式保存点报 EIP 而非 RIP）。
+
+另：kernel gdb 必须 `-nx`——pwndbg 的 vmmap 自动探索会在无映射的复位向量
+（0xfff0）上卡死插件握手。KASLR slide 修正与模块符号属层②，层① 靶机以 `nokaslr`
+起步。
+
+
+
 ## 6. 卫生（穿插进行，均小）
 
 - H1 result-store GC（G1）；H2 插件 `gdb.execute(` 收敛到单一 `_exec()` 收口

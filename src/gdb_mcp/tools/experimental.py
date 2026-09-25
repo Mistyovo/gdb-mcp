@@ -18,9 +18,10 @@ import subprocess
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.launcher import Launcher
 from gdb_mcp.output import hex_to_bytes
 
-from ._common import config_from, resolve_gdb
+from ._common import config_from, registry_from, resolve_gdb
 
 
 def _api_find(endpoint_url: str, payload: dict) -> list:
@@ -218,3 +219,129 @@ def register(app, registry, config) -> None:
             "total_matched": len(gadgets),
             "truncated": truncated,
         }
+
+    #: QEMU handles for kernel sessions: session_id -> QemuProcess
+    _QEMU_BY_SESSION: dict = {}
+
+    @app.tool()
+    async def kernel_launch(
+        kernel: str,
+        initrd: str | None = None,
+        append: str | None = None,
+        disk: str | None = None,
+        symbol_file: str | None = None,
+        gdbstub_port: int = 1234,
+        memory_mb: int = 512,
+        distro: str | None = None,
+        attach_timeout_ms: int | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """EXPERIMENTAL. Boot a Linux kernel VM under QEMU with a gdbstub and
+        attach a plugin-loaded gdb to it (Theme F layer 1). The VM starts
+        frozen (-S); `continue_execution` starts it. `symbol_file` is the
+        uncompressed vmlinux (extract with gdb_mcp.kernel.vmlinux) — KASLR
+        slides are NOT yet auto-corrected, so pass nokaslr in `append` or
+        fix up symbols yourself. Snapshot via kernel_snapshot."""
+        from pathlib import Path as _Path
+
+        from gdb_mcp.kernel.qemu_runner import QemuProcess, QemuSpec, stub_check_argv
+        from gdb_mcp.launcher import win_to_wsl
+
+        cfg = config_from(ctx)
+        use_distro = distro or cfg.wsl_distro
+
+        def conv(raw: str | None) -> _Path | None:
+            return _Path(win_to_wsl(raw)) if raw else None
+
+        spec = QemuSpec(
+            kernel=_Path(win_to_wsl(kernel)),
+            initrd=conv(initrd),
+            append=append or "console=ttyS0 nokaslr",
+            disk=conv(disk),
+            gdbstub_port=gdbstub_port,
+            memory_mb=memory_mb,
+        )
+        qemu = QemuProcess(spec, distro=use_distro)
+        await qemu.start()
+        stub_ok = await _qemu_stub_up(gdbstub_port, use_distro, timeout_s=30.0)
+        if not stub_ok:
+            await qemu.stop()
+            raise GdbMcpError(
+                "QEMU_STUB_TIMEOUT",
+                "gdbstub :%d never came up in WSL (check the qemu log)"
+                % gdbstub_port,
+            )
+        # -nx: no .gdbinit/pwndbg — pwndbg's vmmap auto-exploration wedges on
+        # a frozen remote stub (no mappings at the reset vector)
+        gdb_args = ["-nx", "-ex", "target remote :%d" % gdbstub_port]
+        if symbol_file:
+            gdb_args += ["-ex", "file %s" % win_to_wsl(symbol_file)]
+        session = await Launcher(cfg, registry_from(ctx)).launch_gdb(
+            program=None,
+            args=None,
+            gdb_args=gdb_args,
+            cwd=None,
+            env=None,
+            run=False,
+            timeout_ms=(
+                20000 if attach_timeout_ms is None else attach_timeout_ms
+            ),
+            distro=distro,
+        )
+        _QEMU_BY_SESSION[session.session_id] = qemu
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "gdbstub_port": gdbstub_port,
+            "monitor_socket": spec.monitor_socket,
+            "append": spec.append,
+            "note": "VM frozen at -S; continue_execution to boot",
+        }
+
+    @app.tool()
+    async def kernel_snapshot(
+        action: str,
+        tag: str = "bench",
+        session_id: str | None = None,
+        ctx: Context = None,
+    ) -> dict:
+        """EXPERIMENTAL. savevm/loadvm on the QEMU of a kernel session
+        (requires a qcow2 disk: use kernel_launch(disk=...)). Snapshots are
+        the kernel-pwn revert primitive: a panicked VM restores in seconds."""
+        session = resolve_gdb(ctx, session_id)
+        qemu = _QEMU_BY_SESSION.get(session.session_id)
+        if qemu is None:
+            raise GdbMcpError(
+                "BAD_PARAMS", "no QEMU handle for session %r" % session.session_id
+            )
+        if action == "save":
+            code, out = await qemu.snapshot_save(tag)
+        elif action == "restore":
+            code, out = await qemu.snapshot_restore(tag)
+        elif action == "stop":
+            await qemu.stop()
+            _QEMU_BY_SESSION.pop(session.session_id, None)
+            return {"stopped": True}
+        else:
+            raise GdbMcpError("BAD_PARAMS", "action must be save|restore|stop")
+        return {"action": action, "tag": tag, "returncode": code, "output": out[:400]}
+
+    async def _qemu_stub_up(port: int, distro: str | None, timeout_s: float) -> bool:
+        import asyncio as _asyncio
+        import time as _time
+
+        from gdb_mcp.kernel.qemu_runner import stub_check_argv
+
+        deadline = _time.monotonic() + timeout_s
+        while _time.monotonic() < deadline:
+            proc = await _asyncio.create_subprocess_exec(
+                *stub_check_argv(port, distro),
+                stdin=_asyncio.subprocess.DEVNULL,
+                stdout=_asyncio.subprocess.DEVNULL,
+                stderr=_asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if proc.returncode == 0:
+                return True
+            await _asyncio.sleep(0.5)
+        return False
