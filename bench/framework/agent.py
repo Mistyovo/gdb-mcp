@@ -33,8 +33,9 @@ from typing import Any
 import httpx
 
 from .driver import McpDriver
+from .generators import derive_truth_for
 from .generators.common import program_path
-from .verifiers import run_checks
+from .verifiers import grade_facts, run_checks
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = ROOT / "bench" / "results"
@@ -294,7 +295,8 @@ async def run_agent_loop(
         )}
     ]
     record: dict[str, Any] = {
-        "steps_used": 0,
+        "steps_used": 0,   # turns that issued at least one non-submit tool call
+        "turns_used": 0,   # every model turn, incl. submit-only / prose turns
         "tool_calls": 0,
         "submitted": False,
         "abandoned": None,
@@ -307,23 +309,26 @@ async def run_agent_loop(
     }
     session_id: str | None = None
     deadline = time.monotonic() + wall_clock_s
-    budget = task.max_steps + 2  # headroom for the final submit turn
+    # The step BUDGET (success: steps_used <= task.max_steps) measures the
+    # debugging work; the submit turn is bookkeeping, not a step. max_turns is
+    # the loop's hard cap incl. that submit turn and one prose nudge.
+    max_turns = task.max_steps + 2
 
     try:
         while True:
             if time.monotonic() > deadline:
                 record["abandoned"] = "wall_clock"
                 break
-            if record["steps_used"] >= budget:
+            if record["turns_used"] >= max_turns:
                 record["abandoned"] = "step_budget"
                 break
             reply = await provider.chat(messages, tools)
             record["prompt_tokens"] += reply.usage["prompt_tokens"]
             record["completion_tokens"] += reply.usage["completion_tokens"]
-            record["steps_used"] += 1
+            record["turns_used"] += 1
             if not reply.tool_calls:
                 # bare prose: nudge once per occurrence toward submit
-                if record["steps_used"] >= budget:
+                if record["turns_used"] >= max_turns:
                     record["abandoned"] = "no_submit"
                     break
                 messages.append({"role": "assistant", "content": reply.content or ""})
@@ -354,18 +359,14 @@ async def run_agent_loop(
                     ],
                 }
             )
+            work_calls = [c for c in reply.tool_calls if c["name"] != SUBMIT_TOOL]
+            submit_calls = [c for c in reply.tool_calls if c["name"] == SUBMIT_TOOL]
+            if work_calls:
+                record["steps_used"] += 1
             step_trace: list[dict[str, Any]] = []
-            for call in reply.tool_calls:
+            for call in work_calls:
                 record["tool_calls"] += 1
                 name, args = call["name"], call["arguments"]
-                if name == SUBMIT_TOOL:
-                    record["submitted"] = True
-                    record["summary"] = str(args.get("summary", ""))[:500]
-                    record["answer"] = args.get("answer")
-                    messages.append(
-                        {"role": "tool", "tool_call_id": call["id"], "content": "ok"}
-                    )
-                    return record
                 try:
                     if not isinstance(args, dict):
                         raise AgentRunError("arguments must be an object")
@@ -390,9 +391,23 @@ async def run_agent_loop(
                 messages.append(
                     {"role": "tool", "tool_call_id": call["id"], "content": text}
                 )
-            record["trace"].append(
-                {"step": record["steps_used"], "calls": step_trace}
-            )
+            if work_calls:
+                record["trace"].append(
+                    {"step": record["steps_used"], "calls": step_trace}
+                )
+            if submit_calls:
+                args = submit_calls[0]["arguments"]
+                record["submitted"] = True
+                record["summary"] = str(args.get("summary", ""))[:500]
+                record["answer"] = args.get("answer")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": submit_calls[0]["id"],
+                        "content": "ok",
+                    }
+                )
+                return record
     finally:
         record["session_id"] = session_id
     return record
@@ -433,6 +448,17 @@ async def run_agent_suite(
                 )
                 record.update(loop_record)
                 session_id = loop_record.get("session_id")
+                facts_ok = True
+                if task.kind == "fact":
+                    derive = derive_truth_for(task.family)
+                    truth = await derive(driver, session_id, task)
+                    record["truth"] = truth
+                    fact_results = grade_facts(truth, record.get("answer"))
+                    record["facts"] = [
+                        {"op": c.op, "passed": c.passed, "detail": c.detail}
+                        for c in fact_results
+                    ]
+                    facts_ok = bool(fact_results) and all(c.passed for c in fact_results)
                 try:
                     checks = await run_checks(driver, session_id, task)
                 except Exception as exc:
@@ -443,11 +469,15 @@ async def run_agent_suite(
                 ]
                 checks_ok = bool(checks) and all(c.passed for c in checks)
                 steps_ok = record["steps_used"] <= task.max_steps
-                record["passed"] = bool(checks_ok and steps_ok and record["submitted"])
+                record["passed"] = bool(
+                    checks_ok and steps_ok and facts_ok and record["submitted"]
+                )
                 if not record["passed"]:
                     reasons = []
                     if not checks_ok:
                         reasons.append("checks")
+                    if not facts_ok:
+                        reasons.append("facts")
                     if not steps_ok:
                         reasons.append(
                             "steps %d > %d" % (record["steps_used"], task.max_steps)

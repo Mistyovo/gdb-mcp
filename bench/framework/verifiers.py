@@ -438,3 +438,44 @@ async def run_checks(driver: "McpDriver", session_id: str, task: "TaskSpec") -> 
     verifier = Verifier(driver, session_id)
     verifier.set_task_context(task)
     return [await verifier.verify(check) for check in task.checks]
+
+
+# -- fact tasks (kind: "fact") -----------------------------------------------
+
+def canonical_fact(value: Any) -> str:
+    """Canonical text of a fact: ints compare by value (hex/dec interchangeable),
+    everything else as stripped lowercase text."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, str)):
+        n = parse_int(value)
+        if n is not None:
+            return str(n)
+    return str(value).strip().lower()
+
+
+def grade_facts(truth: dict, answer: Any) -> list[CheckResult]:
+    """Grade a ``kind: "fact"`` answer against harness-derived truth.
+
+    Every truth field must be present and equal; any answer field outside the
+    truth set is a hallucination and fails the task even if the required
+    fields are all correct (goal §3: field accuracy, no invented facts).
+    """
+    if not isinstance(answer, dict):
+        return [CheckResult("facts", False, "answer is not a JSON object: %r" % (answer,))]
+    results: list[CheckResult] = []
+    answer_keys = set(answer)
+    truth_keys = set(truth)
+    for key in sorted(truth_keys - answer_keys):
+        results.append(CheckResult("fact_missing", False, "field %r missing" % key))
+    for key in sorted(answer_keys - truth_keys):
+        results.append(
+            CheckResult("fact_hallucinated", False, "field %r was not requested" % key)
+        )
+    for key in sorted(truth_keys & answer_keys):
+        want, got = truth[key], answer[key]
+        passed = canonical_fact(want) == canonical_fact(got)
+        results.append(CheckResult("fact", passed, "%s want=%r got=%r" % (key, want, got)))
+    if not results:
+        results.append(CheckResult("facts", False, "no fact fields defined"))
+    return results

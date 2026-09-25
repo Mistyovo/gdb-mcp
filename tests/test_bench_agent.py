@@ -161,7 +161,8 @@ async def test_loop_happy_path_submit_ends_run():
     assert record["submitted"] is True
     assert record["summary"] == "done"
     assert record["session_id"] == "s1"
-    assert record["steps_used"] == 2
+    assert record["steps_used"] == 1  # one work turn; submit is not a step
+    assert record["turns_used"] == 2
     assert record["abandoned"] is None
 
 
@@ -204,6 +205,40 @@ async def test_loop_budget_exhaustion_marks_abandoned():
     record = await run_agent_loop(driver, provider, _task(max_steps=2))
     assert record["submitted"] is False
     assert record["abandoned"] == "step_budget"
+    # max_steps=2 -> max_turns=4 (submit turn + one nudge are exempt)
+    assert record["turns_used"] == 4
+    assert record["steps_used"] == 4
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_is_not_counted_as_a_step():
+    provider = FakeProvider(
+        [
+            _turn("launch_gdb", {"program": "/x"}),
+            {"tool_calls": [{"id": "c2", "name": SUBMIT_TOOL, "arguments": {}}]},
+        ]
+    )
+    record = await run_agent_loop(FakeDriver(), provider, _task(max_steps=1))
+    assert record["submitted"] is True
+    assert record["steps_used"] == 1      # the work turn
+    assert record["turns_used"] == 2      # + the submit turn
+    assert record["abandoned"] is None
+
+
+@pytest.mark.asyncio
+async def test_mixed_work_and_submit_turn_counts_the_work():
+    provider = FakeProvider(
+        [
+            {"tool_calls": [
+                {"id": "c1", "name": "launch_gdb", "arguments": {"program": "/x"}},
+                {"id": "c2", "name": SUBMIT_TOOL, "arguments": {"summary": "s"}},
+            ]},
+        ]
+    )
+    record = await run_agent_loop(FakeDriver(results={"launch_gdb": {"session_id": "s1"}}),
+                                  provider, _task(max_steps=3))
+    assert record["submitted"] is True
+    assert record["steps_used"] == 1
 
 
 @pytest.mark.asyncio

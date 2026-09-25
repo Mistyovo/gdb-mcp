@@ -1,0 +1,53 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "stop_signal",
+      "spec": {
+        "signal": "SIGSEGV"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "inspect",
+  "id": "inspect-0005",
+  "kind": "fact",
+  "max_steps": 5,
+  "params": {
+    "crash_idx": 42,
+    "fact_fields": [
+      "signal",
+      "fault_addr",
+      "pc_function",
+      "caller_function"
+    ],
+    "fault_addr": 168,
+    "shape": "crash_facts"
+  },
+  "prompt": "Run the program under gdb and let it crash; keep the session stopped at the crash. Then submit with an 'answer' JSON object with EXACTLY these fields, read from the live stopped state:\n  \"signal\"          \u2014 the stop signal name (e.g. SIGSEGV)\n  \"fault_addr\"      \u2014 the faulting memory address (any int format)\n  \"pc_function\"     \u2014 the function containing the faulting PC (backtrace frame 0)\n  \"caller_function\" \u2014 its caller (backtrace frame 1)",
+  "schema_version": "1.0.0",
+  "tags": [
+    "inspect",
+    "facts",
+    "crash_facts",
+    "O3"
+  ],
+  "target": {
+    "binary_sha256": null,
+    "build": {
+      "core": false,
+      "flags": [
+        "-O3"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "inspect_0005",
+    "source": "#include <stdlib.h>\n\n__attribute__((noinline)) long deref(int idx) {\n    if (idx < 0) return 42;\n    volatile int *p = (int *)(void *)0;\n    return p[idx];\n}\n\n__attribute__((noinline)) int trigger(int idx) {\n    volatile int acc = 0;\n    acc += (int)deref(idx);\n    return acc + 1;\n}\n\nint main(int argc, char **argv) {\n    int idx = 42;\n    if (argc > 1) idx = atoi(argv[1]);\n    return trigger(idx);\n}\n",
+    "symbols": {}
+  }
+}

@@ -15,12 +15,39 @@ from contextlib import suppress
 from pathlib import Path
 
 from .driver import McpDriver
-from .generators import reference_solve_for
-from .verifiers import run_checks
+from .generators import derive_truth_for, reference_solve_for
+from .verifiers import grade_facts, run_checks
 
 
 def _check_record(result) -> dict:
     return {"op": result.op, "passed": result.passed, "detail": result.detail}
+
+
+async def _fact_selfcheck(driver, session_id: str, task, record: dict) -> bool:
+    """Fact tasks prove more than state: the truth must be derivable, a
+    truth-copy answer must grade PASS, and a corrupted + hallucinated answer
+    must grade FAIL — otherwise the grader itself is broken."""
+    derive = derive_truth_for(task.family)
+    truth = await derive(driver, session_id, task)
+    record["truth"] = truth
+    fields = task.params.get("fact_fields", [])
+    if sorted(truth) != sorted(fields):
+        record["error"] = "derived truth fields %s != manifest %s" % (
+            sorted(truth), sorted(fields))
+        return False
+    good = grade_facts(truth, dict(truth))
+    record["fact_checks"] = [_check_record(r) for r in good]
+    if not all(r.passed for r in good):
+        record["error"] = "grader rejected the truth itself"
+        return False
+    corrupted = dict(truth)
+    first = sorted(corrupted)[0]
+    corrupted[first] = "corrupted_%s" % corrupted[first]
+    corrupted["_hallucinated"] = 1
+    if all(r.passed for r in grade_facts(truth, corrupted)):
+        record["error"] = "grader accepted a corrupted answer"
+        return False
+    return True
 
 
 async def run_selfcheck(
@@ -52,11 +79,24 @@ async def run_selfcheck(
             try:
                 solve = reference_solve_for(task.family)
                 session_id = await solve(driver, task)
-                checks = await run_checks(driver, session_id, task)
-                record["checks"] = [_check_record(c) for c in checks]
-                record["passed"] = all(c.passed for c in checks)
-                if not record["passed"]:
-                    record["error"] = "ground-truth checks failed"
+                if task.kind == "fact":
+                    if not await _fact_selfcheck(driver, session_id, task, record):
+                        record["passed"] = False
+                    else:
+                        record["passed"] = all(
+                            c.passed
+                            for c in await run_checks(driver, session_id, task)
+                        )
+                        if not record["passed"]:
+                            record["error"] = record.get(
+                                "error", "session checks failed"
+                            )
+                else:
+                    checks = await run_checks(driver, session_id, task)
+                    record["checks"] = [_check_record(c) for c in checks]
+                    record["passed"] = all(c.passed for c in checks)
+                    if not record["passed"]:
+                        record["error"] = "ground-truth checks failed"
             except Exception as exc:  # bench wants every failure logged, not raised
                 record["passed"] = False
                 record["error"] = "%s: %s" % (type(exc).__name__, exc)

@@ -1,0 +1,59 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_present",
+      "spec": {
+        "symbol": "report"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "inspect",
+  "id": "inspect-0002",
+  "kind": "fact",
+  "max_steps": 7,
+  "params": {
+    "acc_seed": 2771,
+    "fact_fields": [
+      "idg",
+      "uflag",
+      "strv",
+      "token"
+    ],
+    "idg_init": 93,
+    "iters": 15,
+    "mid": 7,
+    "mod": 2981,
+    "shape": "report_globals",
+    "strv_init": -8,
+    "uflag_init": 5562,
+    "xor_val": 16743
+  },
+  "prompt": "Set a breakpoint on the function 'report' and run until it fires, leaving the session stopped at that hit. Then submit with an 'answer' JSON object with EXACTLY these fields, read from the live stopped state:\n  \"idg\"   \u2014 the 4-byte int stored at &idg\n  \"uflag\" \u2014 the 4-byte unsigned int at &uflag\n  \"strv\"  \u2014 the 2-byte short at &strv\n  \"token\" \u2014 the int argument of this report() call (first argument register).\nThe binary has no debug info: read memory through &symbol casts (read_memory), registers via read_registers. Any int format (decimal or 0x hex) is accepted.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "inspect",
+    "facts",
+    "report_globals",
+    "O1"
+  ],
+  "target": {
+    "binary_sha256": null,
+    "build": {
+      "core": false,
+      "flags": [
+        "-O1"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "inspect_0002",
+    "source": "#include <stdio.h>\n\nint idg = 93;\nunsigned int uflag = 5562;\nshort int strv = -8;\n\n__attribute__((noinline)) void report(int token) {\n    printf(\"token=%d\\n\", token);\n}\n\n__attribute__((noinline)) int work(void) {\n    int acc = 2771;\n    for (int i = 0; i < 15; i++) {\n        acc = acc * 3 + i;\n        if (i == 7) uflag = (unsigned int)(acc ^ 0x4167u);\n    }\n    idg = acc % 2981;\n    strv = (short)(acc & 0x7f);\n    report(acc);\n    return acc;\n}\n\nint main(void) {\n    return work() % 5;\n}\n",
+    "symbols": {}
+  }
+}

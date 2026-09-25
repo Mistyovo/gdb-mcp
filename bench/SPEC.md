@@ -130,7 +130,16 @@ compares structured fields; hallucinated fields (not in truth) count as errors.
 
 ```
 task_success = all(checks pass) AND steps_used <= max_steps AND session_alive
+               (fact tasks additionally: the submit answer matches the
+                harness-derived truth, hallucinated fields included in the
+                failure) AND the agent called submit
 ```
+
+`steps_used` counts agent turns that issued at least one non-submit tool
+call — the submit turn is bookkeeping, not a step (a perfect one-shot
+launch → bp → run → wait solve of a 4-step task must stay passable).
+M3 runs surfaced this when the original turn-equals-step definition made
+several families mathematically unpassable for any model.
 
 Tier-1 metrics (goal §9/§10): `total`, `hard`, `multistep`, `pwndbg`, `state_fact`,
 `recovery`, `stress_tool_success`, plus overhead percentiles. `cli.py report`
