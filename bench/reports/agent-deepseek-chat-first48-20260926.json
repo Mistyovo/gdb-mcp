@@ -1,0 +1,365 @@
+{
+  "avg_steps": 8.8,
+  "avg_tokens_per_task": 83861.0,
+  "avg_tool_calls": 11.0,
+  "bench_version": "1.0.0",
+  "by_difficulty": {
+    "easy": {
+      "n": 15,
+      "rate": 0.7333
+    },
+    "hard": {
+      "n": 9,
+      "rate": 0.1111
+    },
+    "medium": {
+      "n": 24,
+      "rate": 0.25
+    }
+  },
+  "by_family": {
+    "breakpoints": {
+      "n": 6,
+      "rate": 1.0
+    },
+    "crash": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "inspect": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "lifecycle": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "multistep": {
+      "n": 6,
+      "rate": 0.1667
+    },
+    "optimize": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "pie": {
+      "n": 6,
+      "rate": 0.3333
+    },
+    "threads": {
+      "n": 6,
+      "rate": 0.0
+    }
+  },
+  "by_tag": {
+    "O0": {
+      "n": 5,
+      "rate": 0.6
+    },
+    "O1": {
+      "n": 5,
+      "rate": 0.4
+    },
+    "O2": {
+      "n": 15,
+      "rate": 0.5333
+    },
+    "O2-plus": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "O3": {
+      "n": 5,
+      "rate": 0.6
+    },
+    "SIGINT": {
+      "n": 2,
+      "rate": 0.0
+    },
+    "argv": {
+      "n": 2,
+      "rate": 0.5
+    },
+    "aslr": {
+      "n": 6,
+      "rate": 0.3333
+    },
+    "backtrace": {
+      "n": 2,
+      "rate": 1.0
+    },
+    "breakpoints": {
+      "n": 4,
+      "rate": 1.0
+    },
+    "concurrency": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "conditional": {
+      "n": 2,
+      "rate": 1.0
+    },
+    "conditional-bp": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "crash": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "crash_facts": {
+      "n": 3,
+      "rate": 1.0
+    },
+    "dynamic-decision": {
+      "n": 6,
+      "rate": 0.1667
+    },
+    "exit": {
+      "n": 2,
+      "rate": 1.0
+    },
+    "exit-code": {
+      "n": 2,
+      "rate": 0.5
+    },
+    "facts": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "fault-addr": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "inspect": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "interrupt": {
+      "n": 2,
+      "rate": 0.0
+    },
+    "lcg": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "lifecycle": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "memory": {
+      "n": 2,
+      "rate": 1.0
+    },
+    "memory-write": {
+      "n": 6,
+      "rate": 0.3333
+    },
+    "multistep": {
+      "n": 6,
+      "rate": 0.1667
+    },
+    "no-dwarf": {
+      "n": 4,
+      "rate": 1.0
+    },
+    "optimization": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "pie": {
+      "n": 6,
+      "rate": 0.3333
+    },
+    "registers": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "report_globals": {
+      "n": 3,
+      "rate": 0.0
+    },
+    "segfault": {
+      "n": 6,
+      "rate": 0.5
+    },
+    "software-bp": {
+      "n": 2,
+      "rate": 1.0
+    },
+    "state-machine": {
+      "n": 6,
+      "rate": 0.1667
+    },
+    "threads": {
+      "n": 6,
+      "rate": 0.0
+    },
+    "vmmap": {
+      "n": 6,
+      "rate": 0.3333
+    },
+    "watchpoint": {
+      "n": 2,
+      "rate": 1.0
+    }
+  },
+  "label": "agent",
+  "latency": {
+    "median_ms": 3.728,
+    "p50_ms": 3.728,
+    "p95_ms": 998.983,
+    "p99_ms": 1172.449,
+    "per_tool": {
+      "continue_execution": {
+        "n": 5,
+        "p50_ms": 51.886,
+        "p95_ms": 96.844,
+        "p99_ms": 104.517
+      },
+      "crash_report": {
+        "n": 5,
+        "p50_ms": 33.392,
+        "p95_ms": 69.3,
+        "p99_ms": 75.313
+      },
+      "disassemble": {
+        "n": 51,
+        "p50_ms": 3.717,
+        "p95_ms": 8.824,
+        "p99_ms": 18.338
+      },
+      "evaluate": {
+        "n": 162,
+        "p50_ms": 4.914,
+        "p95_ms": 8.504,
+        "p99_ms": 16.128
+      },
+      "execute_command": {
+        "n": 285,
+        "p50_ms": 3.886,
+        "p95_ms": 81.236,
+        "p99_ms": 86.514
+      },
+      "get_backtrace": {
+        "n": 17,
+        "p50_ms": 3.062,
+        "p95_ms": 10.631,
+        "p99_ms": 10.773
+      },
+      "get_events": {
+        "n": 4,
+        "p50_ms": 0.942,
+        "p95_ms": 1.36,
+        "p99_ms": 1.416
+      },
+      "get_memory_map": {
+        "n": 7,
+        "p50_ms": 3.669,
+        "p95_ms": 6.346,
+        "p99_ms": 6.763
+      },
+      "get_process_output": {
+        "n": 11,
+        "p50_ms": 2.377,
+        "p95_ms": 3.133,
+        "p99_ms": 3.165
+      },
+      "get_stop_reason": {
+        "n": 44,
+        "p50_ms": 1.437,
+        "p95_ms": 2.28,
+        "p99_ms": 2.618
+      },
+      "interrupt": {
+        "n": 4,
+        "p50_ms": 1.786,
+        "p95_ms": 2.361,
+        "p99_ms": 2.437
+      },
+      "kill_session": {
+        "n": 48,
+        "p50_ms": 265.022,
+        "p95_ms": 395.734,
+        "p99_ms": 402.203
+      },
+      "launch_gdb": {
+        "n": 48,
+        "p50_ms": 1107.968,
+        "p95_ms": 1218.981,
+        "p99_ms": 2353.495
+      },
+      "list_breakpoints": {
+        "n": 1,
+        "p50_ms": 4.534,
+        "p95_ms": 4.534,
+        "p99_ms": 4.534
+      },
+      "list_threads": {
+        "n": 6,
+        "p50_ms": 2.717,
+        "p95_ms": 3.1,
+        "p99_ms": 3.136
+      },
+      "load_target": {
+        "n": 1,
+        "p50_ms": 132.831,
+        "p95_ms": 132.831,
+        "p99_ms": 132.831
+      },
+      "manage_breakpoint": {
+        "n": 4,
+        "p50_ms": 3.719,
+        "p95_ms": 3.871,
+        "p99_ms": 3.875
+      },
+      "read_memory": {
+        "n": 55,
+        "p50_ms": 3.799,
+        "p95_ms": 10.197,
+        "p99_ms": 16.02
+      },
+      "read_registers": {
+        "n": 10,
+        "p50_ms": 2.846,
+        "p95_ms": 4.059,
+        "p99_ms": 4.122
+      },
+      "session_status": {
+        "n": 58,
+        "p50_ms": 1.151,
+        "p95_ms": 1.877,
+        "p99_ms": 2.646
+      },
+      "set_breakpoint": {
+        "n": 38,
+        "p50_ms": 3.64,
+        "p95_ms": 7.416,
+        "p99_ms": 8.206
+      },
+      "wait_for_stop": {
+        "n": 59,
+        "p50_ms": 1.871,
+        "p95_ms": 14.305,
+        "p99_ms": 26.555
+      },
+      "write_memory": {
+        "n": 11,
+        "p50_ms": 4.316,
+        "p95_ms": 5.781,
+        "p99_ms": 6.015
+      }
+    },
+    "total_calls": 934
+  },
+  "model": "deepseek-chat",
+  "passed": 18,
+  "success_rate": 0.375,
+  "tokens": {
+    "completion": 43523,
+    "prompt": 3981805,
+    "total": 4025328
+  },
+  "total": 48
+}
