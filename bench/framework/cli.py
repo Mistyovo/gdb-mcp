@@ -20,7 +20,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from bench.framework import agent as agent_mod  # noqa: E402
 from bench.framework import build as build_mod  # noqa: E402
+from bench.framework import faults as faults_mod  # noqa: E402
+from bench.framework import perf as perf_mod  # noqa: E402
+from bench.framework import pwndbg_suite as pwndbg_mod  # noqa: E402
 from bench.framework import selfcheck as selfcheck_mod  # noqa: E402
+from bench.framework import stress as stress_mod  # noqa: E402
 from bench.framework.agent import OpenAICompatProvider, load_env_file  # noqa: E402
 from bench.framework.generators import FAMILY_MODULES  # noqa: E402
 from bench.framework.schema import index_hash, load_tasks, write_task  # noqa: E402
@@ -127,6 +131,46 @@ def cmd_agent(args) -> int:
     return 0 if summary["passed"] == summary["total"] else 1
 
 
+def cmd_stress(args) -> int:
+    summary = asyncio.run(
+        stress_mod.run_stress(
+            stress_mod.DEFAULT_PROGRAM, distro=args.distro, port=args.port,
+            sessions=args.sessions, reads_per_session=args.reads,
+        )
+    )
+    return 0 if summary["stress_tool_success"] >= 0.999 else 1
+
+
+def cmd_faults(args) -> int:
+    summary = asyncio.run(
+        faults_mod.run_faults(
+            faults_mod.DEFAULT_PROGRAM, distro=args.distro, port=args.port,
+            rounds=args.rounds, scenarios=args.scenarios or None,
+        )
+    )
+    return 0 if summary["recovery"] >= 0.99 and summary["no_pollution"] >= 0.99 else 1
+
+
+def cmd_perf(args) -> int:
+    summary = asyncio.run(
+        perf_mod.run_perf(
+            perf_mod.DEFAULT_PROGRAM, distro=args.distro, port=args.port,
+            overhead_calls=args.overhead_calls, sessions=args.sessions,
+            concurrent=args.concurrent, soak_minutes=args.soak_minutes,
+        )
+    )
+    return 0 if all(summary["gate_pass"].values()) else 1
+
+
+def cmd_pwndbg(args) -> int:
+    summary = asyncio.run(
+        pwndbg_mod.run_pwndbg_suite(
+            args.distro, port=args.port, rounds=args.rounds,
+        )
+    )
+    return 0 if summary["pwndbg_compat"] >= 0.95 else 1
+
+
 def cmd_report(args) -> int:
     summary = json.loads(Path(args.results).read_text(encoding="utf-8"))
     print(json.dumps(summary, indent=2, sort_keys=True))
@@ -181,6 +225,35 @@ def main() -> int:
     p.add_argument("--max-tokens", type=int, default=2048)
     p.add_argument("--temperature", type=float, default=0.0)
     p.set_defaults(func=cmd_agent)
+
+    p = sub.add_parser("stress", help="call volume + session churn (goal §4)")
+    p.add_argument("--distro", default="kali-linux")
+    p.add_argument("--port", type=int, default=39692)
+    p.add_argument("--sessions", type=int, default=20)
+    p.add_argument("--reads", type=int, default=25, help="reads per session")
+    p.set_defaults(func=cmd_stress)
+
+    p = sub.add_parser("faults", help="fault injection + recovery (goal §5)")
+    p.add_argument("--distro", default="kali-linux")
+    p.add_argument("--port", type=int, default=39693)
+    p.add_argument("--rounds", type=int, default=3)
+    p.add_argument("--scenarios", nargs="*", default=None)
+    p.set_defaults(func=cmd_faults)
+
+    p = sub.add_parser("perf", help="overhead/startup/concurrency/soak (goal §6)")
+    p.add_argument("--distro", default="kali-linux")
+    p.add_argument("--port", type=int, default=39694)
+    p.add_argument("--overhead-calls", type=int, default=400)
+    p.add_argument("--sessions", type=int, default=10)
+    p.add_argument("--concurrent", type=int, default=100)
+    p.add_argument("--soak-minutes", type=float, default=0.0)
+    p.set_defaults(func=cmd_perf)
+
+    p = sub.add_parser("pwndbg", help="pwndbg compatibility probes (goal §7)")
+    p.add_argument("--distro", default="kali-linux")
+    p.add_argument("--port", type=int, default=39695)
+    p.add_argument("--rounds", type=int, default=1)
+    p.set_defaults(func=cmd_pwndbg)
 
     p = sub.add_parser("report", help="print a results summary; optional CI gate")
     p.add_argument("--results", required=True)
