@@ -11,14 +11,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
+from bench.framework import agent as agent_mod  # noqa: E402
 from bench.framework import build as build_mod  # noqa: E402
 from bench.framework import selfcheck as selfcheck_mod  # noqa: E402
+from bench.framework.agent import OpenAICompatProvider, load_env_file  # noqa: E402
 from bench.framework.generators import FAMILY_MODULES  # noqa: E402
 from bench.framework.schema import index_hash, load_tasks, write_task  # noqa: E402
 
@@ -85,6 +88,45 @@ def cmd_selfcheck(args) -> int:
     return 0 if summary["passed"] == summary["total"] else 1
 
 
+def cmd_agent(args) -> int:
+    env = dict(load_env_file(ROOT / ".env"))
+    env.update(os.environ)
+    api_key = env.get(args.api_key_env, "")
+    if not api_key:
+        print(
+            "no API key: set --api-key-env (default %s) in the environment "
+            "or in the repo-root .env" % args.api_key_env,
+            file=sys.stderr,
+        )
+        return 2
+    tasks = load_tasks(TASKS_DIR)
+    if args.filter:
+        tasks = [t for t in tasks if args.filter in t.family or args.filter in t.id]
+    if args.limit:
+        tasks = tasks[: args.limit]
+    if not tasks:
+        print("no tasks matched; run `generate` first", file=sys.stderr)
+        return 2
+    provider = OpenAICompatProvider(
+        model=args.model,
+        api_key=api_key,
+        base_url=args.base_url,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+    )
+    summary = asyncio.run(
+        agent_mod.run_agent_suite(
+            tasks, provider, distro=args.distro, port=args.port,
+            results_dir=RESULTS_DIR, label="agent",
+        )
+    )
+    print("success_rate=%s (%d/%d) tokens=%s" % (
+        summary["success_rate"], summary["passed"], summary["total"],
+        summary["tokens"]["total"],
+    ))
+    return 0 if summary["passed"] == summary["total"] else 1
+
+
 def cmd_report(args) -> int:
     summary = json.loads(Path(args.results).read_text(encoding="utf-8"))
     print(json.dumps(summary, indent=2, sort_keys=True))
@@ -127,6 +169,18 @@ def main() -> int:
     p.add_argument("--filter", default=None, help="substring match on family or id")
     p.add_argument("--label", default="selfcheck")
     p.set_defaults(func=cmd_selfcheck)
+
+    p = sub.add_parser("agent", help="run a model agent over tasks and grade")
+    p.add_argument("--model", default="deepseek-chat")
+    p.add_argument("--base-url", default="https://api.deepseek.com")
+    p.add_argument("--api-key-env", default="DEEPSEEK_API_KEY")
+    p.add_argument("--distro", default="kali-linux")
+    p.add_argument("--port", type=int, default=39691)
+    p.add_argument("--filter", default=None, help="substring match on family or id")
+    p.add_argument("--limit", type=int, default=None, help="first N tasks after filter")
+    p.add_argument("--max-tokens", type=int, default=2048)
+    p.add_argument("--temperature", type=float, default=0.0)
+    p.set_defaults(func=cmd_agent)
 
     p = sub.add_parser("report", help="print a results summary; optional CI gate")
     p.add_argument("--results", required=True)

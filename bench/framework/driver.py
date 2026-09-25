@@ -97,6 +97,26 @@ class McpDriver:
             self._stack = None
             self._session = None
 
+    async def list_tools(self) -> list[dict]:
+        """Registered tool descriptors: [{name, description, input_schema}]."""
+        if self._session is None:
+            raise DriverError("driver not started (use async with)")
+        out: list[dict] = []
+        cursor = None
+        while True:
+            page = await self._session.list_tools(cursor=cursor)
+            for tool in page.tools:
+                out.append(
+                    {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema or {"type": "object"},
+                    }
+                )
+            cursor = page.nextCursor
+            if not cursor:
+                return out
+
     async def call(self, tool: str, arguments: dict[str, Any] | None = None) -> dict:
         if self._session is None:
             raise DriverError("driver not started (use async with)")
