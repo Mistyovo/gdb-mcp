@@ -43,7 +43,7 @@
     "O2"
   ],
   "target": {
-    "binary_sha256": null,
+    "binary_sha256": "812bdea76d187ba1fb32b2e12cb49fa1e0051c2608894d835ec5923caecf5905",
     "build": {
       "core": false,
       "flags": [
@@ -55,6 +55,48 @@
     },
     "name": "inspect_0004",
     "source": "#include <stdio.h>\n\nint idg = 310;\nunsigned int uflag = 6761;\nshort int strv = 84;\n\n__attribute__((noinline)) void report(int token) {\n    printf(\"token=%d\\n\", token);\n}\n\n__attribute__((noinline)) int work(void) {\n    int acc = 6490;\n    for (int i = 0; i < 21; i++) {\n        acc = acc * 3 + i;\n        if (i == 18) uflag = (unsigned int)(acc ^ 0x28acu);\n    }\n    idg = acc % 869;\n    strv = (short)(acc & 0x7f);\n    report(acc);\n    return acc;\n}\n\nint main(void) {\n    return work() % 5;\n}\n",
-    "symbols": {}
+    "symbols": {
+      "_DYNAMIC": "0x403e08",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x402118",
+      "__GNU_EH_FRAME_HDR": "0x402010",
+      "__TMC_END__": "0x404028",
+      "__abi_tag": "0x402140",
+      "__abi_tag$end": "0x402160",
+      "__bss_start": "0x404024",
+      "__data_start": "0x404008",
+      "__do_global_dtors_aux": "0x401120",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e00",
+      "__dso_handle": "0x404010",
+      "__frame_dummy_init_array_entry": "0x403df8",
+      "_dl_relocate_static_pie": "0x4010a0",
+      "_dl_relocate_static_pie$end": "0x4010a1",
+      "_edata": "0x404024",
+      "_end": "0x404028",
+      "_fini": "0x4011f8",
+      "_init": "0x401000",
+      "_start": "0x401070",
+      "_start$end": "0x401092",
+      "completed.0": "0x404024",
+      "completed.0$end": "0x404025",
+      "data_start": "0x404008",
+      "deregister_tm_clones": "0x4010b0",
+      "frame_dummy": "0x401150",
+      "idg": "0x404020",
+      "idg$end": "0x404024",
+      "main": "0x401040",
+      "main$end": "0x40106b",
+      "register_tm_clones": "0x4010e0",
+      "report": "0x401160",
+      "report$end": "0x401170",
+      "strv": "0x404018",
+      "strv$end": "0x40401a",
+      "uflag": "0x40401c",
+      "uflag$end": "0x404020",
+      "work": "0x401170",
+      "work$end": "0x4011f6"
+    }
   }
 }

@@ -1,0 +1,80 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "exit_code",
+      "spec": {
+        "code": 32
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "lifecycle",
+  "id": "lifecycle-0058",
+  "kind": "state",
+  "max_steps": 6,
+  "params": {
+    "arg": "13",
+    "base": 19,
+    "delta": 13,
+    "shape": "exit_code"
+  },
+  "prompt": "Launch the program under gdb so that it exits with exit code 32. The program's exit code depends on its command line: inspect it and pass the argument that produces the required code.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "lifecycle",
+    "exit-code",
+    "argv",
+    "O1"
+  ],
+  "target": {
+    "binary_sha256": "5681ceb04fd4ff91906bc283f29ad912ce391c1cbf25889563e9678cc234d22d",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O1"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "lifecycle_0058",
+    "source": "#include <stdlib.h>\n#include <unistd.h>\n\n__attribute__((noinline)) int finish(int code) { return code; }\n\nint main(int argc, char **argv) {\n    if (argc > 1 && argv[1][0] == 'b') {\n        volatile unsigned guard = 0;\n        while (guard + 1 != 0) guard++;   /* busy loop for interrupt tests */\n        return finish(0);\n    }\n    int base = 19;\n    if (argc > 1) return finish(base + atoi(argv[1]));\n    return finish(base + 13);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x20ec",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2110",
+      "__abi_tag$end": "0x2130",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1100",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11e8",
+      "_init": "0x1000",
+      "_start": "0x1060",
+      "_start$end": "0x1082",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x1090",
+      "finish": "0x1160",
+      "finish$end": "0x1163",
+      "frame_dummy": "0x1140",
+      "main": "0x1163",
+      "main$end": "0x11e8",
+      "register_tm_clones": "0x10c0"
+    }
+  }
+}

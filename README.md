@@ -41,8 +41,9 @@ with none of the prompt-scraping fragility.
   register automatically; the server never fights your scripts for I/O.
 - **Verified against reality** — 519 unit tests plus end-to-end suites driving
   real gdb 17.2 in WSL, and a versioned acceptance benchmark
-(`bench/`, selfcheck 42/42) that proves every task solvable before any
-model runs on it.
+(`bench/`, 576 tasks across 8 families, reference-solved 576/576) that
+proves every task solvable before any model runs on it — the first
+model report is committed under `bench/reports/`.
 
 ## Quick Start
 

@@ -1,0 +1,86 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "exit_code",
+      "spec": {
+        "code": 0
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "multistep",
+  "id": "multistep-0067",
+  "kind": "state",
+  "max_steps": 11,
+  "params": {
+    "cseed": 803210,
+    "mask": 31167658,
+    "nstages": 3
+  },
+  "prompt": "The program validates 3 staged answers and only exits with 0 if every stage is satisfied. Stage i requires answers[i] to equal keys[i] XOR 31167658 (unsigned 32-bit). Drive the program so that every gate passes and the inferior exits with code 0. You must read each key from live memory \u2014 the keys are not known before the run.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "multistep",
+    "state-machine",
+    "dynamic-decision",
+    "O2"
+  ],
+  "target": {
+    "binary_sha256": "37f11c0dae5a986722f0c7230774a66c7b82c1341877a2879e00550e2a6b66c3",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-no-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "multistep_0067",
+    "source": "#include <stdio.h>\n\nstatic unsigned keys[3];\nunsigned answers[3] = {0};\n\n__attribute__((noinline)) int gate(int stage) {\n    unsigned want = keys[stage] ^ 31167658u;\n    return answers[stage] == want ? 0 : 1;\n}\n\nint main(void) {\n    unsigned s = 803210u;\n    for (int i = 0; i < 3; i++) {\n        s = s * 1103515245u + 12345u;\n        keys[i] = s;\n    }\n    for (int i = 0; i < 3; i++) {\n        if (gate(i)) return 91 + i;\n    }\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x403e48",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x4020c0",
+      "__GNU_EH_FRAME_HDR": "0x402010",
+      "__TMC_END__": "0x404010",
+      "__abi_tag": "0x4020e8",
+      "__abi_tag$end": "0x402108",
+      "__bss_start": "0x404010",
+      "__data_start": "0x404000",
+      "__do_global_dtors_aux": "0x401110",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e40",
+      "__dso_handle": "0x404008",
+      "__frame_dummy_init_array_entry": "0x403e38",
+      "_dl_relocate_static_pie": "0x401090",
+      "_dl_relocate_static_pie$end": "0x401091",
+      "_edata": "0x404010",
+      "_end": "0x404038",
+      "_fini": "0x401174",
+      "_init": "0x401000",
+      "_start": "0x401060",
+      "_start$end": "0x401082",
+      "answers": "0x404018",
+      "answers$end": "0x404024",
+      "completed.0": "0x404010",
+      "completed.0$end": "0x404011",
+      "data_start": "0x404000",
+      "deregister_tm_clones": "0x4010a0",
+      "frame_dummy": "0x401140",
+      "gate": "0x401150",
+      "gate$end": "0x401173",
+      "keys": "0x404028",
+      "keys$end": "0x404034",
+      "main": "0x401020",
+      "main$end": "0x401052",
+      "register_tm_clones": "0x4010d0"
+    }
+  }
+}

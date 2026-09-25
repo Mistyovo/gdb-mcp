@@ -1,0 +1,81 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "exit_code",
+      "spec": {
+        "code": 15
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "lifecycle",
+  "id": "lifecycle-0036",
+  "kind": "state",
+  "max_steps": 4,
+  "params": {
+    "base": 11,
+    "delta": 4,
+    "shape": "natural"
+  },
+  "prompt": "Launch the program under gdb and let it run to natural completion. Leave the session showing the inferior's final exit.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "lifecycle",
+    "exit",
+    "O0"
+  ],
+  "target": {
+    "binary_sha256": "17574c7b6e9560d06057857e9291370d41f72b7f5550aebfd1b4628612b67d87",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O0",
+        "-no-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "lifecycle_0036",
+    "source": "#include <stdlib.h>\n#include <unistd.h>\n\n__attribute__((noinline)) int finish(int code) { return code; }\n\nint main(int argc, char **argv) {\n    if (argc > 1 && argv[1][0] == 'b') {\n        volatile unsigned guard = 0;\n        while (guard + 1 != 0) guard++;   /* busy loop for interrupt tests */\n        return finish(0);\n    }\n    int base = 11;\n    if (argc > 1) return finish(base + atoi(argv[1]));\n    return finish(base + 4);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x403e08",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x4020f8",
+      "__GNU_EH_FRAME_HDR": "0x402004",
+      "__TMC_END__": "0x404018",
+      "__abi_tag": "0x402120",
+      "__abi_tag$end": "0x402140",
+      "__bss_start": "0x404018",
+      "__data_start": "0x404008",
+      "__do_global_dtors_aux": "0x4010f0",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e00",
+      "__dso_handle": "0x404010",
+      "__frame_dummy_init_array_entry": "0x403df8",
+      "_dl_relocate_static_pie": "0x401070",
+      "_dl_relocate_static_pie$end": "0x401071",
+      "_edata": "0x404018",
+      "_end": "0x404020",
+      "_fini": "0x4011bc",
+      "_init": "0x401000",
+      "_start": "0x401040",
+      "_start$end": "0x401062",
+      "completed.0": "0x404018",
+      "completed.0$end": "0x404019",
+      "data_start": "0x404008",
+      "deregister_tm_clones": "0x401080",
+      "finish": "0x401126",
+      "finish$end": "0x401132",
+      "frame_dummy": "0x401120",
+      "main": "0x401132",
+      "main$end": "0x4011bc",
+      "register_tm_clones": "0x4010b0"
+    }
+  }
+}

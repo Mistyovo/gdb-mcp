@@ -154,12 +154,12 @@ async def reference_solve(driver, task) -> str:
             "set_breakpoint", {"location": "report", "session_id": sid}
         )
         await driver.call("execute_command", {"command": "run", "session_id": sid})
-        await settle(driver, sid, {"stopped"})
+        await settle(driver, sid, {"stopped", "ready", "exited"})
     else:
         sid = (await driver.call(
             "launch_gdb", {"program": program_path(task), "run": True}
         ))["session_id"]
-        await settle(driver, sid, {"stopped"})
+        await settle(driver, sid, {"stopped", "ready", "exited"})
     return sid
 
 

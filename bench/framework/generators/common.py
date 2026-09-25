@@ -87,14 +87,23 @@ def program_path(task: TaskSpec) -> str:
     return str(root / "bench" / "targets_out" / task.target.name / task.target.name)
 
 
-async def settle(driver, session_id: str, want: set[str], timeout_s: float = 15.0) -> dict:
+#: States a settled session may legitimately sit in. After a crash or exit
+#: the prompt event can flip STOPPED to READY before any poll observes it, so
+#: synchronization must not depend on catching the transient.
+SETTLED_STATES = frozenset({"stopped", "ready", "exited"})
+
+
+async def settle(driver, session_id: str, want: set[str] | None = None,
+                 timeout_s: float = 15.0) -> dict:
     """Poll session state until it reaches one of ``want`` (event timing in
-    WSL is asynchronous relative to tool returns)."""
+    WSL is asynchronous relative to tool returns). Defaults to
+    SETTLED_STATES."""
     import asyncio
     import time
 
     deadline = time.monotonic() + timeout_s
     result: dict = {}
+    want = want if want is not None else SETTLED_STATES
     while time.monotonic() < deadline:
         result = await driver.call("get_stop_reason", {"session_id": session_id})
         if result.get("state") in want:

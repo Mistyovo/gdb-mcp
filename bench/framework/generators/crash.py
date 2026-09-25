@@ -72,5 +72,5 @@ async def reference_solve(driver, task) -> str:
     sid = (await driver.call(
         "launch_gdb", {"program": program_path(task), "run": True}
     ))["session_id"]
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, {"stopped", "ready", "exited"})
     return sid

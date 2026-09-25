@@ -1,0 +1,83 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "exit_code",
+      "spec": {
+        "code": 0
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "hard",
+  "family": "multistep",
+  "id": "multistep-0026",
+  "kind": "state",
+  "max_steps": 21,
+  "params": {
+    "cseed": 212602,
+    "mask": 243403184,
+    "nstages": 8
+  },
+  "prompt": "The program validates 8 staged answers and only exits with 0 if every stage is satisfied. Stage i requires answers[i] to equal keys[i] XOR 243403184 (unsigned 32-bit). Drive the program so that every gate passes and the inferior exits with code 0. You must read each key from live memory \u2014 the keys are not known before the run.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "multistep",
+    "state-machine",
+    "dynamic-decision",
+    "O3"
+  ],
+  "target": {
+    "binary_sha256": "c02e0eba5fdb80c90b138f091c0e3ec9dd46c3689ee0061916a76d4a0ea2e00d",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O3"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "multistep_0026",
+    "source": "#include <stdio.h>\n\nstatic unsigned keys[8];\nunsigned answers[8] = {0};\n\n__attribute__((noinline)) int gate(int stage) {\n    unsigned want = keys[stage] ^ 243403184u;\n    return answers[stage] == want ? 0 : 1;\n}\n\nint main(void) {\n    unsigned s = 212602u;\n    for (int i = 0; i < 8; i++) {\n        s = s * 1103515245u + 12345u;\n        keys[i] = s;\n    }\n    for (int i = 0; i < 8; i++) {\n        if (gate(i)) return 91 + i;\n    }\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3e10",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x2118",
+      "__GNU_EH_FRAME_HDR": "0x2030",
+      "__TMC_END__": "0x4010",
+      "__abi_tag": "0x2140",
+      "__abi_tag$end": "0x2160",
+      "__bss_start": "0x4020",
+      "__data_start": "0x4000",
+      "__do_global_dtors_aux": "0x1120",
+      "__do_global_dtors_aux_fini_array_entry": "0x3e08",
+      "__dso_handle": "0x4008",
+      "__frame_dummy_init_array_entry": "0x3e00",
+      "_edata": "0x4010",
+      "_end": "0x4080",
+      "_fini": "0x1194",
+      "_init": "0x1000",
+      "_start": "0x1080",
+      "_start$end": "0x10a2",
+      "answers": "0x4040",
+      "answers$end": "0x4060",
+      "completed.0": "0x4020",
+      "completed.0$end": "0x4021",
+      "data_start": "0x4000",
+      "deregister_tm_clones": "0x10b0",
+      "frame_dummy": "0x1160",
+      "gate": "0x1170",
+      "gate$end": "0x1193",
+      "keys": "0x4060",
+      "keys$end": "0x4080",
+      "main": "0x1040",
+      "main$end": "0x1078",
+      "register_tm_clones": "0x10e0"
+    }
+  }
+}

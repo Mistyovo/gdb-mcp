@@ -1,0 +1,105 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_present",
+      "spec": {
+        "symbol": "audit"
+      }
+    },
+    {
+      "op": "breakpoint_hit",
+      "spec": {
+        "symbol": "audit"
+      }
+    },
+    {
+      "op": "backtrace_contains",
+      "spec": {
+        "functions": [
+          "audit",
+          "work",
+          "main"
+        ]
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "breakpoints",
+  "id": "breakpoints-0063",
+  "kind": "state",
+  "max_steps": 5,
+  "params": {
+    "acc_seed": 3968,
+    "iters": 26,
+    "k": 13,
+    "probe_init": 401,
+    "probe_val": 5545,
+    "shape": "first_hit",
+    "watch_iter": 17
+  },
+  "prompt": "Set a breakpoint on the function 'audit' and run the program so it stops at the first call. Leave the session stopped at that hit.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "breakpoints",
+    "software-bp",
+    "backtrace",
+    "O0"
+  ],
+  "target": {
+    "binary_sha256": "e7c50258e93ba2e2e257e570e129be0091c3ed8d4d9d55884de1f45c46dc2ed2",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O0"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "breakpoints_0063",
+    "source": "#include <stdio.h>\n\nint probe = 401;\nint g_i = -1;\n\n__attribute__((noinline)) void audit(int i, int secret) {\n    printf(\"%d %d\\n\", i, secret);\n}\n\n__attribute__((noinline)) int work(void) {\n    int acc = 3968;\n    for (int i = 0; i < 26; i++) {\n        g_i = i;\n        if (i == 17) probe = 5545;\n        acc = acc * 3 + i;\n        audit(i, acc);\n    }\n    return acc;\n}\n\nint main(void) {\n    return work() % 7;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x2130",
+      "__GNU_EH_FRAME_HDR": "0x200c",
+      "__TMC_END__": "0x4020",
+      "__abi_tag": "0x2158",
+      "__abi_tag$end": "0x2178",
+      "__bss_start": "0x4020",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x10f0",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4020",
+      "_end": "0x4028",
+      "_fini": "0x11f8",
+      "_init": "0x1000",
+      "_start": "0x1050",
+      "_start$end": "0x1072",
+      "audit": "0x1139",
+      "audit$end": "0x1166",
+      "completed.0": "0x4020",
+      "completed.0$end": "0x4021",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x1080",
+      "frame_dummy": "0x1130",
+      "g_i": "0x401c",
+      "g_i$end": "0x4020",
+      "main": "0x11c6",
+      "main$end": "0x11f6",
+      "probe": "0x4018",
+      "probe$end": "0x401c",
+      "register_tm_clones": "0x10b0",
+      "work": "0x1166",
+      "work$end": "0x11c6"
+    }
+  }
+}

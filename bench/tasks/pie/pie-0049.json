@@ -1,0 +1,86 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "memory_value",
+      "spec": {
+        "expr": "&reported_base",
+        "size": 8,
+        "value": {
+          "anchor_offset_of": "anchor"
+        }
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "pie",
+  "id": "pie-0049",
+  "kind": "state",
+  "max_steps": 10,
+  "params": {
+    "anchor_hint": 1
+  },
+  "prompt": "The program is position-independent. Launch it stopped, determine the runtime load base of the main executable (the address where the first segment of the binary was mapped), and store that 8-byte little-endian value into the global 'reported_base' before leaving the session stopped. Do not guess: the value must be the real base of this run.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "pie",
+    "aslr",
+    "vmmap",
+    "memory-write"
+  ],
+  "target": {
+    "binary_sha256": "f3b2d95660ebb332ffa53253859926af6e328d3653d5750890ea324ce9cb1055",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "pie_0049",
+    "source": "#include <stdio.h>\n\nconst char anchor[64] = \"pie-anchor\";\nunsigned long reported_base = 0;\n\n__attribute__((noinline)) int touch(void) {\n    return anchor[0];\n}\n\nint main(void) {\n    printf(\"%d\\n\", touch());\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x214c",
+      "__GNU_EH_FRAME_HDR": "0x2060",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2170",
+      "__abi_tag$end": "0x2190",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1110",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4028",
+      "_fini": "0x1168",
+      "_init": "0x1000",
+      "_start": "0x1070",
+      "_start$end": "0x1092",
+      "anchor": "0x2020",
+      "anchor$end": "0x2060",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x10a0",
+      "frame_dummy": "0x1150",
+      "main": "0x1050",
+      "main$end": "0x106e",
+      "register_tm_clones": "0x10d0",
+      "reported_base": "0x4020",
+      "reported_base$end": "0x4028",
+      "touch": "0x1160",
+      "touch$end": "0x1166"
+    }
+  }
+}

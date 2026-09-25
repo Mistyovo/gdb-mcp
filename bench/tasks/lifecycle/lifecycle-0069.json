@@ -1,0 +1,79 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "exit_code",
+      "spec": {
+        "code": 25
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "lifecycle",
+  "id": "lifecycle-0069",
+  "kind": "state",
+  "max_steps": 4,
+  "params": {
+    "base": 22,
+    "delta": 3,
+    "shape": "natural"
+  },
+  "prompt": "Launch the program under gdb and let it run to natural completion. Leave the session showing the inferior's final exit.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "lifecycle",
+    "exit",
+    "O2"
+  ],
+  "target": {
+    "binary_sha256": "00312c89e429a6d39fd131c980738a2270be82717e15aec4e7a696187f07eceb",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "lifecycle_0069",
+    "source": "#include <stdlib.h>\n#include <unistd.h>\n\n__attribute__((noinline)) int finish(int code) { return code; }\n\nint main(int argc, char **argv) {\n    if (argc > 1 && argv[1][0] == 'b') {\n        volatile unsigned guard = 0;\n        while (guard + 1 != 0) guard++;   /* busy loop for interrupt tests */\n        return finish(0);\n    }\n    int base = 22;\n    if (argc > 1) return finish(base + atoi(argv[1]));\n    return finish(base + 3);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x20f4",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2118",
+      "__abi_tag$end": "0x2138",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1190",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11e4",
+      "_init": "0x1000",
+      "_start": "0x10f0",
+      "_start$end": "0x1112",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x1120",
+      "finish": "0x11e0",
+      "finish$end": "0x11e3",
+      "frame_dummy": "0x11d0",
+      "main": "0x1060",
+      "main$end": "0x10e1",
+      "register_tm_clones": "0x1150"
+    }
+  }
+}

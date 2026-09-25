@@ -1,0 +1,83 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "memory_value",
+      "spec": {
+        "expr": "&result",
+        "size": 4,
+        "value": 2163066504
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "hard",
+  "family": "optimize",
+  "id": "optimize-0069",
+  "kind": "state",
+  "max_steps": 10,
+  "params": {
+    "expected": 2163066504,
+    "rounds": 5,
+    "seed_in": 89685
+  },
+  "prompt": "Launch the program stopped, then make the debugger stop right after 'compute' has returned. The optimizer keeps its result only in a register: obtain it and store it (4-byte little-endian, unsigned) into the global 'result'. Leave the session stopped after the write.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "optimization",
+    "O2-plus",
+    "registers",
+    "lcg"
+  ],
+  "target": {
+    "binary_sha256": "a5a4303f78433ecbb64d05ec23f8fe2e995688e285da06a82eb8b5adb2ddeccf",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O3"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "optimize_0069",
+    "source": "#include <stdio.h>\n\nunsigned result = 0;\n\n__attribute__((noinline)) int compute(int seed) {\n    unsigned x = (unsigned)seed ^ 0x5a5a5a5au;\n    for (int i = 0; i < 5; i++) {\n        x = x * 1103515245u + 12345u;\n    }\n    return (int)x;\n}\n\nint main(void) {\n    printf(\"%u\\n\", (unsigned)compute(89685) % 101u);\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x20f4",
+      "__GNU_EH_FRAME_HDR": "0x2008",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2118",
+      "__abi_tag$end": "0x2138",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1140",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11a4",
+      "_init": "0x1000",
+      "_start": "0x10a0",
+      "_start$end": "0x10c2",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "compute": "0x1190",
+      "compute$end": "0x11a3",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x10d0",
+      "frame_dummy": "0x1180",
+      "main": "0x1050",
+      "main$end": "0x1092",
+      "register_tm_clones": "0x1100",
+      "result": "0x401c",
+      "result$end": "0x4020"
+    }
+  }
+}

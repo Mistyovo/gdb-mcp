@@ -1,0 +1,102 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_present",
+      "spec": {
+        "symbol": "report"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "inspect",
+  "id": "inspect-0060",
+  "kind": "fact",
+  "max_steps": 7,
+  "params": {
+    "acc_seed": 4352,
+    "fact_fields": [
+      "idg",
+      "uflag",
+      "strv",
+      "token"
+    ],
+    "idg_init": 290,
+    "iters": 23,
+    "mid": 10,
+    "mod": 2480,
+    "shape": "report_globals",
+    "strv_init": -61,
+    "uflag_init": 37877,
+    "xor_val": 53202
+  },
+  "prompt": "Set a breakpoint on the function 'report' and run until it fires, leaving the session stopped at that hit. Then submit with an 'answer' JSON object with EXACTLY these fields, read from the live stopped state:\n  \"idg\"   \u2014 the 4-byte int stored at &idg\n  \"uflag\" \u2014 the 4-byte unsigned int at &uflag\n  \"strv\"  \u2014 the 2-byte short at &strv\n  \"token\" \u2014 the int argument of this report() call (first argument register).\nThe binary has no debug info: read memory through &symbol casts (read_memory), registers via read_registers. Any int format (decimal or 0x hex) is accepted.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "inspect",
+    "facts",
+    "report_globals",
+    "O2"
+  ],
+  "target": {
+    "binary_sha256": "184bb38805a58264c4cd61b912f3f652906e3341ce99db05e67229426d134d5f",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-no-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "inspect_0060",
+    "source": "#include <stdio.h>\n\nint idg = 290;\nunsigned int uflag = 37877;\nshort int strv = -61;\n\n__attribute__((noinline)) void report(int token) {\n    printf(\"token=%d\\n\", token);\n}\n\n__attribute__((noinline)) int work(void) {\n    int acc = 4352;\n    for (int i = 0; i < 23; i++) {\n        acc = acc * 3 + i;\n        if (i == 10) uflag = (unsigned int)(acc ^ 0xcfd2u);\n    }\n    idg = acc % 2480;\n    strv = (short)(acc & 0x7f);\n    report(acc);\n    return acc;\n}\n\nint main(void) {\n    return work() % 5;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x403e08",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x402118",
+      "__GNU_EH_FRAME_HDR": "0x402010",
+      "__TMC_END__": "0x404028",
+      "__abi_tag": "0x402140",
+      "__abi_tag$end": "0x402160",
+      "__bss_start": "0x404024",
+      "__data_start": "0x404008",
+      "__do_global_dtors_aux": "0x401120",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e00",
+      "__dso_handle": "0x404010",
+      "__frame_dummy_init_array_entry": "0x403df8",
+      "_dl_relocate_static_pie": "0x4010a0",
+      "_dl_relocate_static_pie$end": "0x4010a1",
+      "_edata": "0x404024",
+      "_end": "0x404028",
+      "_fini": "0x4011f8",
+      "_init": "0x401000",
+      "_start": "0x401070",
+      "_start$end": "0x401092",
+      "completed.0": "0x404024",
+      "completed.0$end": "0x404025",
+      "data_start": "0x404008",
+      "deregister_tm_clones": "0x4010b0",
+      "frame_dummy": "0x401150",
+      "idg": "0x404020",
+      "idg$end": "0x404024",
+      "main": "0x401040",
+      "main$end": "0x40106b",
+      "register_tm_clones": "0x4010e0",
+      "report": "0x401160",
+      "report$end": "0x401170",
+      "strv": "0x404018",
+      "strv$end": "0x40401a",
+      "uflag": "0x40401c",
+      "uflag$end": "0x404020",
+      "work": "0x401170",
+      "work$end": "0x4011f6"
+    }
+  }
+}

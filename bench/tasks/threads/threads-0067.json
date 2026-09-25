@@ -1,0 +1,119 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_present",
+      "spec": {
+        "condition": "*(int *)&tb == 9",
+        "symbol": "bump"
+      }
+    },
+    {
+      "op": "breakpoint_hit",
+      "spec": {
+        "condition": "*(int *)&tb == 9",
+        "symbol": "bump"
+      }
+    },
+    {
+      "op": "memory_value",
+      "spec": {
+        "expr": "&tb",
+        "size": 4,
+        "value": 9
+      }
+    },
+    {
+      "op": "thread_count",
+      "spec": {
+        "min_threads": 2
+      }
+    },
+    {
+      "op": "thread_stopped_at",
+      "spec": {
+        "function": "bump"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "threads",
+  "id": "threads-0067",
+  "kind": "state",
+  "max_steps": 8,
+  "params": {
+    "k": 9,
+    "na": 24,
+    "nb": 27
+  },
+  "prompt": "The program runs two worker threads incrementing separate counters. Make the debugger stop inside 'worker_b' exactly when its counter tb equals 9, and leave the session stopped there with every thread still alive.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "threads",
+    "conditional-bp",
+    "concurrency"
+  ],
+  "target": {
+    "binary_sha256": "eca8488783a06bf82448a9f9b582cf54368723e101699dabd5abe6d08cb3c4e2",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-no-pie"
+      ],
+      "ldflags": [
+        "-pthread"
+      ],
+      "strip": false
+    },
+    "name": "threads_0067",
+    "source": "#include <pthread.h>\n#include <stdio.h>\n\nvolatile int ta = 0;\nvolatile int tb = 0;\n\n__attribute__((noinline)) void *worker_a(void *arg) {\n    (void)arg;\n    for (int i = 0; i < 24; i++) ta++;\n    return NULL;\n}\n\n__attribute__((noinline)) void bump(void) {\n    tb++;\n}\n\n__attribute__((noinline)) void *worker_b(void *arg) {\n    (void)arg;\n    for (int i = 0; i < 27; i++) bump();\n    return NULL;\n}\n\nint main(void) {\n    pthread_t a, b;\n    pthread_create(&a, NULL, worker_a, NULL);\n    pthread_create(&b, NULL, worker_b, NULL);\n    pthread_join(a, NULL);\n    pthread_join(b, NULL);\n    printf(\"%d %d\\n\", ta, tb);\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x403e08",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x402124",
+      "__GNU_EH_FRAME_HDR": "0x40200c",
+      "__TMC_END__": "0x404028",
+      "__abi_tag": "0x402148",
+      "__abi_tag$end": "0x402168",
+      "__bss_start": "0x404028",
+      "__data_start": "0x404018",
+      "__do_global_dtors_aux": "0x401180",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e00",
+      "__dso_handle": "0x404020",
+      "__frame_dummy_init_array_entry": "0x403df8",
+      "_dl_relocate_static_pie": "0x401100",
+      "_dl_relocate_static_pie$end": "0x401101",
+      "_edata": "0x404028",
+      "_end": "0x404038",
+      "_fini": "0x401238",
+      "_init": "0x401000",
+      "_start": "0x4010d0",
+      "_start$end": "0x4010f2",
+      "bump": "0x401200",
+      "bump$end": "0x401210",
+      "completed.0": "0x404028",
+      "completed.0$end": "0x404029",
+      "data_start": "0x404018",
+      "deregister_tm_clones": "0x401110",
+      "frame_dummy": "0x4011b0",
+      "main": "0x401060",
+      "main$end": "0x4010c4",
+      "register_tm_clones": "0x401140",
+      "ta": "0x404030",
+      "ta$end": "0x404034",
+      "tb": "0x40402c",
+      "tb$end": "0x404030",
+      "worker_a": "0x4011c0",
+      "worker_a$end": "0x4011f7",
+      "worker_b": "0x401210",
+      "worker_b$end": "0x401237"
+    }
+  }
+}

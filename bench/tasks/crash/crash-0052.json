@@ -1,0 +1,86 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "stop_signal",
+      "spec": {
+        "signal": "SIGSEGV"
+      }
+    },
+    {
+      "op": "fault_addr",
+      "spec": {
+        "addr": 80
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "crash",
+  "id": "crash-0052",
+  "kind": "state",
+  "max_steps": 4,
+  "params": {
+    "crash_idx": 20,
+    "fault_addr": 80
+  },
+  "prompt": "Run the program under gdb; it will crash. Keep the session stopped at the crash so the debugger shows the faulting state.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "crash",
+    "segfault",
+    "fault-addr",
+    "O2"
+  ],
+  "target": {
+    "binary_sha256": "05642fc3aaeb6d8e7e589e2e4803df67e2b19cde9b487362815fed4e9558949c",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "crash_0052",
+    "source": "#include <stdlib.h>\n\n__attribute__((noinline)) long deref(int idx) {\n    if (idx < 0) return 42;\n    volatile int *p = (int *)(void *)0;\n    return p[idx];\n}\n\n__attribute__((noinline)) int trigger(int idx) {\n    volatile int acc = 0;\n    acc += (int)deref(idx);\n    return acc + 1;\n}\n\nint main(int argc, char **argv) {\n    int idx = 20;\n    if (argc > 1) idx = atoi(argv[1]);\n    return trigger(idx);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x210c",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2130",
+      "__abi_tag$end": "0x2150",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1120",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11bc",
+      "_init": "0x1000",
+      "_start": "0x1080",
+      "_start$end": "0x10a2",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deref": "0x1170",
+      "deref$end": "0x1186",
+      "deregister_tm_clones": "0x10b0",
+      "frame_dummy": "0x1160",
+      "main": "0x1050",
+      "main$end": "0x1078",
+      "register_tm_clones": "0x10e0",
+      "trigger": "0x1190",
+      "trigger$end": "0x11ba"
+    }
+  }
+}

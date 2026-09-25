@@ -1,0 +1,87 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "stop_signal",
+      "spec": {
+        "signal": "SIGSEGV"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "inspect",
+  "id": "inspect-0033",
+  "kind": "fact",
+  "max_steps": 5,
+  "params": {
+    "crash_idx": 39,
+    "fact_fields": [
+      "signal",
+      "fault_addr",
+      "pc_function",
+      "caller_function"
+    ],
+    "fault_addr": 156,
+    "shape": "crash_facts"
+  },
+  "prompt": "Run the program under gdb and let it crash; keep the session stopped at the crash. Then submit with an 'answer' JSON object with EXACTLY these fields, read from the live stopped state:\n  \"signal\"          \u2014 the stop signal name (e.g. SIGSEGV)\n  \"fault_addr\"      \u2014 the faulting memory address (any int format)\n  \"pc_function\"     \u2014 the function containing the faulting PC (backtrace frame 0)\n  \"caller_function\" \u2014 its caller (backtrace frame 1)",
+  "schema_version": "1.0.0",
+  "tags": [
+    "inspect",
+    "facts",
+    "crash_facts",
+    "O3"
+  ],
+  "target": {
+    "binary_sha256": "4fac129650ba12694420c7bc0edca07101e5d562e92a75baf9716fab297c2743",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O3"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "inspect_0033",
+    "source": "#include <stdlib.h>\n\n__attribute__((noinline)) long deref(int idx) {\n    if (idx < 0) return 42;\n    volatile int *p = (int *)(void *)0;\n    return p[idx];\n}\n\n__attribute__((noinline)) int trigger(int idx) {\n    volatile int acc = 0;\n    acc += (int)deref(idx);\n    return acc + 1;\n}\n\nint main(int argc, char **argv) {\n    int idx = 39;\n    if (argc > 1) idx = atoi(argv[1]);\n    return trigger(idx);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x210c",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2130",
+      "__abi_tag$end": "0x2150",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1120",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11bc",
+      "_init": "0x1000",
+      "_start": "0x1080",
+      "_start$end": "0x10a2",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deref": "0x1170",
+      "deref$end": "0x1186",
+      "deregister_tm_clones": "0x10b0",
+      "frame_dummy": "0x1160",
+      "main": "0x1050",
+      "main$end": "0x1078",
+      "register_tm_clones": "0x10e0",
+      "trigger": "0x1190",
+      "trigger$end": "0x11ba"
+    }
+  }
+}

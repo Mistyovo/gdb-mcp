@@ -1,0 +1,104 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_present",
+      "spec": {
+        "type": "watch"
+      }
+    },
+    {
+      "op": "breakpoint_hit",
+      "spec": {
+        "type": "watch"
+      }
+    },
+    {
+      "op": "memory_value",
+      "spec": {
+        "expr": "&probe",
+        "size": 4,
+        "value": 3453
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "breakpoints",
+  "id": "breakpoints-0020",
+  "kind": "state",
+  "max_steps": 6,
+  "params": {
+    "acc_seed": 2683,
+    "iters": 16,
+    "k": 8,
+    "probe_init": 790,
+    "probe_val": 3453,
+    "shape": "watch",
+    "watch_iter": 7
+  },
+  "prompt": "Stop the program when the global variable 'probe' changes value: set a watchpoint on the 4-byte int at &probe (no debug info \u2014 cast the address), run until it fires, and leave the session stopped at the write.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "watchpoint",
+    "memory",
+    "no-dwarf",
+    "O2"
+  ],
+  "target": {
+    "binary_sha256": "0b81616f635479f3e652b429b904734bb365528df4c29027ebc266f283cc3259",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "breakpoints_0020",
+    "source": "#include <stdio.h>\n\nint probe = 790;\nint g_i = -1;\n\n__attribute__((noinline)) void audit(int i, int secret) {\n    printf(\"%d %d\\n\", i, secret);\n}\n\n__attribute__((noinline)) int work(void) {\n    int acc = 2683;\n    for (int i = 0; i < 16; i++) {\n        g_i = i;\n        if (i == 7) probe = 3453;\n        acc = acc * 3 + i;\n        audit(i, acc);\n    }\n    return acc;\n}\n\nint main(void) {\n    return work() % 7;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x2124",
+      "__GNU_EH_FRAME_HDR": "0x200c",
+      "__TMC_END__": "0x4020",
+      "__abi_tag": "0x2148",
+      "__abi_tag$end": "0x2168",
+      "__bss_start": "0x4020",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x1130",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4020",
+      "_end": "0x4028",
+      "_fini": "0x120c",
+      "_init": "0x1000",
+      "_start": "0x1090",
+      "_start$end": "0x10b2",
+      "audit": "0x1180",
+      "audit$end": "0x1192",
+      "completed.0": "0x4020",
+      "completed.0$end": "0x4021",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x10c0",
+      "frame_dummy": "0x1170",
+      "g_i": "0x4018",
+      "g_i$end": "0x401c",
+      "main": "0x1050",
+      "main$end": "0x1086",
+      "probe": "0x401c",
+      "probe$end": "0x4020",
+      "register_tm_clones": "0x10f0",
+      "work": "0x11a0",
+      "work$end": "0x1209"
+    }
+  }
+}

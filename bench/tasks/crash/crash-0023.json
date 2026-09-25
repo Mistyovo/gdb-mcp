@@ -1,0 +1,96 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "stop_signal",
+      "spec": {
+        "signal": "SIGSEGV"
+      }
+    },
+    {
+      "op": "fault_addr",
+      "spec": {
+        "addr": 248
+      }
+    },
+    {
+      "op": "backtrace_contains",
+      "spec": {
+        "functions": [
+          "deref",
+          "trigger",
+          "main"
+        ]
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "easy",
+  "family": "crash",
+  "id": "crash-0023",
+  "kind": "state",
+  "max_steps": 4,
+  "params": {
+    "crash_idx": 62,
+    "fault_addr": 248
+  },
+  "prompt": "Run the program under gdb; it will crash. Keep the session stopped at the crash so the debugger shows the faulting state.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "crash",
+    "segfault",
+    "fault-addr",
+    "O1"
+  ],
+  "target": {
+    "binary_sha256": "7375979d3b215e0c578220ab65e6513efafb12e9a2814a0d71cfc7abbc88a434",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O1"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "crash_0023",
+    "source": "#include <stdlib.h>\n\n__attribute__((noinline)) long deref(int idx) {\n    if (idx < 0) return 42;\n    volatile int *p = (int *)(void *)0;\n    return p[idx];\n}\n\n__attribute__((noinline)) int trigger(int idx) {\n    volatile int acc = 0;\n    acc += (int)deref(idx);\n    return acc + 1;\n}\n\nint main(int argc, char **argv) {\n    int idx = 62;\n    if (argc > 1) idx = atoi(argv[1]);\n    return trigger(idx);\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x2110",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4018",
+      "__abi_tag": "0x2138",
+      "__abi_tag$end": "0x2158",
+      "__bss_start": "0x4018",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x10f0",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4018",
+      "_end": "0x4020",
+      "_fini": "0x11ac",
+      "_init": "0x1000",
+      "_start": "0x1050",
+      "_start$end": "0x1072",
+      "completed.0": "0x4018",
+      "completed.0$end": "0x4019",
+      "data_start": "0x4008",
+      "deref": "0x1139",
+      "deref$end": "0x1150",
+      "deregister_tm_clones": "0x1080",
+      "frame_dummy": "0x1130",
+      "main": "0x117a",
+      "main$end": "0x11ab",
+      "register_tm_clones": "0x10b0",
+      "trigger": "0x1150",
+      "trigger$end": "0x117a"
+    }
+  }
+}
