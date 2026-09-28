@@ -100,10 +100,25 @@ class PluginTcpListener:
         if len(raw) > self.config.max_async_line:
             raise ProtocolError("MALFORMED", "hello line too long")
         parsed = parse_line(raw)
-        # E4: a launched session verifies against its scoped token;
-        # unknown/external hellos fall back to the master token
+        # E4: a launched session verifies against its scoped token. An
+        # unknown session_id is NOT enough to pick a token: the hello also
+        # has to prove the master token, which a launched plugin never
+        # holds. Falling back silently would let any master-token holder
+        # squat a session id it was never given, so say so in the log.
         sid = peek_session_id(parsed)
-        expected = self.registry.token_for(sid) or self.config.token
+        if sid and not self.registry.has_session(sid):
+            # Claiming an id this server never reserved cannot bind anything;
+            # the hello still has to prove the master token, but say so --
+            # an unexpected session id is the one clue a squatted launch
+            # leaves.
+            expected = self.config.token
+            log.warning(
+                "hello claims unknown session %r; accepting as external "
+                "plugin under the master token",
+                sid[:40],
+            )
+        else:
+            expected = self.registry.token_for(sid) or self.config.token
         msg = unwrap_token(parsed, expected)
         validate_hello(msg)
         session = self.registry.register_hello(msg, writer)

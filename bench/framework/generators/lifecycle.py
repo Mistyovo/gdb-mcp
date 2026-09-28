@@ -96,7 +96,7 @@ def _opt_tag(build) -> str:
 
 async def reference_solve(driver, task) -> str:
     """Deterministic solve: launch (with the right argv), drive to the end state."""
-    from .common import settle
+    from .common import settle, STOP_STATES
 
     params = task.params
     args: list[str] = []
@@ -113,7 +113,7 @@ async def reference_solve(driver, task) -> str:
         # the busy loop never stops on its own — pause it, confirm the stop
         await settle(driver, sid, {"running"})
         await driver.call("interrupt", {"session_id": sid})
-        await settle(driver, sid, {"stopped"})
+        await settle(driver, sid, STOP_STATES)
     else:
         await settle(driver, sid, {"exited", "ready", "stopped"})
     return sid

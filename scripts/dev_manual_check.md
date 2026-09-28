@@ -49,11 +49,32 @@ python3 pwntools_debug.py        # tmux 里打开 gdb；服务器上出现新会
 
 ## 5. 集成测试（自动化）
 
+改完至少跑「地基」两件套；发布前把整张表跑满（README「Testing」同款命令）。
+
 ```powershell
-wsl.exe -d kali-linux -- bash -lc "cd <repo>/tests/integration && bash run_wsl_integration.sh"
-python -m pytest tests/
+# 地基：无 gdb 依赖 + 真实 gdb 协议
+python -m pytest tests/ -q
+wsl.exe -d kali-linux -- bash -lc "cd <repo> && bash tests/integration/run_wsl_integration.sh"
 ```
 
-> `<repo>` 为仓库路径（WSL 视角，如 `/mnt/c/.../gdb-mcp`）。
+| 目的 | 命令 | 预期标记 |
+|---|---|---|
+| 插件↔服务端协议 | `wsl bash tests/integration/run_wsl_integration.sh` | `INTEGRATION OK` |
+| 逐个工具端到端 | `python tests/integration/run_mcp_tools_e2e.py --distro kali-linux` | `ALL 31 WALKTHROUGH TOOLS PASSED (52 registered)` |
+| inferior stdio（pty） | `wsl bash tests/integration/run_io_smoke.sh` | `IO SMOKE OK` |
+| HTTP / TLS / mTLS / token | `bash tests/integration/run_tls_smoke.sh` | `[tls-smoke] OK` |
+| 观察者角色（实时 HTTP） | `python tests/integration/run_observer_smoke.py` | `[observer-smoke] OK` |
+| 验收基准（576 任务） | `python -m bench.framework.cli selfcheck --distro kali-linux` | `success_rate=1.0` |
+| 调用量 / 会话翻涌 | `python -m bench.framework.cli stress --distro kali-linux` | `stress_tool_success=1.0` |
+| 故障注入与恢复 | `python -m bench.framework.cli faults --distro kali-linux` | `recovery=1.0 no_pollution=1.0` |
+| 开销 / 启动 / 并发 | `python -m bench.framework.cli perf --distro kali-linux` | `overhead p50 ≈ 0.6ms`、`concurrency N/N` |
+| pwndbg 兼容 | `python -m bench.framework.cli pwndbg --distro kali-linux` | `pwndbg_compat=1.0 (6/6)` |
 
-预期：`INTEGRATION OK` + 全部单元测试通过。
+> `<repo>` 为仓库路径（WSL 视角，如 `/mnt/c/.../gdb-mcp`）。
+> bench 的 harness 用 `python -m gdb_mcp` 起服务端（不设 `PYTHONPATH`），所以
+> 跑 bench 的那台机器/发行版里必须先 `pip install -e .`，否则只会看到
+> `McpError: Connection closed`。
+
+CI 覆盖：`unit`（pytest + `ruff check src tests bench`）、`gdb-integration`
+（run_wsl_integration.sh）、`bench`（build + selfcheck + 对 baseline 的 tier-1 门禁）。
+其余套件按上表手动跑。

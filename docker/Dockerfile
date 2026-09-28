@@ -20,7 +20,7 @@ RUN git clone --depth=1 https://github.com/pwndbg/pwndbg /opt/pwndbg \
 
 RUN python3 -m pip install --no-cache-dir --break-system-packages pwntools
 
-COPY gdb_mcp_plugin.py /opt/gdb-mcp/gdb_mcp_plugin.py
+COPY src/gdb_mcp/plugin/gdb_mcp_plugin.py /opt/gdb-mcp/gdb_mcp_plugin.py
 COPY src /opt/gdb-mcp/src
 COPY pyproject.toml README.md /opt/gdb-mcp/
 RUN python3 -m pip install --no-cache-dir --break-system-packages /opt/gdb-mcp

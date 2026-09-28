@@ -14,7 +14,7 @@
 | G1 | **结果存储无 GC**：results 落盘文件只增不删 | `results.py` | 长期运行的磁盘泄漏（真 bug） |
 | G2 | **服务器重启丢会话**：fresh registry 忽略插件 hello 里的 session_id，重新分配新 id，launch 簿记（日志、进程句柄）全部丢失 | `sessions.py register_hello` | 服务器随 Claude Code 会话启停，gdb 却常驻——身份断裂 |
 | G3 | **协议动词表无交叉校验**：protocol.VERBS 与插件 VERB_HANDLERS 两处手写，测试只断言子集 | `protocol.py` / 插件 | 新增动词漂移只能靠人肉（Phase 2 就差点漂移） |
-| G4 | **FastMCP 私有内部依赖**：`app._registry/_config/_tool_manager._tools` 三处 | `server.py` / `tools/__init__.py` | mcp 库升级即碎 |
+| G4 | **FastMCP 私有内部依赖**：`app._registry/_config/_tool_manager._tools` 三处 | `server.py` / `tools/__init__.py` | mcp 库升级即碎 —— ✅ 已于 2026-09-28 架构整备中消除（见 §7.1） |
 | G5 | **instructions 落后两个 Phase**：heap_bins/checkpoint/campaign 化工作流未告知 agent | `server.py` | agent 自发用不到新能力 |
 | G6 | **插件 `gdb.execute(` 行被安全钩子冻结**：任何触碰该行的新代码都被 Mimosa 误报拦截（Phase 2/3 全靠绕行） | 插件全局 | 插件演化摩擦持续存在 |
 | G7 | 事件环形缓冲只有内存态 100 条，无持久化 | `sessions.py` | 会话分析/审计/回放无从谈起 |
@@ -161,6 +161,42 @@ kali 7.1.5 内核）：
 第四批（协同与生态）:       D1 → E2 → E3 → D2 → E1 → E4
 贯穿: 每个 theme 的验收标准写进 bench；rr(3.4) 作为 A 的 trace/reverse 特例回收
 ```
+
+### 7.1 架构整备 ✅（2026-09-28，功能不变、632 单测 + WSL 真实 gdb 端到端全绿）
+
+用户诉求：功能已完善，架构不尽如人意。审计后落地四批，全部为结构改造：
+
+| 批次 | 内容 |
+|---|---|
+| **A 依赖注入与工具注册（修 G4）** | 新增 `context.ServerContext`（config/registry/analysis/launcher 唯一 DI 通道，经 lifespan 传递）；新增 `tools/registry.py`：工具改为**声明式** `@tool(core=, readonly_safe=, experimental=)`，注册表即单一真源——`CORE_TOOLS` 由声明推导、profile/readonly 在注册**前**过滤、观察者守卫在注册**前**包装（`functools.wraps` 保签名/异步性，实测 schema 零漂移）。删除全部 `app._registry/_config/_tool_manager._tools` 直改与 `tool.fn` 变异（`_tool_manager` 现仅存于 `registered_tools()` 一处只读视图）；60 个工具 handler 全部提升为模块级函数。新增 `test_tools::test_every_handler_is_declared`（防漏装饰器）+ 核心集契约断言 |
+| **B 会话/启动/监听边界** | `Session.set_state()` 成为状态写入唯一入口（并唤醒等待者）、新增 `wait_for_state`/`first_to_settle`/`note_process_exit`/`attach_analysis`/`note_location`；launcher 三处 `sleep` 轮询握手改为事件等待、不再直写 `session.state/token/_wake_stop_waiters`；`plugin_token_for()` 统一派生令牌照配（reserve 内部完成，消除"先给主令牌再补派生"的窗口）；保留插件环境变量名单由 7 项双份复制改为单一 `_RESERVED_PLUGIN_ENV` + `build_plugin_env()`；新增 `wsl.py` 收口 WSL 路径/发行版探测（修 reverse→launcher 反向依赖，GhidraRunner 的 `wsl.exe -l` 补上缺失超时）；`tcp_listener` 握手对"陌生 session_id 回落主令牌"显式告警 |
+| **C 插件内部治理（保持单文件可 source 部署）** | 抽出 `_resume()` 为唯一续跑原语，policy 循环不再用伪造 `id:0` 走线协议（新增断言：策略期间不得出现任何非法 id 响应）；`_io_seq/_io_buf` pty 线程与主线程共享状态加锁；`posted` 泵标志加锁；事件处理器连接失败从静默改为 gdb 控制台告警（否则服务端只会无限等 stop）；`_memory_segment()` 消除 read_mem 双份构造、`_drop_breakpoint()` 消除 4 处临时断点删除样板、删除只写不读的 `server_capabilities`；新增 `tests/test_plugin_parity.py` + `test_security::TestPluginCopyAgrees` 交叉校验插件刻意的 stdlib 复制（ANSI/hex/安全名单/段结构）与 `test_protocol` 的动词表交叉校验 |
+| **D 静态桥拆分** | `reverse/manager.py`（964 行上帝类）拆为 `reverse/store.py:AnalysisStore`（记录/清单/原子提升+崩溃恢复/索引校验/索引与函数与反汇编与注记缓存）+ `manager.py`（分析队列、会话跟随、运行期→静态定位、查询门面）。锁纪律收敛：`_lock` 只护内存映射、`_promote_lock` 只护目录换名、`annotation_lock` 串行读改写，**持锁不再做磁盘 IO**；后台任务统一 `_spawn()` 持引用并记异常（原 `create_task` 即发即忘 + `suppress(Exception)` 吞掉全部协调器故障）；manager 不再向 Session 散写私有字段，改调 `attach_analysis/note_location`（并删除只读不写的 `Session.target`）；新增 `tests/test_reverse_store.py`（13 项：提升/注记存活/缓存失效/备份恢复/路径大小写语义/损坏拒绝）与 `tests/test_architecture.py`（9 项分层与 MCP 边界守卫，把本轮修掉的方向性缺陷变成机制化回归） |
+
+### 7.2 完整性 / 可用性复审 ✅（2026-09-28 第二轮，实机驱动）
+
+上一轮只跑了单测 + stdio 端到端。这一轮把**每一条对外承诺的路径**都实机跑了一遍，
+方法学是：能用真实进程验证的，绝不用 mock 验证；结论与预期不符时先取数据再下判断。
+
+| # | 发现 | 归因 | 处置 |
+|---|---|---|---|
+| 1 | 未配置 token 的服务器上，每次正常启动的插件 hello 都被记 `hello claims unknown session ...; accepting as external plugin` | **本轮引入**：判断"是否已知会话"误用了 `token_for()`——无 token 时保留会话的 token 恰为 `None` | 新增 `SessionRegistry.has_session()` 作存在性判据；补 2 条回归测试，其中一条**先证明在错误判断下会失败**再修好 |
+| 2 | 6 处 bench 参考解 `settle(..., {"stopped"})`，而插件 stop 通知后紧跟 prompt，轮询方几乎只可能观测到 `ready` | 既有；且 `common.py` 自己的注释已写明"同步不得依赖捕捉该瞬态" | 按该文档化规则引入 `STOP_STATES={stopped,ready}`；实测 interrupt 任务 16.3s → **1.6s**，lifecycle/breakpoints/inspect 各 72/72 仍全绿。**这条同时掩盖"根本没停住"的失败**（超时后检查读 stop_info 照样通过），属验收质量缺陷而非仅性能 |
+| 3 | `ruff check src tests bench`（CI 的一步）在 main 上就是红的：8 项 | 既有 | 全清。其中 `inspect.py` 的 `F821 token_raw` 是**真 bug**：rdi 不可读时验证器抛 `NameError` 而非 `VerifyError`，把可诊断失败变成崩溃 |
+| 4 | 文档里的 `docker build -f docker/Dockerfile -t gdb-mcp:latest .` **必然失败**：`COPY gdb_mcp_plugin.py` 指向仓库根不存在的路径（插件在 `src/gdb_mcp/plugin/`） | 既有（路径迁移后配方未跟） | 修正 COPY 源；新增 2 条配方守卫测试（断言每个 COPY 源存在、且挂载路径与镜像内路径一致），并**验证过还原那行后测试即失败** |
+| 5 | docker 后端下插件没有可靠途径回连宿主：候选 host 只有 `127.0.0.1`/默认网关/resolv.conf，而 Docker Desktop 的 NAT 网关是 VM 不是宿主 | 既有 | 候选列表末尾追加 `host.docker.internal`（解析失败只是一个被跳过的候选，`_connect_once` 逐候选吞 `OSError`）；两个 README 的启动后端表补写明要求 |
+| 6 | `Config(log_dir="/tmp/x")` 构造成功，却在 `ensure_dirs()` 里抛 `AttributeError: 'str' object has no attribute 'mkdir'` | 既有 | `__post_init__` 按注解强制转 `Path`（log_dir/analysis_dir/archive_dir）+ 2 条测试 |
+| 7 | CI 只跑 9 套真实套件里的 1 套；**观察者工具门控**（上一轮恰好改了它的位置）零端到端覆盖 | 既有 | 新增 `tests/integration/run_observer_smoke.py`：真实 MCP-over-HTTP 客户端，8 项断言（两角色工具面一致、白名单工具放行、write_memory/execute_command/continue_execution 对观察者拒绝、controller 能进 handler、**观察者白名单不得含已改名/消失的工具**）。README ×2 与 `scripts/dev_manual_check.md` 补齐完整验证矩阵 |
+| 9 | **跑一次文档里的验收命令，`git status` 就多出 576 个"已修改"文件**：`core.autocrlf=true` 下任务清单被检出成 CRLF，而 bench 写回 LF，于是每个清单都变成"行尾差异"（内容哈希与 HEAD 完全相同，`git diff` 为空却仍标 M）。任何人跑 bench 都可能顺手提交这 576 个幻影改动 | 既有（Windows 开发 + 无 .gitattributes） | 新增 `.gitattributes`：`bench/tasks/**/* text eol=lf`（+ `bench/reports/*.json`），检出与写入端统一为 LF；**实测**：加属性前一次 LF 重写即标脏，加属性后同样的重写 `git status` 保持 0 项。已用 `git add --renormalize` 让既有索引条目就位（相对 HEAD 零暂存差异） |
+| 10 | **`GDB_MCP_READONLY=1` 被静默忽略**：真实服务器仍注册 52 个工具（含 `write_memory`/`write_register`）；同类地 `GDB_MCP_MCP_HTTP=1`、`GDB_MCP_ALLOW_UNSAFE=1`、`GDB_MCP_OBSERVER_TOKENS=...` 全部失效 | 既有（**安全相关**）：`argparse` 的 `store_true` 默认 `False`、`append` 默认 `[]` 被 `main()` 当成"用户显式设置"合并进由环境构建的 Config，把真值覆成假值；`Config.from_env` 本身是对的，`--help` 与 README 都承诺这些环境变量可用 | `__main__._overrides()` 显式化并把 6 个布尔/列表旗标默认改为 `None`（区分"没传"与"传了 false"）；`--no-mcp` 取反仅在显式传入时生效；抽出 `_overrides()` 便于测试，新增 5 项优先级回归（含"env 的 readonly 必须真的把写工具摘掉"这条打到工具面的断言）。**实测**：修复后 `GDB_MCP_READONLY=1` → 50 个工具、两个写工具消失；`--experimental` 仍无法用环境变量打开（刻意保持）；TLS/观察者/工具端到端三套实机重跑全绿 |
+
+| 8 | README 工具目录写"37 core tools"，默认实际注册 52；**整个静态桥 15 工具族与 kernel 两件没进目录表** | 既有 | 两个语言的目录与实验性小节均已更正（52 默认可见 / core 档 12 / `--experimental` 共 60） |
+
+实机复验通过、无需改动的项：`uvicorn`/`httpx` 由 `mcp` 传递依赖满足（`--http`、libc 识别开箱可用，不必额外声明）；`native` 后端端到端可用（crash_report 正确拿到 SIGSEGV + PC）；stress 8 会话 224 调用 100%；faults 4/4 恢复且无污染；perf 开销 p50/p95/p99 = 0.6/0.9/1.3ms（基线 0.7/1.1/1.5，**上一轮重构无性能回归**）；pwndbg 探针 6/6；WSL 协议集成 + io smoke + 31 工具端到端在插件改动后重跑仍全绿。
+
+仍未验证（诚实标注）：docker 后端的**运行时**路径（镜像构建受限于本机网络，apt 阶段耗时过长；本轮只把"构建命令必失败"这一确定缺陷修掉并加了配方守卫）；`ssh` 后端需远端主机。
+
+未做（诚实标注）：policy 动词族仍无真实 gdb 端到端覆盖（e2e 走查 31 工具、bench selfcheck 均不触发 `run_policy`；本轮由 mock_gdb 单测保证行为不变，`continue` 路径本身已实机验证）；G6/G7 未触碰；`Session` 仍保留 reverse 侧字段（已改为方法写入，未迁出）。
 
 ### 第一批落地状态 ✅（2026-09-17）
 

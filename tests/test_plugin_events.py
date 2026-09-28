@@ -132,7 +132,17 @@ class TestHelloAck:
         assert payload["session_id"] == "s-abc"
 
 
+#: the docker launcher must be able to reach the host's listener; see
+#: Plugin._resolve_hosts -- the alias always comes last, so a failed NAT
+#: probe never delays it and an unresolvable name is simply skipped.
+DOCKER_HOST_ALIAS = "host.docker.internal"
+
+
 class TestResolveHosts:
+    def test_explicit_env_still_wins_over_the_alias(self, plugin, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_HOST", "1.2.3.4")
+        assert plugin._resolve_hosts() == ["1.2.3.4"]
+
     def test_env_override(self, plugin, monkeypatch):
         monkeypatch.setenv("GDB_MCP_HOST", "1.2.3.4")
         assert plugin._resolve_hosts() == ["1.2.3.4"]
@@ -153,7 +163,11 @@ class TestResolveHosts:
             return real_open(path, *a, **kw)
 
         monkeypatch.setattr("builtins.open", fake_open)
-        assert plugin._resolve_hosts() == ["127.0.0.1", "10.0.0.2"]
+        assert plugin._resolve_hosts() == [
+            "127.0.0.1",
+            "10.0.0.2",
+            DOCKER_HOST_ALIAS,
+        ]
 
     def test_wsl_nat_default_gateway_precedes_nameserver(self, plugin, monkeypatch):
         monkeypatch.delenv("GDB_MCP_HOST", raising=False)
@@ -175,6 +189,7 @@ class TestResolveHosts:
             "127.0.0.1",
             "172.31.176.1",
             "10.255.255.254",
+            DOCKER_HOST_ALIAS,
         ]
 
     def test_invalid_routes_are_ignored(self, plugin, monkeypatch):
@@ -195,7 +210,7 @@ class TestResolveHosts:
             raise FileNotFoundError(path)
 
         monkeypatch.setattr("builtins.open", fake_open)
-        assert plugin._resolve_hosts() == ["127.0.0.1"]
+        assert plugin._resolve_hosts() == ["127.0.0.1", DOCKER_HOST_ALIAS]
 
     def test_default_no_resolv_conf(self, plugin, monkeypatch):
         monkeypatch.delenv("GDB_MCP_HOST", raising=False)

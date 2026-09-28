@@ -29,12 +29,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-mcp",
         action="store_true",
+        default=None,
         help="run the TCP listener only, without the stdio MCP transport "
         "(for integration tests)",
     )
     p.add_argument(
         "--http",
         action="store_true",
+        default=None,
         help="expose MCP over hardened streamable HTTP instead of stdio",
     )
     p.add_argument("--mcp-host", default=None, help="MCP HTTP bind (default 127.0.0.1)")
@@ -52,16 +54,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--readonly",
         action="store_true",
+        default=None,
         help="drop state-mutating tools (write_memory/write_register)",
     )
     p.add_argument(
         "--allow-unsafe",
         action="store_true",
+        default=None,
         help="allow gdb commands that escape the debugger (shell/!/python/...)",
     )
     p.add_argument(
         "--experimental",
         action="store_true",
+        default=None,
         help="register experimental tools (unstable; the ONLY way to "
         "enable them - no environment variable exists for this)",
     )
@@ -70,6 +75,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         dest="observer_tokens",
+        # None (not []) when absent: an empty list would overwrite
+        # GDB_MCP_OBSERVER_TOKENS
         metavar="TOKEN",
         help="read-only observer bearer token for the HTTP transport "
         "(repeatable); observers may query state but mutating tools "
@@ -85,6 +92,41 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _overrides(args) -> dict:
+    """CLI flags as Config overrides.
+
+    Every flag defaults to None rather than a concrete value: argparse's
+    ``False``/``[]`` for an absent option is indistinguishable from an
+    explicit one, and merging that into a Config built from the environment
+    silently erases ``GDB_MCP_READONLY`` / ``GDB_MCP_MCP_HTTP`` /
+    ``GDB_MCP_OBSERVER_TOKENS`` -- including the read-only guarantee an
+    operator set them for.
+    """
+    return {
+        "host_bind": args.host_bind,
+        "port": args.port,
+        "token": args.token,
+        "log_dir": Path(args.log_dir) if args.log_dir else None,
+        "archive_retention": args.archive_retention,
+        "mcp_transport": None if args.no_mcp is None else not args.no_mcp,
+        "mcp_http": args.http,
+        "mcp_host": args.mcp_host,
+        "mcp_port": args.mcp_port,
+        "launcher": args.launcher,
+        "ssh_host": args.ssh_host,
+        "docker_image": args.docker_image,
+        "readonly": args.readonly,
+        "allow_unsafe": args.allow_unsafe,
+        "experimental": args.experimental,
+        "observer_tokens": (
+            None if args.observer_tokens is None else tuple(args.observer_tokens)
+        ),
+        "mcp_tls_cert": args.mcp_tls_cert,
+        "mcp_tls_key": args.mcp_tls_key,
+        "mcp_tls_client_ca": args.mcp_tls_client_ca,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -93,29 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     from gdb_mcp.config import Config
 
     try:
-        cfg = Config.from_env(
-            overrides={
-                "host_bind": args.host_bind,
-                "port": args.port,
-                "token": args.token,
-                "log_dir": Path(args.log_dir) if args.log_dir else None,
-                "archive_retention": args.archive_retention,
-                "mcp_transport": not args.no_mcp,
-                "mcp_http": args.http,
-                "mcp_host": args.mcp_host,
-                "mcp_port": args.mcp_port,
-                "launcher": args.launcher,
-                "ssh_host": args.ssh_host,
-                "docker_image": args.docker_image,
-                "readonly": args.readonly,
-                "allow_unsafe": args.allow_unsafe,
-                "experimental": args.experimental,
-                "observer_tokens": tuple(args.observer_tokens or ()),
-                "mcp_tls_cert": args.mcp_tls_cert,
-                "mcp_tls_key": args.mcp_tls_key,
-                "mcp_tls_client_ca": args.mcp_tls_client_ca,
-            }
-        )
+        cfg = Config.from_env(overrides=_overrides(args))
     except ValueError as exc:
         parser.error(str(exc))
     from gdb_mcp.server import serve

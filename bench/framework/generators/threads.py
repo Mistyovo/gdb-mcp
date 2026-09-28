@@ -8,7 +8,7 @@ when its counter reaches K — with all inferior threads alive at the stop.
 from __future__ import annotations
 
 from ..schema import Check
-from .common import THREAD_LDFLAGS, flags_for, make_task, program_path, rng_for, settle
+from .common import THREAD_LDFLAGS, flags_for, make_task, program_path, rng_for, settle, STOP_STATES
 
 FAMILY = "threads"
 
@@ -91,5 +91,5 @@ async def reference_solve(driver, task) -> str:
          "session_id": sid},
     )
     await driver.call("execute_command", {"command": "run", "session_id": sid})
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, STOP_STATES)
     return sid

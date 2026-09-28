@@ -6,6 +6,7 @@ from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.server import build_app
 from gdb_mcp.sessions import SessionRegistry
+from gdb_mcp.tools import registered_tools
 
 from test_tools import add_gdb_session, run_tool
 
@@ -15,10 +16,7 @@ class _Env:
         self.cfg = Config(log_dir=tmp_path / "l", experimental=True)
         self.registry = SessionRegistry(self.cfg)
         self.app = build_app(self.cfg, self.registry)
-        self.tools = {
-            name: self.app._tool_manager._tools[name]
-            for name in self.app._tool_manager._tools
-        }
+        self.tools = registered_tools(self.app)
 
     def ctx(self):
         from test_tools import FakeContext
@@ -30,7 +28,7 @@ class TestExperimentalGating:
     def test_hidden_by_default(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l")
         app = build_app(cfg, SessionRegistry(cfg))
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert "identify_libc" not in names
         assert "search_gadgets" not in names
 

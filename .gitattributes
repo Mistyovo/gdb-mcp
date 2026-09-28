@@ -1,0 +1,9 @@
+# Committed acceptance data is written back by the bench harness
+# (`python -m bench.framework.cli build | selfcheck`), which emits LF. Under
+# `core.autocrlf=true` a Windows checkout materializes these as CRLF, so
+# running the documented verification command dirtied all 576 task manifests
+# with line-ending-only diffs. Pinning them to LF makes the checkout and the
+# writer agree, so `git status` after a bench run reports what actually
+# changed.
+bench/tasks/**/*.json text eol=lf
+bench/reports/*.json text eol=lf

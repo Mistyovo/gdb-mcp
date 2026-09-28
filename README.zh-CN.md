@@ -127,7 +127,7 @@ gdb 内还有 `mcp status|reconnect|detach` 命令。
 |---|---|
 | `wsl`（默认） | 经 `wsl.exe -d <distro>` 在 WSL2 内启动（现状行为） |
 | `native` | 服务器所在 Linux 主机直接启动（`bash -lc`） |
-| `docker` | 一次性容器内启动（`SYS_PTRACE` + 放宽 seccomp；镜像见 `docker/Dockerfile`，`docker build -f docker/Dockerfile -t gdb-mcp:latest .`；cwd 与插件按次挂载，容器以 `gdbmcp_<session>` 命名，终止即 `docker kill`） |
+| `docker` | 一次性容器内启动（`SYS_PTRACE` + 放宽 seccomp；镜像见 `docker/Dockerfile`，`docker build -f docker/Dockerfile -t gdb-mcp:latest .`；cwd 与插件按次挂载，容器以 `gdbmcp_<session>` 命名，终止即 `docker kill`。服务端需 `--host-bind 0.0.0.0 --token ...`（非回环绑定强制要求 token），插件经 `host.docker.internal` 回连） |
 | `ssh` | 经 SSH 在远端靶机启动（需 `GDB_MCP_SSH_HOST`，BatchMode 免密） |
 
 MCP 传输默认 stdio；`GDB_MCP_MCP_HTTP=1`（或 `--http`）切换为 streamable
@@ -168,7 +168,7 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（37 个）
+## 工具一览（默认 52 个；`core` 档 12 个；开 `--experimental` 共 60 个）
 
 | 类别 | 工具 |
 |---|---|
@@ -178,6 +178,9 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
 | pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop / crash_check / minimize / bp_stats——循环下沉插件原生速度）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
+
+| 静态桥（Ghidra） | `analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview` `list_sections` `list_symbols` `list_functions` `list_strings` `decompile_function` `get_static_disassembly` `get_xrefs` `get_call_graph` `search_decompiled_code` `annotate_code` `remove_code_annotation`（按 SHA-256 建分析缓存；运行期停机点可回映射到静态函数/行号） |
+
 
 ## 实验性功能
 
@@ -205,6 +208,9 @@ shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动�
   只接受信号不变的删除（防漂移）；`kind="crash_check"` 单发判定。
 - **libc 识别 / ROP 搜索**：`identify_libc`（libc.rip 兼容 API，`GDB_MCP_LIBC_RIP_API`
   可配）与 `search_gadgets`（ROPgadget CLI + 正则过滤，地址规范化）。
+- **内核 VM**：`kernel_launch`（QEMU + gdbstub，`-S` 冻结启动，插件加载的 gdb 直接
+  attach）与 `kernel_snapshot`（savevm/loadvm——内核 pwn 的秒级回退原语）。需启动
+  后端内有 QEMU。
 
 ## 战役状态与委托执行
 
@@ -258,8 +264,23 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 ## 测试
 
 ```bash
-python -m pytest tests/                 # 单元测试（Windows 直接跑，无需 gdb）
-bash tests/integration/run_wsl_integration.sh   # WSL2 内真实 gdb 端到端
+# 单元测试（无需 gdb）
+python -m pytest tests/ -q                        # 632 项，约 9 秒
+
+# 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
+wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议
+python tests/integration/run_mcp_tools_e2e.py --distro kali-linux
+                                                  # 逐个工具端到端走查
+wsl bash tests/integration/run_io_smoke.sh        # inferior stdio（pty）
+bash tests/integration/run_tls_smoke.sh           # HTTP / TLS / mTLS / bearer
+python tests/integration/run_observer_smoke.py    # 观察者角色 + 实时 HTTP
+
+# 验收基准（576 个版本化任务，总纲见 bench/SPEC.md）
+python -m bench.framework.cli selfcheck --distro kali-linux  # 参考解 + 评分
+python -m bench.framework.cli stress --distro kali-linux     # 调用量 + 会话翻涌
+python -m bench.framework.cli faults --distro kali-linux     # 故障注入与恢复
+python -m bench.framework.cli perf --distro kali-linux       # 开销 / 启动 / 并发
+python -m bench.framework.cli pwndbg --distro kali-linux     # pwndbg 兼容探针
 ```
 
 集成测试覆盖：握手 → 断点 → SIGSEGV 崩溃定位 → 寄存器/回溯/反汇编/内存读写 → 表达式求值 → interrupt 中断死循环 → 优雅退出。

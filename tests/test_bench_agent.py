@@ -193,7 +193,7 @@ async def test_loop_truncates_oversized_observations():
             {"tool_calls": [{"id": "c2", "name": SUBMIT_TOOL, "arguments": {}}]},
         ]
     )
-    record = await run_agent_loop(driver, provider, _task(), max_tool_chars=1000)
+    await run_agent_loop(driver, provider, _task(), max_tool_chars=1000)
     tool_msgs = [m for m in provider.requests[1]["messages"] if m["role"] == "tool"]
     assert len(tool_msgs[0]["content"]) <= 1000 + len("…<truncated>")
 

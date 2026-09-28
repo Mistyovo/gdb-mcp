@@ -9,7 +9,7 @@ symbol offset), so a wrong or guessed base cannot pass. Requires -pie builds.
 from __future__ import annotations
 
 from ..schema import BuildSpec, Check
-from .common import make_task, program_path, rng_for, settle
+from .common import make_task, program_path, rng_for, settle, STOP_STATES
 
 FAMILY = "pie"
 
@@ -64,7 +64,7 @@ async def reference_solve(driver, task) -> str:
     ))["session_id"]
     await driver.call("set_breakpoint", {"location": "main", "session_id": sid})
     await driver.call("execute_command", {"command": "run", "session_id": sid})
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, STOP_STATES)
     # observe where the loader actually put the binary, then report it the
     # same way an agent would: anchor runtime address minus its file offset
     anchor_addr = (await driver.call(

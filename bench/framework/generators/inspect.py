@@ -192,7 +192,8 @@ async def derive_truth(driver, session_id: str, task) -> dict:
         regs = await driver.call(
             "read_registers", {"names": ["rdi"], "session_id": session_id}
         )
-        token = parse_int((regs.get("regs") or {}).get("rdi"))
+        token_raw = (regs.get("regs") or {}).get("rdi")
+        token = parse_int(token_raw)
         if token is None:
             raise VerifyError("rdi unreadable: %r" % (token_raw,))
         truth: dict = {"token": token & 0xFFFFFFFF}

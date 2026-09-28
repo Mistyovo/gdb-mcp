@@ -7,7 +7,9 @@ import pytest
 
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.context import ServerContext
 from gdb_mcp.server import build_app
+from gdb_mcp.tools import registered_tools
 from gdb_mcp.sessions import EXITED, RUNNING, SessionRegistry
 from gdb_mcp.tools import CORE_TOOLS
 
@@ -16,7 +18,7 @@ from test_sessions import FakeWriter, hello
 
 class FakeRequestContext:
     def __init__(self, registry, config):
-        self.lifespan_context = {"registry": registry, "config": config}
+        self.lifespan_context = ServerContext(config=config, registry=registry)
 
 
 class FakeContext:
@@ -35,10 +37,7 @@ def env(tmp_path):
     ids = iter("s-%03d" % i for i in range(100))
     registry = SessionRegistry(cfg, session_id_factory=lambda: next(ids))
     app = build_app(cfg, registry)
-    tools = {
-        name: app._tool_manager._tools[name]
-        for name in app._tool_manager._tools
-    }
+    tools = registered_tools(app)
     return registry, cfg, tools
 
 
@@ -92,7 +91,7 @@ class TestSessionTools:
         registry, _, _ = env
         add_gdb_session(registry)
         script = registry.reserve("s-script", kind="script", log_file="x.log")
-        script.state = RUNNING
+        script.set_state(RUNNING)
         result = await run_tool(env[2]["list_sessions"], {}, ctx_for(env))
         assert len(result["sessions"]) == 2
         gdb_info = [s for s in result["sessions"] if s["kind"] == "gdb"][0]
@@ -128,7 +127,7 @@ class TestSessionTools:
         log = tmp_path / "out.log"
         log.write_text("line1\nline2\nline3\n")
         s = registry.reserve("s-script", kind="script", log_file=str(log))
-        s.state = RUNNING
+        s.set_state(RUNNING)
         result = await run_tool(
             env[2]["get_process_output"],
             {"tail_lines": 2, "session_id": "s-script"},
@@ -173,12 +172,12 @@ class TestLaunchTools:
             script = registry.reserve(
                 "s-pure", kind="script", log_file=str(log)
             )
-            script.state = EXITED
+            script.set_state(EXITED)
             script.proc_returncode = 0
             return script, None
 
         monkeypatch.setattr(
-            "gdb_mcp.tools.launch_tools.Launcher.launch_script", fake_launch_script
+            "gdb_mcp.launcher.Launcher.launch_script", fake_launch_script
         )
         result = await run_tool(
             tools["launch_script"],
@@ -205,7 +204,7 @@ class TestLaunchTools:
             pkill_calls.append((session_id, force, distro))
 
         monkeypatch.setattr(
-            "gdb_mcp.tools.launch_tools.Launcher.pkill_marker", fake_pkill
+            "gdb_mcp.launcher.Launcher.pkill_marker", fake_pkill
         )
         task = asyncio.create_task(
             run_tool(
@@ -319,7 +318,7 @@ class TestExecTools:
     async def test_continue_rejected_while_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
                 tools["continue_execution"],
@@ -367,7 +366,7 @@ class TestExecTools:
     async def test_interrupt_while_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         task = asyncio.create_task(
             run_tool(
                 tools["interrupt"], {"session_id": s.session_id}, ctx_for(env)
@@ -390,7 +389,7 @@ class TestExecTools:
     async def test_wait_for_stop_wakes_on_notification(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         task = asyncio.create_task(
             run_tool(
                 tools["wait_for_stop"],
@@ -485,7 +484,7 @@ class TestStateTools:
     async def test_state_tools_rejected_while_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
                 tools["get_backtrace"], {"session_id": s.session_id}, ctx_for(env)
@@ -626,7 +625,7 @@ class TestCrashReport:
     async def test_rejected_while_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
                 tools["crash_report"], {"session_id": s.session_id}, ctx_for(env)
@@ -1026,10 +1025,49 @@ class TestResultStore:
 
 
 class TestToolProfile:
+    #: the contract behind GDB_MCP_TOOL_PROFILE=core, spelled out here so a
+    #: dropped @tool(core=True) declaration cannot silently shrink it
+    EXPECTED_CORE = {
+        "list_sessions",
+        "launch_gdb",
+        "launch_script",
+        "execute_command",
+        "continue_execution",
+        "wait_for_stop",
+        "interrupt",
+        "crash_report",
+        "read_memory",
+        "evaluate",
+        "set_breakpoint",
+        "get_events",
+    }
+
+    def test_core_set_matches_contract(self):
+        assert set(CORE_TOOLS) == self.EXPECTED_CORE
+
+    def test_every_handler_is_declared(self):
+        """A tool function that lost its @tool() decorator would vanish
+        from the MCP surface silently; catch that here."""
+        import importlib
+        import inspect
+
+        from gdb_mcp.tools import _TOOL_MODULES
+        from gdb_mcp.tools.registry import SPECS
+
+        declared = {spec.fn for spec in SPECS}
+        for name in _TOOL_MODULES:
+            module = importlib.import_module("gdb_mcp.tools.%s" % name)
+            for _, fn in inspect.getmembers(module, inspect.isfunction):
+                if fn.__module__ != module.__name__:
+                    continue
+                params = inspect.signature(fn).parameters
+                if "ctx" in params and "self" not in params:
+                    assert fn in declared, "%s.%s is not declared" % (name, fn.__name__)
+
     def test_core_profile_registers_subset(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l", tool_profile="core")
         app = build_app(cfg, SessionRegistry(cfg))
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert names == CORE_TOOLS
         assert "write_memory" not in names
         assert "execute_command" in names
@@ -1037,7 +1075,7 @@ class TestToolProfile:
     def test_full_profile_registers_everything(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l")
         app = build_app(cfg, SessionRegistry(cfg))
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert "write_memory" in names
         assert "kill_session" in names
         assert len(names) > len(CORE_TOOLS)
@@ -1355,7 +1393,7 @@ class TestUnsafeGate:
     def test_readonly_drops_write_tools(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l", readonly=True)
         app = build_app(cfg, SessionRegistry(cfg))
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert "write_memory" not in names
         assert "write_register" not in names
         assert "read_memory" in names
@@ -1473,7 +1511,7 @@ class TestRunPolicyTool:
     async def test_rejected_while_running(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
-        s.state = RUNNING
+        s.set_state(RUNNING)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
                 tools["run_policy"],
@@ -1540,12 +1578,9 @@ class TestCampaignTool:
 
     @pytest.mark.asyncio
     async def test_campaign_resource(self, tmp_path):
-        from gdb_mcp.server import build_app as _build
-        from gdb_mcp.sessions import SessionRegistry as _Reg
-
         cfg = Config(log_dir=tmp_path / "l")
-        registry = _Reg(cfg)
-        app = _build(cfg, registry)
+        registry = SessionRegistry(cfg)
+        app = build_app(cfg, registry)
         s = registry.register_hello(hello(), FakeWriter())
         contents = await app.read_resource("gdb://campaign/%s" % s.session_id)
         assert "campaign" in str(contents)
@@ -1642,7 +1677,7 @@ class TestExperimentalGating:
 
     def test_hidden_by_default(self, tmp_path):
         _, _, app = self._app_with(False, tmp_path)
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert "send_to_inferior" not in names
         assert "read_inferior_output" not in names
         assert "io_setup" not in names
@@ -1650,7 +1685,7 @@ class TestExperimentalGating:
 
     def test_registered_when_enabled(self, tmp_path):
         _, registry, app = self._app_with(True, tmp_path)
-        names = set(app._tool_manager._tools)
+        names = set(registered_tools(app))
         assert {
             "send_to_inferior",
             "read_inferior_output",
@@ -1663,7 +1698,7 @@ class TestExperimentalGating:
         cfg = Config(log_dir=tmp_path / "l", experimental=True)
         registry = SessionRegistry(cfg)
         app = build_app(cfg, registry)
-        tools = {n: app._tool_manager._tools[n] for n in app._tool_manager._tools}
+        tools = registered_tools(app)
         s = add_gdb_session(registry)
         task = asyncio.create_task(
             run_tool(
@@ -1682,7 +1717,7 @@ class TestExperimentalGating:
         cfg = Config(log_dir=tmp_path / "l", experimental=True)
         registry = SessionRegistry(cfg)
         app = build_app(cfg, registry)
-        tools = {n: app._tool_manager._tools[n] for n in app._tool_manager._tools}
+        tools = registered_tools(app)
         add_gdb_session(registry)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
@@ -1705,10 +1740,7 @@ class TestObserverGuard:
         )
         registry = SessionRegistry(cfg)
         app = build_app(cfg, registry)
-        tools = {
-            name: app._tool_manager._tools[name]
-            for name in app._tool_manager._tools
-        }
+        tools = registered_tools(app)
         return cfg, registry, tools, CURRENT_ROLE
 
     @pytest.mark.asyncio

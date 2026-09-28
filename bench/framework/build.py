@@ -52,7 +52,7 @@ def win_to_wsl(path: Path) -> str:
 
     if os.name != "nt" or str(path).startswith("/"):
         return str(path)
-    from gdb_mcp.launcher import win_to_wsl as convert
+    from gdb_mcp.wsl import win_to_wsl as convert
 
     return convert(str(path))
 

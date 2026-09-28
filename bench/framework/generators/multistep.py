@@ -10,7 +10,7 @@ Keys exist only at runtime — the answer values are not in this manifest.
 from __future__ import annotations
 
 from ..schema import Check
-from .common import opt_level, flags_for, make_task, program_path, rng_for, settle
+from .common import opt_level, flags_for, make_task, program_path, rng_for, settle, STOP_STATES
 
 FAMILY = "multistep"
 
@@ -78,7 +78,7 @@ async def reference_solve(driver, task) -> str:
     await driver.call("set_breakpoint", {"location": "gate", "session_id": sid})
     # `run` stops at the gate(0) hit; later stages resume explicitly
     await driver.call("execute_command", {"command": "run", "session_id": sid})
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, STOP_STATES)
     base2 = int((await driver.call(
         "evaluate", {"expression": "&answers", "session_id": sid}
     ))["address"], 16)
@@ -88,7 +88,7 @@ async def reference_solve(driver, task) -> str:
                 "continue_execution",
                 {"wait": True, "timeout_ms": 10000, "session_id": sid},
             )
-            await settle(driver, sid, {"stopped"})
+            await settle(driver, sid, STOP_STATES)
         base = int((await driver.call(
             "evaluate", {"expression": "&keys", "session_id": sid}
         ))["address"], 16)

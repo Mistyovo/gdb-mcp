@@ -77,6 +77,40 @@ async def test_hello_binds_to_reserved_session(listener):
 
 
 @pytest.mark.asyncio
+async def test_launched_session_hello_is_not_flagged_without_a_token(listener, caplog):
+    """A tokenless server's reserved sessions legitimately have token=None;
+    'unknown session' must mean unknown, or the warning stops being worth
+    reading."""
+    _, registry, port = listener
+    registry.reserve("s-quiet")
+    hello = json.loads(HELLO)
+    hello["session_id"] = "s-quiet"
+    with caplog.at_level("WARNING", logger="gdb_mcp.listener"):
+        reader, writer = await _connect(
+            port, json.dumps(hello, separators=(",", ":")).encode() + b"\n"
+        )
+        await asyncio.wait_for(reader.readline(), 5)
+    writer.close()
+    assert "unknown session" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_hello_with_unknown_session_id_is_flagged(listener, caplog):
+    registry = listener[1]
+    hello = json.loads(HELLO)
+    hello["session_id"] = "s-never-reserved"
+    with caplog.at_level("WARNING", logger="gdb_mcp.listener"):
+        reader, writer = await _connect(
+            port := listener[2], json.dumps(hello, separators=(",", ":")).encode() + b"\n"
+        )
+        ack = json.loads(await asyncio.wait_for(reader.readline(), 5))
+    writer.close()
+    assert ack["session_id"] != "s-never-reserved"  # never allowed to bind
+    assert "s-never-reserved" in caplog.text
+    assert "s-never-reserved" not in registry._sessions
+
+
+@pytest.mark.asyncio
 async def test_notification_and_response_dispatch(listener):
     _, registry, port = listener
     reader, writer = await _connect(port, HELLO)
@@ -214,7 +248,7 @@ async def test_scoped_session_token_handshake(listener):
     from gdb_mcp.sessions import derive_session_token
 
     scoped = derive_session_token("master-secret", "s-scoped")
-    session.token = scoped
+    assert session.token == scoped  # reserve() paired it
 
     # master token for a scoped session: refused
     bad = encode(

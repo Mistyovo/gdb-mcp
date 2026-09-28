@@ -110,8 +110,9 @@ class TestRegisterHello:
         reg = SessionRegistry(
             Config(token="master-secret"), session_id_factory=lambda: "s-tok"
         )
+        # reserve() derives the launched session's credential itself
         reserved = reg.reserve("s-tok")
-        reserved.token = derive_session_token("master-secret", "s-tok")
+        assert reserved.token == derive_session_token("master-secret", "s-tok")
         s = reg.register_hello(hello(session_id="s-tok"), FakeWriter())
         assert s is reserved
         assert s.token == derive_session_token("master-secret", "s-tok")
@@ -158,7 +159,7 @@ class TestResolve:
     @pytest.mark.asyncio
     async def test_kind_filter_excludes_scripts(self, registry):
         script = registry.reserve("s-script", kind="script")
-        script.state = RUNNING
+        script.set_state(RUNNING)
         with pytest.raises(NoSessionsError):
             registry.resolve(kind="gdb")
         assert registry.resolve(kind="script") is script
@@ -232,7 +233,7 @@ class TestRequest:
     @pytest.mark.asyncio
     async def test_async_error_restores_previous_state(self, registry):
         s = registry.register_hello(hello(), FakeWriter())
-        s.state = READY
+        s.set_state(READY)
         task = asyncio.create_task(s.request("continue", {}, timeout=5))
         await asyncio.sleep(0)
         await s.complete_response(
@@ -307,7 +308,7 @@ class TestWaitForStop:
     @pytest.mark.asyncio
     async def test_wakes_on_stop_notification(self, registry):
         s = registry.register_hello(hello(), FakeWriter())
-        s.state = RUNNING
+        s.set_state(RUNNING)
         wait_task = asyncio.create_task(s.wait_for_stop(timeout=5))
         await asyncio.sleep(0)
         await s.push_notification("stop", {"signal": "SIGTRAP"})
@@ -323,13 +324,13 @@ class TestWaitForStop:
     @pytest.mark.asyncio
     async def test_timeout(self, registry):
         s = registry.register_hello(hello(), FakeWriter())
-        s.state = RUNNING
+        s.set_state(RUNNING)
         assert await s.wait_for_stop(timeout=0.05) is False
 
     @pytest.mark.asyncio
     async def test_disconnect_wakes_with_false(self, registry):
         s = registry.register_hello(hello(), FakeWriter())
-        s.state = RUNNING
+        s.set_state(RUNNING)
         wait_task = asyncio.create_task(s.wait_for_stop(timeout=5))
         await asyncio.sleep(0)
         await s.on_disconnect()
@@ -367,7 +368,7 @@ class TestGC:
             returncode = 0
 
         s = registry.reserve("s-script", kind="script")
-        s.state = RUNNING
+        s.set_state(RUNNING)
         s.proc = DeadProc()
         s.last_seen = time.monotonic() - 10_000
         assert await registry.gc_once() == 1
@@ -380,7 +381,7 @@ class TestGC:
             returncode = None
 
         s = registry.reserve("s-script", kind="script")
-        s.state = RUNNING
+        s.set_state(RUNNING)
         s.proc = LiveProc()
         s.last_seen = time.monotonic() - 10_000
         assert await registry.gc_once() == 0

@@ -9,7 +9,7 @@ runtime and store it into ``result``. Wrong arithmetic cannot pass.
 from __future__ import annotations
 
 from ..schema import BuildSpec, Check
-from .common import make_task, program_path, rng_for, settle
+from .common import make_task, program_path, rng_for, settle, STOP_STATES
 
 FAMILY = "optimize"
 
@@ -72,7 +72,7 @@ async def reference_solve(driver, task) -> str:
     ))["session_id"]
     await driver.call("set_breakpoint", {"location": "compute", "session_id": sid})
     await driver.call("execute_command", {"command": "run", "session_id": sid})
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, STOP_STATES)
     await driver.call(
         "continue_execution",
         {"mode": "finish", "wait": True, "timeout_ms": 10000, "session_id": sid},

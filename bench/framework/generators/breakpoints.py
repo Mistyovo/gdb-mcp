@@ -18,7 +18,7 @@ reference solve polls to a settled state.
 from __future__ import annotations
 
 from ..schema import Check
-from .common import opt_level, flags_for, make_task, program_path, rng_for, settle
+from .common import opt_level, flags_for, make_task, program_path, rng_for, settle, STOP_STATES
 
 FAMILY = "breakpoints"
 
@@ -145,5 +145,5 @@ async def reference_solve(driver, task) -> str:
         )
     # `run` returns as soon as the inferior is on its way; stops are async
     await driver.call("execute_command", {"command": "run", "session_id": sid})
-    await settle(driver, sid, {"stopped"})
+    await settle(driver, sid, STOP_STATES)
     return sid

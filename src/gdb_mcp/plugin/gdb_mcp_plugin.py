@@ -327,6 +327,32 @@ def _ascii_repr(data):
     return "".join(chr(b) if 32 <= b < 127 else "." for b in data)
 
 
+def _memory_segment(addr, data):
+    """One readable memory run in the shape read_mem reports."""
+    return {
+        "addr": addr,
+        "length": len(data),
+        "hex": data.hex(),
+        "ascii": _ascii_repr(data),
+    }
+
+
+def _warn(msg):
+    """Surface a plugin problem on gdb's console.
+
+    Used where the failure would otherwise be invisible: the control
+    channel may not be up, so the wire cannot carry it either.
+    """
+    _dbg(msg)
+    try:
+        gdb.write("[gdb-mcp] %s\n" % msg, gdb.ERROR)
+    except Exception:
+        try:
+            print("[gdb-mcp] %s" % msg, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
 def _hex_to_bytes(hexstr):
     h = str(hexstr).strip()
     if h.lower().startswith("0x"):
@@ -524,6 +550,7 @@ class Plugin(object):
         self.out_q = queue.Queue()
         self.sock = None
         self.posted = False
+        self._pump_lock = threading.Lock()
         self.shutdown_evt = threading.Event()
         self._shutdown_done = False
         self._event_handlers = []
@@ -539,7 +566,9 @@ class Plugin(object):
         self._io_seq = 0
         self._io_dropped = 0
         self._io_thread = None
-        self.server_capabilities = set()
+        #: the pty reader thread stamps sequence numbers and appends as one
+        #: unit; without this a chunk could be recorded out of order
+        self._io_lock = threading.Lock()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -639,6 +668,11 @@ class Plugin(object):
                         hosts.append(parts[1])
         except OSError:
             pass
+        # Docker Desktop puts its containers behind a VM NAT: the bridge
+        # gateway above is the VM, not the machine running gdb-mcp, so the
+        # documented alias for reaching the host goes last (an unresolvable
+        # name is just another skipped candidate).
+        hosts.append("host.docker.internal")
         seen = set()
         out = []
         for h in hosts:
@@ -802,7 +836,8 @@ class Plugin(object):
                 self.request_reconnect()
                 return
             self.session_id = msg.get("session_id") or self.session_id
-            self.server_capabilities = set(msg.get("capabilities") or [])
+            # hello_ack also advertises server capabilities; the plugin has
+            # no behavior that depends on them, so nothing records them
             heartbeat = msg.get("heartbeat_sec")
             if isinstance(heartbeat, (int, float)) and heartbeat > 0:
                 try:
@@ -894,13 +929,19 @@ class Plugin(object):
     # -- main-thread dispatch ------------------------------------------------
 
     def _post_pump(self):
-        if not self.posted:
-            self.posted = True
-            gdb.post_event(self._pump)
+        # `posted` is read by this (main) thread and cleared in _pump; the
+        # reader thread only ever queues onto in_q, so a lost duplicate post
+        # would mean at most one extra empty pump - the lock keeps the
+        # bookkeeping honest without costing a syscall per request.
+        with self._pump_lock:
+            if not self.posted:
+                self.posted = True
+                gdb.post_event(self._pump)
 
     def _pump(self):
         """Runs on gdb's main thread; executes queued requests."""
-        self.posted = False
+        with self._pump_lock:
+            self.posted = False
         try:
             n = 0
             while n < PUMP_BATCH:
@@ -1045,7 +1086,56 @@ class Plugin(object):
 
     # -- resume verbs ---------------------------------------------------------
 
+    def _resume(self, cmd):
+        """Resume the inferior on the main thread and return once it stops
+        again.
+
+        This is the one resume primitive. ``gdb.execute("continue")`` blocks
+        the main thread until the next stop (running gdb's event loop in the
+        meantime, which is how ``stop_info`` gets refreshed), so a policy can
+        drive rounds by calling this directly instead of faking a wire
+        request. Callers must have checked the stopped/inferior preconditions.
+        """
+        self.state = "running"
+        try:
+            self._exec(cmd, to_string=False)
+        except gdb.error as exc:
+            self.state = "stopped"
+            self._notify("prompt", {"note": "resume failed: %s" % exc})
+            raise PluginError("PLUGIN_ERROR", "resume failed: %s" % exc) from exc
+
+    def _drop_breakpoint(self, number):
+        """Delete a policy breakpoint. A temporary breakpoint that was hit
+        has already consumed itself, and that is not an error."""
+        try:
+            self._handle_bp_delete({"number": number})
+        except PluginError:
+            pass
+
+    def _policy_resume(self):
+        """Resume the inferior for a plugin-side policy round.
+
+        The preconditions of the wire ``continue`` verb, but a violation is
+        raised to the waiting policy instead of being answered on a request
+        id that does not exist.
+        """
+        self._guard_stopped()
+        self._require_inferior()
+        self._resume("continue")
+
+    def _resume_command(self, verb, params):
+        """The gdb CLI command for a resume verb, or None if it is not one."""
+        cmd = _CONTINUE_CMDS.get(verb)
+        if cmd is None and verb == "until":
+            until_addr = params.get("until_addr")
+            cmd = "until *0x%x" % self._resolve_addr(until_addr) if until_addr else "until"
+        return cmd
+
     def _handle_continue_family(self, req_id, verb, params):
+        cmd = self._resume_command(verb, params)
+        if cmd is None:  # pragma: no cover - dispatch only routes resume verbs
+            self._send_error(req_id, "UNKNOWN_VERB", "unknown verb %r" % verb)
+            return
         if self.state == "running":
             self._send_error(
                 req_id, "INFERIOR_RUNNING", "inferior is already running"
@@ -1058,25 +1148,13 @@ class Plugin(object):
         if inf is None:
             self._send_error(req_id, "NO_INFERIOR", "no inferior loaded")
             return
-        cmd = _CONTINUE_CMDS.get(verb)
-        if cmd is None and verb == "until":
-            until_addr = params.get("until_addr")
-            if until_addr:
-                cmd = "until *0x%x" % self._resolve_addr(until_addr)
-            else:
-                cmd = "until"
-        if cmd is None:  # pragma: no cover
-            self._send_error(req_id, "UNKNOWN_VERB", "unknown verb %r" % verb)
-            return
         # reply before executing: the response must reach the server even
         # though the inferior will now run for an unbounded time
         self._send_response(req_id, True, result={"state": "running"})
-        self.state = "running"
         try:
-            self._exec(cmd, to_string=False)
-        except gdb.error as exc:
-            self.state = "stopped"
-            self._notify("prompt", {"note": "resume failed: %s" % exc})
+            self._resume(cmd)
+        except PluginError:
+            pass  # already reported through the prompt notification
 
     # -- sync verb handlers ---------------------------------------------------
 
@@ -1100,19 +1178,10 @@ class Plugin(object):
         inf = self._require_inferior()
         try:
             data = bytes(inf.read_memory(addr, length))
+            segment = _memory_segment(addr, data)
             return {
-                "addr": addr,
-                "length": length,
-                "hex": data.hex(),
-                "ascii": _ascii_repr(data),
-                "segments": [
-                    {
-                        "addr": addr,
-                        "length": len(data),
-                        "hex": data.hex(),
-                        "ascii": _ascii_repr(data),
-                    }
-                ],
+                **segment,
+                "segments": [segment],
                 "unreadable": [],
                 "partial": False,
             }
@@ -1126,17 +1195,8 @@ class Plugin(object):
         current_data = bytearray()
 
         def flush_segment():
-            if current_addr is None:
-                return
-            data = bytes(current_data)
-            segments.append(
-                {
-                    "addr": current_addr,
-                    "length": len(data),
-                    "hex": data.hex(),
-                    "ascii": _ascii_repr(data),
-                }
-            )
+            if current_addr is not None:
+                segments.append(_memory_segment(current_addr, bytes(current_data)))
 
         while off < length:
             size = min(CHUNK_PROBE, length - off)
@@ -1860,10 +1920,12 @@ class Plugin(object):
     # -- experimental: inferior stdio over a pty -----------------------------
 
     def _io_sink(self, data: bytes) -> None:
-        if len(self._io_buf) == self._io_buf.maxlen:
-            self._io_dropped += 1
-        self._io_seq += 1
-        self._io_buf.append((self._io_seq, data))
+        # runs on the pty reader thread, not gdb's main thread
+        with self._io_lock:
+            if len(self._io_buf) == self._io_buf.maxlen:
+                self._io_dropped += 1
+            self._io_seq += 1
+            self._io_buf.append((self._io_seq, data))
 
     def _handle_io_setup(self, params):
         if self._io is not None:
@@ -1874,9 +1936,10 @@ class Plugin(object):
             )
         channel = _make_io_channel()
         self._io = channel
-        self._io_buf.clear()
-        self._io_seq = 0
-        self._io_dropped = 0
+        with self._io_lock:
+            self._io_buf.clear()
+            self._io_seq = 0
+            self._io_dropped = 0
         self._io_thread = channel.start(self._io_sink)
         # applies to the inferior's NEXT run/start (documented behavior
         # of gdb's inferior-tty)
@@ -1901,7 +1964,10 @@ class Plugin(object):
         if self._io is None:
             raise PluginError("BAD_PARAMS", "io not set up; io_setup first")
         since = _bounded_int(params.get("since_seq"), 0, 0, 1 << 62)
-        snapshot = list(self._io_buf)
+        with self._io_lock:
+            snapshot = list(self._io_buf)
+            last_seq = self._io_seq
+            dropped = self._io_dropped
         chunks = []
         for seq, data in snapshot:
             if seq <= since:
@@ -1920,17 +1986,18 @@ class Plugin(object):
             # older chunks evicted by the buffer cap (page back with
             # since_seq for anything still buffered but beyond the
             # per-read chunk limit)
-            "dropped_overflow": self._io_dropped,
-            "last_seq": self._io_seq,
+            "dropped_overflow": dropped,
+            "last_seq": last_seq,
         }
 
     def _handle_io_teardown(self, params):
         if self._io is None:
             raise PluginError("BAD_PARAMS", "io not set up")
-        total = self._io_seq
         self._io.close()
         self._io = None
-        self._io_buf.clear()
+        with self._io_lock:
+            total = self._io_seq
+            self._io_buf.clear()
         return {"torn_down": True, "total_chunks_seen": total}
 
     def _fuzz_round(self, sid, buffer_addr, payload, stop_location):
@@ -1945,21 +2012,15 @@ class Plugin(object):
             {"location": stop_location, "temporary": True}
         )
         try:
-            self._handle_continue_family(0, "continue", {})
+            self._policy_resume()
         except PluginError as exc:
             # a failed resume poisons the round; report it instead of
             # spinning on a bad state
-            try:
-                self._handle_bp_delete({"number": marker["number"]})
-            except PluginError:
-                pass
+            self._drop_breakpoint(marker["number"])
             return {"survived": False, "stop": None, "error": exc.message}
         stop = self.stop_info or {}
         survived = marker["number"] in (stop.get("breakpoints") or [])
-        try:
-            self._handle_bp_delete({"number": marker["number"]})
-        except PluginError:
-            pass  # temporary breakpoint already consumed itself
+        self._drop_breakpoint(marker["number"])
         return {"survived": survived, "stop": stop, "error": None}
 
     def _policy_crash_check(self, params):
@@ -2095,22 +2156,16 @@ class Plugin(object):
                 {"location": stop_location, "temporary": True}
             )
             try:
-                self._handle_continue_family(0, "continue", {})
+                self._policy_resume()
             except PluginError as exc:
                 stop_reason = "error:%s" % exc.code
-                try:
-                    self._handle_bp_delete({"number": marker["number"]})
-                except PluginError:
-                    pass
+                self._drop_breakpoint(marker["number"])
                 break
             stop = self.stop_info or {}
             stopped_at = set(stop.get("breakpoints") or [])
             if marker["number"] in stopped_at:
                 passes += 1
-                try:
-                    self._handle_bp_delete({"number": marker["number"]})
-                except PluginError:
-                    pass  # temporary breakpoint consumed itself
+                self._drop_breakpoint(marker["number"])
                 if total[0] >= max_hits:
                     stop_reason = "max_hits"
                     break
@@ -2120,10 +2175,7 @@ class Plugin(object):
                 continue
             # stopped away from the marker: probe budget or crash/exit
             final_stop = stop
-            try:
-                self._handle_bp_delete({"number": marker["number"]})
-            except PluginError:
-                pass
+            self._drop_breakpoint(marker["number"])
             stop_reason = (
                 "max_hits" if stopped_at & probe_numbers else "inferior_stop"
             )
@@ -2155,15 +2207,18 @@ class Plugin(object):
         ev = gdb.events
         pairs = []
 
+        missing = []
+
         def connect(attr, handler):
             registry = getattr(ev, attr, None)
             if registry is None:
+                missing.append(attr)
                 return
             try:
                 registry.connect(handler)
                 pairs.append((registry, handler))
-            except Exception:
-                pass
+            except Exception as exc:
+                missing.append("%s (%s)" % (attr, exc))
 
         connect("stop", self._on_stop)
         connect("cont", self._on_cont)
@@ -2171,6 +2226,10 @@ class Plugin(object):
         connect("before_prompt", self._on_before_prompt)
         connect("gdb_exiting", self._on_gdb_exiting)
         self._event_handlers = pairs
+        # without these the server waits forever for stop/exit
+        # notifications and nothing in the protocol says why
+        if missing:
+            _warn("gdb events not connected: %s" % ", ".join(missing))
 
     def _disconnect_events(self):
         for registry, handler in self._event_handlers:

@@ -130,6 +130,17 @@ class Config:
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
 
+    def __post_init__(self) -> None:
+        """Path-typed fields accept strings, as their annotation promises.
+
+        Without this, ``Config(log_dir="/tmp/x")`` survives construction and
+        fails later inside ``ensure_dirs()`` -- far from the mistake.
+        """
+        for name in ("log_dir", "analysis_dir", "archive_dir"):
+            value = getattr(self, name)
+            if isinstance(value, str):
+                setattr(self, name, Path(value))
+
     def ensure_dirs(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 

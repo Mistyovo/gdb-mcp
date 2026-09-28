@@ -16,7 +16,6 @@ import asyncio
 import logging
 import re
 import subprocess
-import time
 from pathlib import Path
 
 from gdb_mcp.config import Config
@@ -28,13 +27,12 @@ from gdb_mcp.sessions import (
     RUNNING,
     Session,
     SessionRegistry,
-    derive_session_token,
+    first_to_settle,
+    plugin_token_for,
 )
+from gdb_mcp.wsl import WslError, list_distros, win_to_wsl
 
 log = logging.getLogger("gdb_mcp.launcher")
-
-#: distros that are not interactive targets
-_NON_INTERACTIVE_PREFIXES = ("docker-desktop",)
 
 _PLUGIN_WIN_PATH = (
     Path(__file__).resolve().parent / "plugin" / "gdb_mcp_plugin.py"
@@ -45,44 +43,46 @@ _MARKER_PREFIX = "gdbmcp_"
 #: where the mounted plugin lives inside docker launcher containers
 DOCKER_PLUGIN_PATH = "/opt/gdb-mcp/gdb_mcp_plugin.py"
 
+#: the plugin's own configuration: a caller-supplied env must never be able
+#: to redirect a launched gdb to another session/port or lift a limit
+_RESERVED_PLUGIN_ENV = frozenset(
+    {
+        "GDB_MCP_SESSION_ID",
+        "GDB_MCP_PORT",
+        "GDB_MCP_TOKEN",
+        "GDB_MCP_SESSION_TOKEN",
+        "GDB_MCP_EVAL_OUTPUT_LIMIT",
+        "GDB_MCP_MAX_MEM_READ",
+        "GDB_MCP_MAX_ASYNC_LINE",
+        "GDB_MCP_ALLOW_UNSAFE",
+    }
+)
+
 
 # --- pure helpers (unit-testable) ------------------------------------------
 
 
-def win_to_wsl(path: str) -> str:
-    """Convert a Windows path to its WSL ``/mnt/...`` form.
-
-    ``C:\\Users\\x\\y`` -> ``/mnt/c/Users/x/y``. Paths that already look
-    like absolute WSL paths (starting with ``/``) pass through unchanged.
-    UNC paths and relative paths raise :class:`ValueError`.
-    """
-    p = str(path).strip()
-    if p.startswith("/"):
-        return p  # already a WSL path
-    m = re.match(r"^([a-zA-Z]):[\\/](.*)$", p)
-    if not m:
-        raise ValueError(
-            "not an absolute Windows path (use a drive path or a WSL path): %r" % path
-        )
-    drive = m.group(1).lower()
-    rest = m.group(2).replace("\\", "/")
-    return "/mnt/%s/%s" % (drive, rest)
-
-
-def parse_distro_list(raw: bytes) -> list[str]:
-    """Parse ``wsl.exe -l -q`` output (UTF-16-LE) into distro names,
-    dropping empties and non-interactive distros."""
-    text = raw.decode("utf-16-le", errors="ignore")
-    names = []
-    for line in text.splitlines():
-        name = line.replace("\x00", "").strip()
-        if not name:
-            continue
-        if name.startswith(_NON_INTERACTIVE_PREFIXES):
-            continue
-        if name not in names:
-            names.append(name)
-    return names
+def build_plugin_env(
+    config: Config, session_id: str, plugin_token: str | None, user_env: dict | None
+) -> dict:
+    """The environment a launched plugin connects with: the caller's vars
+    plus the reserved plugin ones (which always win)."""
+    env = {k: v for k, v in (user_env or {}).items() if k not in _RESERVED_PLUGIN_ENV}
+    env.update(
+        {
+            "GDB_MCP_SESSION_ID": session_id,
+            "GDB_MCP_PORT": str(config.port),
+            "GDB_MCP_EVAL_OUTPUT_LIMIT": str(config.eval_output_limit),
+            "GDB_MCP_MAX_MEM_READ": str(config.max_mem_read),
+            "GDB_MCP_MAX_ASYNC_LINE": str(config.max_async_line),
+        }
+    )
+    if plugin_token:
+        # E4: session-scoped token; the master never reaches the child
+        env["GDB_MCP_SESSION_TOKEN"] = plugin_token
+    if config.allow_unsafe:
+        env["GDB_MCP_ALLOW_UNSAFE"] = "1"
+    return env
 
 
 def bash_quote(s: str) -> str:
@@ -134,6 +134,19 @@ def build_pkill_command(session_id: str, force: bool) -> str:
         bash_quote(marker),
         bash_quote(marker),
     )
+
+
+def _launch_settled(session: Session) -> bool:
+    """A launch wait ends when the plugin registered or the process died."""
+    return session.state != RESERVED or session.proc_returncode is not None
+
+
+def _plugin_arrived(session: Session) -> bool:
+    return session.state != RESERVED
+
+
+def _is_exited(session: Session) -> bool:
+    return session.state == EXITED
 
 
 def build_gdb_argv(
@@ -227,42 +240,23 @@ class Launcher:
 
     # -- distro -------------------------------------------------------------
 
-    async def _list_distros(self) -> list[str]:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "wsl.exe",
-                "-l",
-                "-q",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            out, _ = await asyncio.wait_for(
-                proc.communicate(), self.config.launch_timeout_ms / 1000.0
-            )
-        except FileNotFoundError as exc:
-            raise LaunchError("wsl.exe was not found; install or enable WSL") from exc
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise LaunchError("wsl.exe -l -q timed out") from None
-        except OSError as exc:
-            raise LaunchError("failed to query WSL distros: %s" % exc) from exc
-        if proc.returncode:
-            raise LaunchError("wsl.exe -l -q failed with code %s" % proc.returncode)
-        return parse_distro_list(out or b"")
-
     async def distro(self, override: str | None = None) -> str:
+        """The WSL distro to run in: an explicit override, then the
+        configured one, then the first interactive distro WSL reports
+        (cached after the first query, which shells out to wsl.exe)."""
         if self.config.launcher != "wsl":
             raise LaunchError(
                 "the WSL distro only applies to the wsl launcher backend"
             )
-        if override:
-            return override
-        if self.config.wsl_distro:
-            return self.config.wsl_distro
+        configured = override or self.config.wsl_distro
+        if configured:
+            return configured
         if self._distro_cache:
             return self._distro_cache
-        names = await self._list_distros()
+        try:
+            names = await list_distros(self.config.launch_timeout_ms / 1000.0)
+        except WslError as exc:
+            raise LaunchError(str(exc)) from exc
         if not names:
             raise LaunchError(
                 "no WSL distro found (wsl.exe -l -q); install one or set "
@@ -289,7 +283,6 @@ class Launcher:
         kind: str,
         marker: bool,
         distro_override: str | None = None,
-        session_token: str | None = None,
     ) -> Session:
         launcher = self.config.launcher
         if launcher == "docker":
@@ -324,10 +317,6 @@ class Launcher:
         session.distro = (
             await self.distro(distro_override) if launcher == "wsl" else None
         )
-        if session_token:
-            # E4: launched gdb sessions verify against a token scoped to
-            # this session; the master never reaches the launched process
-            session.token = session_token
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fh = open(log_file, "w", encoding="utf-8", errors="replace")
@@ -357,7 +346,7 @@ class Launcher:
         session.proc_task = asyncio.create_task(self._watch_process(session))
         session.update_seen()
         if kind != "gdb":
-            session.state = RUNNING  # scripts never hello
+            session.set_state(RUNNING)  # scripts never hello
         log.info(
             "launched %s session %s via %s launcher (log: %s)",
             kind,
@@ -373,13 +362,7 @@ class Launcher:
             returncode = await session.proc.wait()
         except asyncio.CancelledError:
             return
-        session.proc_returncode = returncode
-        session.update_seen()
-        if session.kind == "script":
-            session.state = EXITED
-            session.exited_code = returncode
-            session.state_gen += 1
-            await session._wake_stop_waiters()
+        await session.note_process_exit(returncode)
 
     async def launch_gdb(
         self,
@@ -402,31 +385,12 @@ class Launcher:
             program_wsl = win_to_wsl(program)
         plugin = self.plugin_wsl_path()
         argv = build_gdb_argv(plugin, program_wsl, args, gdb_args, run)
-        env_vars = dict(env or {})
-        for reserved_name in (
-            "GDB_MCP_SESSION_ID",
-            "GDB_MCP_PORT",
-            "GDB_MCP_TOKEN",
-            "GDB_MCP_EVAL_OUTPUT_LIMIT",
-            "GDB_MCP_MAX_MEM_READ",
-            "GDB_MCP_MAX_ASYNC_LINE",
-            "GDB_MCP_ALLOW_UNSAFE",
-        ):
-            env_vars.pop(reserved_name, None)
-        env_vars.update({
-            "GDB_MCP_SESSION_ID": session_id,
-            "GDB_MCP_PORT": str(self.config.port),
-            "GDB_MCP_EVAL_OUTPUT_LIMIT": str(self.config.eval_output_limit),
-            "GDB_MCP_MAX_MEM_READ": str(self.config.max_mem_read),
-            "GDB_MCP_MAX_ASYNC_LINE": str(self.config.max_async_line),
-        })
-        if self.config.token:
-            # E4: session-scoped token; the master never reaches the child
-            env_vars["GDB_MCP_SESSION_TOKEN"] = derive_session_token(
-                self.config.token, session_id
-            )
-        if self.config.allow_unsafe:
-            env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
+        env_vars = build_plugin_env(
+            self.config,
+            session_id,
+            plugin_token_for(self.config, session_id, launched=True),
+            env,
+        )
         log_file = self.config.log_dir / ("%s.log" % session_id)
         session = await self._spawn(
             argv,
@@ -437,22 +401,15 @@ class Launcher:
             kind="gdb",
             marker=True,
             distro_override=distro,
-            session_token=(
-                derive_session_token(self.config.token, session_id)
-                if self.config.token
-                else None
-            ),
         )
-        deadline = time.monotonic() + max(0.1, timeout_ms / 1000.0)
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            if session.state != RESERVED:
-                break
-            if session.proc is not None and session.proc.returncode is not None:
-                raise LaunchError(
-                    "gdb exited during startup (code %s); log: %s"
-                    % (session.proc.returncode, log_file)
-                )
+        # the plugin's hello or the process dying are both state changes:
+        # wait for one instead of polling for it
+        await session.wait_for_state(_launch_settled, max(0.1, timeout_ms / 1000.0))
+        if session.state == RESERVED and session.proc_returncode is not None:
+            raise LaunchError(
+                "gdb exited during startup (code %s); log: %s"
+                % (session.proc_returncode, log_file)
+            )
         return session
 
     async def launch_script(
@@ -479,45 +436,19 @@ class Launcher:
                 "script must be an absolute file path (a Windows drive path "
                 "or a WSL path); inline Python code is not supported: %r" % script
             ) from None
-        env_vars = dict(env or {})
-        for reserved_name in (
-            "GDB_MCP_SESSION_ID",
-            "GDB_MCP_PORT",
-            "GDB_MCP_TOKEN",
-            "GDB_MCP_EVAL_OUTPUT_LIMIT",
-            "GDB_MCP_MAX_MEM_READ",
-            "GDB_MCP_MAX_ASYNC_LINE",
-            "GDB_MCP_ALLOW_UNSAFE",
-        ):
-            env_vars.pop(reserved_name, None)
-        env_vars.update({
-            # The pwntools-spawned gdb inherits these and binds to the
-            # reservation created below.
-            "GDB_MCP_SESSION_ID": gdb_session_id,
-            "GDB_MCP_PORT": str(self.config.port),
-            "GDB_MCP_EVAL_OUTPUT_LIMIT": str(self.config.eval_output_limit),
-            "GDB_MCP_MAX_MEM_READ": str(self.config.max_mem_read),
-            "GDB_MCP_MAX_ASYNC_LINE": str(self.config.max_async_line),
-        })
-        if self.config.token:
-            # E4: the pwntools-spawned gdb inherits the session-scoped
-            # token bound to its reserved gdb session id
-            env_vars["GDB_MCP_SESSION_TOKEN"] = derive_session_token(
-                self.config.token, gdb_session_id
-            )
-        if self.config.allow_unsafe:
-            env_vars["GDB_MCP_ALLOW_UNSAFE"] = "1"
         argv = [python, "-u", script_wsl] + list(args or [])
         log_file = self.config.log_dir / ("%s.log" % session_id)
+        # The pwntools-spawned gdb inherits these and binds to the
+        # reservation created here; its credential is scoped to that
+        # reserved id, so the script cannot redirect it elsewhere.
+        gdb_token = plugin_token_for(self.config, gdb_session_id, launched=True)
+        env_vars = build_plugin_env(self.config, gdb_session_id, gdb_token, env)
         gdb_session = self.registry.reserve(
             gdb_session_id,
             kind="gdb",
             launched=False,
+            token=gdb_token,
         )
-        if self.config.token:
-            gdb_session.token = derive_session_token(
-                self.config.token, gdb_session_id
-            )
         try:
             session = await self._spawn(
                 argv,
@@ -529,16 +460,14 @@ class Launcher:
                 marker=True,
                 distro_override=distro,
             )
-            deadline = time.monotonic() + max(0.1, timeout_ms / 1000.0)
-            while True:
-                if gdb_session.state != RESERVED:
-                    return session, gdb_session
-                if session.state == EXITED:
-                    return session, None
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return session, None
-                await asyncio.sleep(min(0.2, remaining))
+            await first_to_settle(
+                [(gdb_session, _plugin_arrived), (session, _is_exited)],
+                max(0.1, timeout_ms / 1000.0),
+            )
+            return (session, gdb_session) if gdb_session.state != RESERVED else (
+                session,
+                None,
+            )
         finally:
             if gdb_session.state == RESERVED:
                 self.registry.remove(gdb_session_id)

@@ -1,5 +1,7 @@
 """Tests for gdb_mcp.config environment assembly."""
 
+import os
+
 import pytest
 
 from gdb_mcp.config import Config, DEFAULTS
@@ -173,3 +175,86 @@ class TestE4Options:
     def test_archive_retention_env(self, monkeypatch):
         monkeypatch.setenv("GDB_MCP_ARCHIVE_RETENTION", "5")
         assert Config.from_env().archive_retention == 5
+
+
+class TestPathFields:
+    def test_strings_are_coerced_to_paths(self, tmp_path):
+        """The annotations promise Path; accepting a str and failing later
+        inside ensure_dirs() is a trap for embedders."""
+        cfg = Config(
+            log_dir=str(tmp_path / "logs"),
+            analysis_dir=str(tmp_path / "analyses"),
+            archive_dir=str(tmp_path / "archive"),
+        )
+        assert cfg.log_dir == tmp_path / "logs"
+        assert cfg.analysis_dir == tmp_path / "analyses"
+        assert cfg.archive_dir == tmp_path / "archive"
+        cfg.ensure_dirs()
+        assert cfg.log_dir.is_dir()
+
+    def test_none_stays_none(self):
+        cfg = Config()
+        assert cfg.analysis_dir is None and cfg.archive_dir is None
+
+
+class TestCliOverridesDoNotEraseEnv:
+    """Precedence is CLI > env > default, and "flag absent" must not read as
+    "flag set to false".
+
+    Regression: argparse's store_true default (False) and store:append
+    default ([]) used to be merged into the env-derived Config, so
+    GDB_MCP_READONLY=1 / GDB_MCP_MCP_HTTP=1 / GDB_MCP_OBSERVER_TOKENS=...
+    were silently dropped for every CLI-launched server -- including the
+    read-only guarantee an operator relied on.
+    """
+
+    @pytest.fixture
+    def env(self, monkeypatch):
+        for var in list(os.environ):
+            if var.startswith("GDB_MCP_"):
+                monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("GDB_MCP_READONLY", "1")
+        monkeypatch.setenv("GDB_MCP_ALLOW_UNSAFE", "true")
+        monkeypatch.setenv("GDB_MCP_MCP_HTTP", "1")
+        monkeypatch.setenv("GDB_MCP_OBSERVER_TOKENS", "tok-a, tok-b")
+        monkeypatch.setenv("GDB_MCP_TOOL_PROFILE", "core")
+
+    def _config(self, argv, tmp_path):
+        from gdb_mcp.__main__ import _build_parser, _overrides
+
+        args = _build_parser().parse_args(argv + ["--log-dir", str(tmp_path / "l")])
+        return Config.from_env(overrides=_overrides(args))
+
+    def test_environment_survives_a_bare_invocation(self, env, tmp_path):
+        cfg = self._config([], tmp_path)
+        assert cfg.readonly is True
+        assert cfg.allow_unsafe is True
+        assert cfg.mcp_http is True
+        assert cfg.observer_tokens == ("tok-a", "tok-b")
+        assert cfg.tool_profile == "core"
+
+    def test_explicit_flag_still_wins(self, env, tmp_path):
+        cfg = self._config(["--readonly"], tmp_path)
+        assert cfg.readonly is True
+        # the inverse case: an operator can turn a hard env default off only
+        # by unsetting the variable, never by accident of the CLI parser
+        assert cfg.mcp_transport is True
+
+    def test_no_mcp_flag_overrides_transport(self, env, tmp_path):
+        assert self._config(["--no-mcp"], tmp_path).mcp_transport is False
+
+    def test_experimental_stays_cli_only(self, env, monkeypatch, tmp_path):
+        monkeypatch.setenv("GDB_MCP_EXPERIMENTAL", "1")
+        assert self._config([], tmp_path).experimental is False
+        assert self._config(["--experimental"], tmp_path).experimental is True
+
+    def test_readonly_profile_actually_drops_write_tools(self, env, tmp_path):
+        """The env var has to reach the tool surface, not just the config."""
+        from gdb_mcp.server import build_app
+        from gdb_mcp.sessions import SessionRegistry
+        from gdb_mcp.tools import registered_tools
+
+        cfg = self._config([], tmp_path)
+        names = set(registered_tools(build_app(cfg, SessionRegistry(cfg))))
+        assert not names & {"write_memory", "write_register"}
+        assert "read_memory" in names

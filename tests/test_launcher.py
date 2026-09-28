@@ -12,9 +12,8 @@ from gdb_mcp.launcher import (
     build_pkill_command,
     build_ssh_argv,
     build_terminate_argv,
-    parse_distro_list,
-    win_to_wsl,
 )
+from gdb_mcp.wsl import parse_distro_list, win_to_wsl
 
 
 class TestLauncherBackends:
@@ -310,7 +309,7 @@ class TestLauncherLifecycle:
         ):
             captured.update(env)
             script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
-            script.state = RUNNING
+            script.set_state(RUNNING)
             registry.register_hello(
                 {
                     "type": "hello",
@@ -360,7 +359,7 @@ class TestLauncherLifecycle:
             distro_override=None,
         ):
             script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
-            script.state = EXITED
+            script.set_state(EXITED)
             script.proc_returncode = 0
             return script
 
@@ -404,7 +403,7 @@ class TestLauncherLifecycle:
             distro_override=None,
         ):
             script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
-            script.state = RUNNING
+            script.set_state(RUNNING)
             return script
 
         monkeypatch.setattr(launcher, "_spawn", fake_spawn)
@@ -443,7 +442,7 @@ class TestLauncherLifecycle:
             distro_override=None,
         ):
             script = registry.reserve(session_id, kind=kind, log_file=str(log_file))
-            script.state = RUNNING
+            script.set_state(RUNNING)
             return script
 
         monkeypatch.setattr(launcher, "_spawn", fake_spawn)

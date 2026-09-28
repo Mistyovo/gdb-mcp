@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
 import re
 import sys
@@ -11,7 +10,7 @@ import uuid
 
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
-from gdb_mcp.launcher import win_to_wsl
+from gdb_mcp.wsl import WslError, list_distros, uses_wsl, win_to_wsl
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DEFAULT_GHIDRA = "/usr/share/ghidra/support/analyzeHeadless"
@@ -21,10 +20,11 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent / "ghidra_scripts"
 class GhidraRunner:
     def __init__(self, config: Config):
         self.config = config
+        self._distro_cache: str | None = None
 
     @property
     def uses_wsl(self) -> bool:
-        return os.name == "nt"
+        return uses_wsl()
 
     async def _distro(self, override: str | None = None) -> str | None:
         if not self.uses_wsl:
@@ -33,25 +33,15 @@ class GhidraRunner:
             return override
         if self.config.wsl_distro:
             return self.config.wsl_distro
-        proc = await asyncio.create_subprocess_exec(
-            "wsl.exe",
-            "-l",
-            "-q",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode:
-            raise GdbMcpError("BACKEND_UNAVAILABLE", "unable to list WSL distros")
-        text = stdout.decode("utf-16-le", errors="ignore")
-        names = [
-            line.replace("\x00", "").strip()
-            for line in text.splitlines()
-            if line.replace("\x00", "").strip()
-            and not line.replace("\x00", "").strip().startswith("docker-desktop")
-        ]
+        if self._distro_cache:
+            return self._distro_cache
+        try:
+            names = await list_distros(self.config.decompile_timeout)
+        except WslError as exc:
+            raise GdbMcpError("BACKEND_UNAVAILABLE", str(exc)) from exc
         if not names:
             raise GdbMcpError("BACKEND_UNAVAILABLE", "no usable WSL distro found")
+        self._distro_cache = names[0]
         return names[0]
 
     def _target_path(self, path: str) -> str:

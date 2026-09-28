@@ -27,9 +27,10 @@ import shutil
 import time
 import uuid
 from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from gdb_mcp.campaign import sanitize_campaign
 from gdb_mcp.config import Config
@@ -70,11 +71,16 @@ ACTIVE_STATES = frozenset({CONNECTING, READY, RUNNING, STOPPED, EXITED})
 #: Maximum number of events kept per session for get_events.
 EVENT_LOG_LIMIT = 100
 
+#: "derive the plugin token yourself" in :meth:`SessionRegistry.reserve`
+_RESERVE_DEFAULT = object()
+
 
 @dataclass
 class Session:
     session_id: str
     kind: str = "gdb"  # "gdb" | "script"
+    #: write this only through :meth:`set_state`, which also wakes
+    #: :meth:`wait_for_state` waiters
     state: str = CONNECTING
     hello: dict | None = None
     stop_info: dict | None = None
@@ -126,9 +132,88 @@ class Session:
     analysis_id: str | None = None
     analysis_error: str | None = None
     location: dict[str, Any] | None = None
-    target: str | None = None
     #: last known debug snapshot used by the static location mapper
     debug_state: dict[str, Any] | None = None
+
+    def attach_analysis(self, analysis_id: str | None, error: str | None = None) -> None:
+        """Bind this session to a static analysis (or record why not)."""
+        self.analysis_id = analysis_id
+        self.analysis_error = error
+
+    def note_location(self, location: dict[str, Any]) -> None:
+        """Publish a freshly mapped runtime location and remember it as the
+        session's latest for the bridge's per-frame bookkeeping."""
+        self.location = location
+        self.update_debug_location(location)
+    #: waiters registered by :meth:`wait_for_state`
+    _state_waiters: set = field(default_factory=set, repr=False)
+
+    # -- state ---------------------------------------------------------------
+
+    def set_state(self, state: str) -> None:
+        """The only sanctioned write of :attr:`state`: it assigns and wakes
+        every :meth:`wait_for_state` waiter, so a caller can wait on a
+        transition instead of polling for it."""
+        if state == self.state:
+            return
+        self.state = state
+        self.notify_state_waiters()
+
+    def notify_state_waiters(self) -> None:
+        """Wake :meth:`wait_for_state` waiters after a change that did not
+        go through :meth:`set_state` (e.g. the launched process died)."""
+        for waiter in list(self._state_waiters):
+            waiter.set()
+
+    async def wait_for_state(
+        self, predicate: Callable[["Session"], bool], timeout: float
+    ) -> bool:
+        """Wait until ``predicate(session)`` holds.
+
+        Returns True when it does, False on timeout. Re-checked on every
+        state transition, so a caller never sleeps to learn about a
+        handshake that already happened.
+        """
+        if predicate(self):
+            return True
+        waiter = asyncio.Event()
+        self._state_waiters.add(waiter)
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + max(0.0, timeout)
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return predicate(self)
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(waiter.wait(), remaining)
+                waiter.clear()
+                if predicate(self):
+                    return True
+        finally:
+            self._state_waiters.discard(waiter)
+
+    async def note_process_exit(self, returncode: int | None) -> None:
+        """Record the exit of the launched process this session mirrors.
+
+        Script sessions have no plugin, so their process *is* their state
+        machine: the exit ends the session for waiters.
+        """
+        self.proc_returncode = returncode
+        self.update_seen()
+        if self.kind == "script":
+            self.set_state(EXITED)
+            self.exited_code = returncode
+            self.state_gen += 1
+            await self.wake_stop_waiters()
+        else:
+            # gdb died without a plugin notification: unblock launch waits
+            self.notify_state_waiters()
+
+    async def wake_stop_waiters(self) -> None:
+        async with self.stop_cond:
+            self.stop_gen += 1
+            self.stop_cond.notify_all()
 
     def update_debug_location(self, location: dict[str, Any]) -> None:
         """3.5 static bridge: update the last mapped location while
@@ -206,14 +291,14 @@ class Session:
             if locked:
                 writer = self._connected_writer()
                 if verb in ASYNC_VERBS:
-                    self.state = RUNNING
+                    self.set_state(RUNNING)
                 writer.write(encode(build_request(req_id, verb, params), self.token))
                 await writer.drain()
             else:
                 async with self.lock:
                     writer = self._connected_writer()
                     if verb in ASYNC_VERBS:
-                        self.state = RUNNING
+                        self.set_state(RUNNING)
                     writer.write(encode(build_request(req_id, verb, params), self.token))
                     await writer.drain()
             result = await asyncio.wait_for(fut, timeout)
@@ -222,12 +307,12 @@ class Session:
             raise RequestTimeoutError(verb, timeout or 0.0) from None
         except (ConnectionError, OSError) as exc:
             if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
-                self.state = previous_state
+                self.set_state(previous_state)
             self._journal_request(verb, params, ok=False, error="DISCONNECTED")
             raise GdbMcpError("DISCONNECTED", "connection to gdb lost") from exc
         except GdbMcpError as exc:
             if verb in ASYNC_VERBS and self.state_gen == request_state_gen:
-                self.state = previous_state
+                self.set_state(previous_state)
             self._journal_request(verb, params, ok=False, error=exc.code)
             raise
         finally:
@@ -347,29 +432,24 @@ class Session:
                 "notification", {"event": event, "payload": payload}
             )
         if event == "running":
-            self.state = RUNNING
+            self.set_state(RUNNING)
         elif event == "stop":
-            self.state = STOPPED
+            self.set_state(STOPPED)
             self.stop_info = payload
-            await self._wake_stop_waiters()
+            await self.wake_stop_waiters()
         elif event == "exited":
-            self.state = EXITED
+            self.set_state(EXITED)
             self.exited_code = payload.get("exit_code")
-            await self._wake_stop_waiters()
+            await self.wake_stop_waiters()
         elif event in ("prompt", "ready"):
             # Inferior is idle at the prompt; keep stop_info for
             # get_stop_reason.
-            self.state = READY
-            await self._wake_stop_waiters()
+            self.set_state(READY)
+            await self.wake_stop_waiters()
         else:
             log.debug("session %s: unknown notification event %r", self.session_id, event)
         if isinstance(event, str):
             self.publish(event, payload)
-
-    async def _wake_stop_waiters(self) -> None:
-        async with self.stop_cond:
-            self.stop_gen += 1
-            self.stop_cond.notify_all()
 
     async def wait_for_stop(self, timeout: float) -> bool:
         """Wait until the inferior stops (or gdb is idle/exited).
@@ -400,7 +480,7 @@ class Session:
 
     async def on_disconnect(self) -> None:
         """Socket closed: fail pending requests, wake stop waiters."""
-        self.state = DISCONNECTED
+        self.set_state(DISCONNECTED)
         self.state_gen += 1
         self.record_event("disconnected", {})
         self.writer = None
@@ -412,7 +492,7 @@ class Session:
                     )
                 )
         self.pending.clear()
-        await self._wake_stop_waiters()
+        await self.wake_stop_waiters()
         self.publish("disconnected")
 
     def info(self) -> dict:
@@ -471,19 +551,29 @@ class SessionRegistry:
         log_file: str | None = None,
         *,
         launched: bool = True,
+        token: str | None = _RESERVE_DEFAULT,
     ) -> Session:
         """Create a session placeholder for a launch whose plugin will
-        connect later (hello carries the same session id via env)."""
+        connect later (hello carries the same session id via env).
+
+        The registry owns the plugin credential, so no caller can get the
+        pairing wrong: by default a launched session's plugin proves a
+        token derived from the master and the session id (the master
+        itself never reaches a launched process), while a session someone
+        else spawns proves the master token.
+        """
+        if token is _RESERVE_DEFAULT:
+            token = plugin_token_for(self.config, session_id, launched=launched)
         session = Session(
             session_id=session_id,
             kind=kind,
-            state=RESERVED,
             reserved=True,
             launched=launched,
             log_file=log_file,
-            token=self.config.token,
+            token=token,
             events=self.events,
         )
+        session.set_state(RESERVED)
         self._sessions[session_id] = session
         self._attach_journal(session)
         session.publish("reserved")
@@ -535,7 +625,7 @@ class SessionRegistry:
             # would make the reader loop reject them all
             session.token = self.config.token
         session.events = self.events
-        session.state = CONNECTING
+        session.set_state(CONNECTING)
         session.reserved = False
         session.connected_at = time.monotonic()
         session.update_seen()
@@ -568,6 +658,12 @@ class SessionRegistry:
             return self._sessions[session_id]
         except KeyError:
             raise NoSuchSessionError(session_id) from None
+
+    def has_session(self, session_id: str) -> bool:
+        """Whether this server already knows ``session_id`` (reserved by a
+        launch, or restored from persistence). Distinct from asking for its
+        token: a session on a tokenless server legitimately has none."""
+        return session_id in self._sessions
 
     def token_for(self, session_id: str) -> str | None:
         """The verification token a plugin for ``session_id`` must
@@ -733,7 +829,6 @@ class SessionRegistry:
             session = Session(
                 session_id=sid,
                 kind="gdb",
-                state=DISCONNECTED,
                 hello=_sanitize_hello(entry.get("hello")),
                 log_file=entry.get("log_file"),
                 distro=entry.get("distro"),
@@ -741,16 +836,14 @@ class SessionRegistry:
                 token=self.config.token,
                 events=self.events,
             )
+            session.set_state(DISCONNECTED)
             session.stop_info = entry.get("stop_info")
             # campaign content is re-injected into model context via the
             # stop briefs — never trust it verbatim from disk
             session.campaign = sanitize_campaign(entry.get("campaign"))
             # launched sessions carry scoped tokens: recompute (never
             # persist) so the revived plugin's token re-verifies
-            if session.launched and self.config.token:
-                session.token = derive_session_token(
-                    self.config.token, sid
-                )
+            session.token = plugin_token_for(self.config, sid, launched=session.launched)
             self._sessions[sid] = session
             self._attach_journal(session)
             restored += 1
@@ -791,6 +884,32 @@ class SessionRegistry:
             self.save()
 
 
+async def first_to_settle(
+    watches: list[tuple["Session", Callable[["Session"], bool]]], timeout: float
+) -> bool:
+    """Wait for the first of several session predicates to hold.
+
+    Returns True when any predicate became true within ``timeout``. This
+    is how a caller waits on independent transitions of different
+    sessions without polling either of them.
+    """
+    if not watches:
+        return True
+    tasks = [
+        asyncio.create_task(session.wait_for_state(predicate, timeout))
+        for session, predicate in watches
+    ]
+    try:
+        await asyncio.wait(
+            tasks, timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED
+        )
+        return any(not t.cancelled() and t.done() and t.result() for t in tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def make_registry(config: Config) -> SessionRegistry:
     return SessionRegistry(config)
 
@@ -806,6 +925,17 @@ def derive_session_token(master: str, session_id: str) -> str:
         hashlib.sha256,
     ).hexdigest()
     return digest[:32]
+
+
+def plugin_token_for(config: Config, session_id: str, *, launched: bool) -> str | None:
+    """The token a plugin connecting as ``session_id`` must present:
+    scoped to the session for anything this server launched, the master
+    token for externally launched gdb."""
+    if not config.token:
+        return None
+    if launched:
+        return derive_session_token(config.token, session_id)
+    return config.token
 
 
 _HELLO_STR_KEYS = (
@@ -839,6 +969,8 @@ __all__ = [
     "Session",
     "SessionRegistry",
     "make_registry",
+    "first_to_settle",
+    "plugin_token_for",
     "CONNECTING",
     "READY",
     "RUNNING",

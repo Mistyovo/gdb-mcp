@@ -92,6 +92,11 @@ def program_path(task: TaskSpec) -> str:
 #: synchronization must not depend on catching the transient.
 SETTLED_STATES = frozenset({"stopped", "ready", "exited"})
 
+#: A stop lands on READY for the same reason, so anything awaiting "the
+#: inferior stopped" must accept both -- awaiting the bare STOPPED would
+#: just burn the settle timeout and then pass on stop_info anyway.
+STOP_STATES = frozenset({"stopped", "ready"})
+
 
 async def settle(driver, session_id: str, want: set[str] | None = None,
                  timeout_s: float = 15.0) -> dict:

@@ -108,7 +108,7 @@ async def probe_pwndbg_loaded(driver, ctx) -> tuple[bool, str]:
 
 
 async def probe_heap_bins(driver, ctx) -> tuple[bool, str]:
-    sid, bin_path = ctx["malloc"], ctx["malloc_bin"]
+    sid = ctx["malloc"]
     await driver.call("set_breakpoint", {"session_id": sid, "location": "fill"})
     await driver.call("execute_command", {"command": "run", "session_id": sid})
     await _settle(driver, sid)
@@ -125,7 +125,7 @@ async def probe_stop_reason_shape(driver, ctx) -> tuple[bool, str]:
 
 
 async def probe_crash_report(driver, ctx) -> tuple[bool, str]:
-    sid, bin_path = ctx["crash"], ctx["crash_bin"]
+    bin_path = ctx["crash_bin"]
     crash_sid = (await driver.call(
         "launch_gdb", {"program": str(bin_path), "run": True}
     ))["session_id"]
@@ -147,7 +147,7 @@ async def probe_long_output_spills(driver, ctx) -> tuple[bool, str]:
 
 
 async def probe_breakpoint_hit_flow(driver, ctx) -> tuple[bool, str]:
-    sid, bin_path = ctx["malloc"], ctx["malloc_bin"]
+    sid = ctx["malloc"]
     bp = await driver.call("set_breakpoint", {"location": "main", "session_id": sid})
     await driver.call("execute_command", {"command": "run", "session_id": sid})
     state = await _settle(driver, sid)

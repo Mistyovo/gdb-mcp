@@ -681,17 +681,26 @@ class TestPolicies:
             ("sig", "SIGSEGV"),      # round 2: crash (pc bumped by 0x10)
             ("sig", "SIGSEGV"),      # round 3: crash at a different pc
         ]
-        r = call(
-            plugin,
-            "policy",
+        plugin._handle_request(
             {
-                "kind": "fuzz_loop",
-                "snapshot_id": "ck-1",
-                "buffer_addr": "0x1000",
-                "payloads": ["41" * 16, "42" * 8, "43" * 8],
-                "stop_location": "main",
-            },
-        )["result"]
+                "type": "request",
+                "id": 7,
+                "verb": "policy",
+                "params": {
+                    "kind": "fuzz_loop",
+                    "snapshot_id": "ck-1",
+                    "buffer_addr": "0x1000",
+                    "payloads": ["41" * 16, "42" * 8, "43" * 8],
+                    "stop_location": "main",
+                },
+            }
+        )
+        messages = drain(plugin)
+        # a policy drives the inferior through the plugin's internal resume
+        # path; it must never answer on a request id the server never sent
+        assert [m for m in messages if m.get("id") == 0] == []
+        assert [m for m in messages if m.get("type") == "response"] == [messages[-1]]
+        r = messages[-1]["result"]
         assert r["rounds"] == 3
         assert r["survived"] == 1
         assert r["crash_count"] == 2

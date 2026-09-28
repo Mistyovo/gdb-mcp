@@ -12,7 +12,7 @@ development.
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-lightgrey)](#launchers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-519%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-632%20passing-brightgreen)](#testing)
 
 [Quick Start](#quick-start) · [Tools](#tool-catalog) · [Architecture](#architecture) · [Experimental](#experimental-features) · [Roadmap](ROADMAP_V2.md) · [中文文档](README.zh-CN.md)
 
@@ -39,7 +39,7 @@ with none of the prompt-scraping fragility.
   summaries, so iterating 1,000 times costs one tool call.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
-- **Verified against reality** — 519 unit tests plus end-to-end suites driving
+- **Verified against reality** — 632 unit tests plus end-to-end suites driving
   real gdb 17.2 in WSL, and a versioned acceptance benchmark
 (`bench/`, 576 tasks across 8 families, reference-solved 576/576) that
 proves every task solvable before any model runs on it — the first
@@ -99,7 +99,8 @@ One call. Full picture.
 
 ## Tool Catalog
 
-**37 core tools**, grouped by job:
+**52 tools by default** (12 under `GDB_MCP_TOOL_PROFILE=core`, 60 with
+`--experimental`), grouped by job:
 
 | Group | Tools |
 |---|---|
@@ -109,6 +110,7 @@ One call. Full picture.
 | State | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` (structured) `load_target` |
 | Breakpoints | `set_breakpoint` (sw/hw/watch/condition/temporary + `commands`/`auto_continue` probes) `list_breakpoints` `manage_breakpoint` |
 | Pwn workflow | `heap_bins` (pwndbg bins → JSON) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize / crash_check / bp_stats — bounded loops at native speed) `campaign` (state machine + cyclic oracle) |
+| Static bridge (Ghidra) | `analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview` `list_sections` `list_symbols` `list_functions` `list_strings` `decompile_function` `get_static_disassembly` `get_xrefs` `get_call_graph` `search_decompiled_code` `annotate_code` `remove_code_annotation` — SHA-256-keyed analysis cache; runtime stops map back to static function/line |
 
 **6 experimental tools** (behind `--experimental`): inferior stdio channel
 (`io_setup` / `send_to_inferior` / `read_inferior_output` / `io_teardown`),
@@ -125,7 +127,7 @@ answer to *"why not just write a gdbscript?"* in one artifact.
 ## Architecture
 
 ```
-Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (37+ tools)
+Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (52 tools)
         ▲  campaign state · journals · policies · static bridge
         │
         │ TCP JSON-lines (scoped session tokens, heartbeats)
@@ -164,7 +166,7 @@ validation, bearer tokens, TLS and mutual-TLS options.
 |---|---|---|
 | `wsl` (default) | WSL2 distro | mirrored networking recommended |
 | `native` | local Linux | plain `bash -lc` |
-| `docker` | ephemeral container | `SYS_PTRACE` + relaxed seccomp; per-session containers |
+| `docker` | ephemeral container | `SYS_PTRACE` + relaxed seccomp; per-session containers. Build the image first (`docker build -f docker/Dockerfile -t gdb-mcp:latest .`); run the server with `--host-bind 0.0.0.0 --token ...` (a non-loopback bind requires a token) and the plugin dials back over `host.docker.internal` |
 | `ssh` | remote host | key-based auth; great for IoT/router targets |
 
 ## Experimental Features
@@ -176,6 +178,9 @@ variable — a stray shell variable must never destabilize your server):
 - **Crash minimizer** — delta-debugging over checkpoint restore.
 - **`identify_libc` / `search_gadgets`** — libc.rip API and ROPgadget CLI
   integrations with honest-degradation errors.
+- **`kernel_launch` / `kernel_snapshot`** — boot a Linux kernel VM under QEMU
+  with a gdbstub and attach gdb to it; savevm/loadvm is the kernel-pwn revert
+  primitive. Requires QEMU inside the launcher backend.
 
 ## Security Model
 
@@ -195,9 +200,23 @@ variable — a stray shell variable must never destabilize your server):
 ## Testing
 
 ```bash
-python -m pytest tests/ -q                       # 519 unit tests (no gdb needed)
-wsl bash tests/integration/run_wsl_integration.sh # real-gdb end-to-end suite
-wsl bash tests/integration/run_io_smoke.sh        # inferior-stdio pty smoke
+# unit (no gdb required)
+python -m pytest tests/ -q                        # 632 tests, ~9s
+
+# real-gdb suites (WSL2 or native Linux; each prints its own verdict)
+wsl bash tests/integration/run_wsl_integration.sh # plugin <-> server protocol
+python tests/integration/run_mcp_tools_e2e.py --distro kali-linux
+                                                  # every registered tool, end to end
+wsl bash tests/integration/run_io_smoke.sh        # inferior stdio over a pty
+bash tests/integration/run_tls_smoke.sh           # HTTP / TLS / mTLS / bearer tokens
+python tests/integration/run_observer_smoke.py    # observer role over live HTTP
+
+# acceptance benchmark (576 versioned tasks; bench/SPEC.md is the outline)
+python -m bench.framework.cli selfcheck --distro kali-linux  # reference-solve + grade
+python -m bench.framework.cli stress --distro kali-linux     # call volume + churn
+python -m bench.framework.cli faults --distro kali-linux     # fault injection + recovery
+python -m bench.framework.cli perf --distro kali-linux       # overhead / startup / concurrency
+python -m bench.framework.cli pwndbg --distro kali-linux     # pwndbg compatibility probes
 ```
 
 ## Roadmap
@@ -208,7 +227,7 @@ Development status, benchmark results, and the long-term vision live in
 
 ## Contributing
 
-Issues and PRs welcome — the test suite (519 tests, no gdb required for unit
+Issues and PRs welcome — the test suite (632 tests, no gdb required for unit
 runs) is the contract: please add tests for behavior changes and keep
 `ruff check` clean.
 

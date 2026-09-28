@@ -8,7 +8,8 @@ import pytest
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.events import EventBroker
-from gdb_mcp.reverse.manager import AnalysisManager, AnalysisRecord
+from gdb_mcp.reverse.manager import AnalysisManager
+from gdb_mcp.reverse.store import AnalysisRecord, path_key
 from gdb_mcp.sessions import RUNNING, STOPPED, Session
 
 
@@ -86,7 +87,7 @@ def ready_manager(tmp_path: Path, target="/tmp/sample", image_base="0x400000"):
         function_count=1,
         decompiled_count=1,
     )
-    manager._records[analysis_id] = record
+    manager.store.records[analysis_id] = record
     return manager, analysis_id
 
 
@@ -105,14 +106,16 @@ def test_queries_pagination_and_annotations(tmp_path):
 
 def test_indexes_and_function_files_are_cached(tmp_path, monkeypatch):
     manager, analysis_id = ready_manager(tmp_path)
-    original = manager._read_json
+    import gdb_mcp.reverse.store as store
+
+    original = store.read_json
     reads = []
 
     def tracked(path):
         reads.append(path.name)
         return original(path)
 
-    monkeypatch.setattr(manager, "_read_json", tracked)
+    monkeypatch.setattr(store, "read_json", tracked)
     manager.overview(analysis_id)
     manager.list_items(analysis_id, "functions")
     manager.decompile(analysis_id, "main")
@@ -133,7 +136,7 @@ def test_path_matching_preserves_posix_case(tmp_path):
     manager, analysis_id = ready_manager(tmp_path, target="/tmp/App")
     assert manager.analysis_for_module("/tmp/App") == analysis_id
     assert manager.analysis_for_module("/tmp/app") is None
-    assert manager._path_key("C:\\Temp\\App") == manager._path_key("c:/temp/app")
+    assert path_key("C:\\Temp\\App") == path_key("c:/temp/app")
 
 
 def test_concurrent_annotations_do_not_lose_updates(tmp_path):
@@ -167,7 +170,7 @@ def test_pie_location_and_nearest_line(tmp_path):
 
 def test_location_prefers_analyzed_text_frame_over_unindexed_stop(tmp_path):
     manager, analysis_id = ready_manager(tmp_path)
-    session = Session("s-1", state=STOPPED, analysis_id=analysis_id, target="/tmp/sample")
+    session = Session("s-1", state=STOPPED, analysis_id=analysis_id)
     session.stop_info = {
         "pc": "0x7ffff7e12345",
         "module_path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
@@ -242,7 +245,7 @@ def test_indexed_library_uses_its_own_analysis(tmp_path):
         json.dumps(make_function()), encoding="utf-8"
     )
     (library_dir / "annotations.json").write_text("{}", encoding="utf-8")
-    manager._records[library_id] = AnalysisRecord(
+    manager.store.records[library_id] = AnalysisRecord(
         analysis_id=library_id,
         sha256="2" * 64,
         source_path="/usr/lib/libsample.so",
@@ -273,7 +276,7 @@ def test_running_location_is_stale(tmp_path):
         "module_offset": "0x1003",
     }
     manager.resolve_session_location(session)
-    session.state = RUNNING
+    session.set_state(RUNNING)
     session.location["state"] = RUNNING
     session.location["stale"] = True
     assert manager.resolve_session_location(session)["stale"] is True
@@ -352,7 +355,7 @@ def test_unsupported_index_schema_is_rejected(tmp_path):
 @pytest.mark.asyncio
 async def test_resync_rebuilds_stopped_session_location(tmp_path, monkeypatch):
     manager, analysis_id = ready_manager(tmp_path)
-    session = Session("s-1", state=STOPPED, analysis_id=analysis_id, target="/tmp/sample")
+    session = Session("s-1", state=STOPPED, analysis_id=analysis_id)
     session.stop_info = {
         "pc": "0x401003",
         "module_path": "/tmp/sample",
