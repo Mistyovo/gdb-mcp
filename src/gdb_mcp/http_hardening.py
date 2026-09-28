@@ -107,12 +107,14 @@ class SecurityHeadersMiddleware:
         bind_port: int,
         token: str | None,
         observer_tokens: tuple[str, ...] = (),
+        audit=None,
     ):
         self.app = app
         self.bind_host = bind_host
         self.bind_port = bind_port
         self.token = token
         self.observer_tokens = tuple(observer_tokens)
+        self.audit = audit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -131,6 +133,12 @@ class SecurityHeadersMiddleware:
                 self.observer_tokens,
             )
         except ProtocolError as exc:
+            if self.audit is not None:
+                self.audit.record(
+                    "http_rejected",
+                    path=scope.get("path", ""),
+                    reason=exc.message[:200],
+                )
             body = exc.message.encode("utf-8")
             await send(
                 {

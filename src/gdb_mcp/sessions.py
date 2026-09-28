@@ -74,6 +74,10 @@ EVENT_LOG_LIMIT = 100
 #: "derive the plugin token yourself" in :meth:`SessionRegistry.reserve`
 _RESERVE_DEFAULT = object()
 
+#: schema version of the sessions.json persistence file; bump + migrate
+#: explicitly in :meth:`SessionRegistry.load` when the shape changes
+_PERSIST_SCHEMA_VERSION = 1
+
 
 @dataclass
 class Session:
@@ -784,7 +788,7 @@ class SessionRegistry:
         if self._persist_path is None:
             return
         payload = {
-            "version": 1,
+            "version": _PERSIST_SCHEMA_VERSION,
             "sessions": [
                 {
                     "session_id": s.session_id,
@@ -820,6 +824,17 @@ class SessionRegistry:
             )
         except (OSError, ValueError):
             log.warning("session persistence file unreadable; starting clean")
+            return 0
+        version = data.get("version", 1)
+        if version != _PERSIST_SCHEMA_VERSION:
+            # refuse rather than guess: persisted session state includes
+            # campaign data that gets re-injected into agent context
+            log.warning(
+                "session persistence schema %r unsupported (expected %d); "
+                "starting clean",
+                version,
+                _PERSIST_SCHEMA_VERSION,
+            )
             return 0
         restored = 0
         for entry in data.get("sessions", []):

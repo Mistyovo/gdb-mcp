@@ -18,10 +18,19 @@ jobs:
       - run: python -m coverage report
 
   gdb-integration:
-    runs-on: ubuntu-latest
+    # gdb compatibility matrix: the plugin's gdb.* API usage must hold
+    # across gdb majors, not just the 17.2 used in local WSL2 testing.
+    # ubuntu-22.04 apt ships gdb 12.1, ubuntu-24.04 ships gdb 15.x;
+    # local WSL2 validation covers gdb 17.2.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y gdb gcc
+      - run: gdb --version | head -1
       - run: bash tests/integration/run_wsl_integration.sh
 
   bench:

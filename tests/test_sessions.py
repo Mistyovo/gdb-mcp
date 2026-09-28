@@ -487,6 +487,33 @@ class TestPersistence:
         assert registry.enable_persistence(path) == 0
         assert registry.list_all() == []
 
+    def test_future_schema_version_starts_clean(self, tmp_path):
+        """A persistence file from a newer build is refused, not guessed at:
+        persisted campaign state re-enters agent context on restore."""
+        import json
+
+        path = tmp_path / "sessions.json"
+        path.write_text(
+            json.dumps(
+                {"version": 99, "sessions": [{"session_id": "s-x", "launched": True}]}
+            ),
+            encoding="utf-8",
+        )
+        registry = SessionRegistry(Config())
+        assert registry.enable_persistence(path) == 0
+        assert registry.list_all() == []
+        # the file is left alone for the newer build to read
+        assert json.loads(path.read_text(encoding="utf-8"))["version"] == 99
+
+    def test_saved_file_carries_schema_version(self, tmp_path):
+        import json
+
+        path = tmp_path / "sessions.json"
+        registry = SessionRegistry(Config())
+        registry.enable_persistence(path)
+        registry.reserve("s-v1")
+        assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
+
     def test_remove_updates_persistence(self, tmp_path):
         path = tmp_path / "sessions.json"
         r1 = SessionRegistry(Config())

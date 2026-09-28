@@ -183,6 +183,12 @@ def parse_line(line: bytes) -> dict:
         obj = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ProtocolError("MALFORMED", f"bad JSON: {exc.msg}") from exc
+    except RecursionError:
+        # Pathological nesting aborts the parser before it can produce a
+        # JSONDecodeError; without this the RecursionError would escape the
+        # reader loop's ProtocolError handling and tear down the session
+        # instead of rejecting the single offending line.
+        raise ProtocolError("MALFORMED", "JSON nesting too deep") from None
     if not isinstance(obj, dict):
         raise ProtocolError("MALFORMED", "message must be a JSON object")
     return obj

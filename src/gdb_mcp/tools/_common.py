@@ -28,6 +28,16 @@ def config_from(ctx: Any) -> Config:
     return server_ctx(ctx).config
 
 
+def audit_from(ctx: Any):
+    """The hash-chained security audit log (no-op instance when disabled)."""
+    audit = getattr(server_ctx(ctx), "audit", None)
+    if audit is None:
+        from gdb_mcp.audit import disabled
+
+        audit = disabled()
+    return audit
+
+
 def launcher_from(ctx: Any):
     """The process launcher (lazily built on the shared context)."""
     return server_ctx(ctx).launcher()

@@ -74,14 +74,16 @@ def core_tool_names() -> frozenset[str]:
     )
 
 
-def _deny_observer(name: str) -> None:
+def _deny_observer(name: str, audit=None) -> None:
+    if audit is not None:
+        audit.record("observer_denied", tool=name)
     raise GdbMcpError(
         "OBSERVER_READONLY",
         "tool %r is not available to observer clients" % name,
     )
 
 
-def _observer_guard(fn: Callable, name: str) -> Callable:
+def _observer_guard(fn: Callable, name: str, audit=None) -> Callable:
     """Wrap ``fn`` so observer-role calls are rejected.
 
     ``functools.wraps`` is what makes this safe to register in place of
@@ -95,7 +97,7 @@ def _observer_guard(fn: Callable, name: str) -> Callable:
         @functools.wraps(fn)
         async def guarded(*args: Any, **kwargs: Any) -> Any:
             if CURRENT_ROLE.get() == "observer":
-                _deny_observer(name)
+                _deny_observer(name, audit)
             return await fn(*args, **kwargs)
 
     else:
@@ -103,7 +105,7 @@ def _observer_guard(fn: Callable, name: str) -> Callable:
         @functools.wraps(fn)
         def guarded(*args: Any, **kwargs: Any) -> Any:
             if CURRENT_ROLE.get() == "observer":
-                _deny_observer(name)
+                _deny_observer(name, audit)
             return fn(*args, **kwargs)
 
     return guarded
@@ -121,10 +123,13 @@ def _visible(spec: ToolSpec, config: Config) -> bool:
 
 def register_all(app: FastMCP, ctx: ServerContext) -> None:
     """Register every visible tool declared across the tool modules."""
+    audit = getattr(ctx, "audit", None)
     for spec in SPECS:
         if not _visible(spec, ctx.config):
             continue
-        app.add_tool(_observer_guard(spec.fn, spec.name), name=spec.name)
+        app.add_tool(
+            _observer_guard(spec.fn, spec.name, audit), name=spec.name
+        )
 
 
 def registered_tools(app: FastMCP) -> dict:

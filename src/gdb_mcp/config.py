@@ -55,6 +55,7 @@ DEFAULTS = {
     "auto_analyze": False,
     "archive_retention": 20,
     "archive_dir": None,
+    "audit_log": True,
 }
 
 
@@ -126,6 +127,9 @@ class Config:
     #: (0 disables archiving; artifacts then stay where they are)
     archive_retention: int = DEFAULTS["archive_retention"]
     archive_dir: Path | None = DEFAULTS["archive_dir"]
+    #: hash-chained security audit log at <log_dir>/audit.log, separate
+    #: from session journals (which are a functional artifact)
+    audit_log: bool = DEFAULTS["audit_log"]
     #: WSL path of the plugin file (default: /mnt/<drive>/.../gdb_mcp_plugin.py)
     plugin_wsl_path: str | None = None
     mcp_transport: bool = True  # False => TCP-only mode (integration tests)
@@ -294,6 +298,9 @@ class Config:
             archive_dir=Path(env("ARCHIVE_DIR", str))
             if env("ARCHIVE_DIR", str)
             else None,
+            audit_log=env_bool("AUDIT_LOG")
+            if env_bool("AUDIT_LOG") is not None
+            else DEFAULTS["audit_log"],
             plugin_wsl_path=env("PLUGIN_WSL_PATH", str),
         )
         if overrides:

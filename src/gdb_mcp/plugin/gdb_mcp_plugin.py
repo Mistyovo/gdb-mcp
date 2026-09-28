@@ -806,7 +806,9 @@ class Plugin(object):
             return
         try:
             msg = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError: deep nesting aborts the parser before it can
+            # raise ValueError; the line is garbage either way — drop it
             return
         if not isinstance(msg, dict):
             return

@@ -21,8 +21,16 @@ from gdb_mcp.tools import register_all
 log = logging.getLogger("gdb_mcp.server")
 
 
-def build_app(config: Config, registry: SessionRegistry, analysis=None) -> FastMCP:
-    server_ctx = ServerContext(config=config, registry=registry, analysis=analysis)
+def build_app(config: Config, registry: SessionRegistry, analysis=None, audit=None) -> FastMCP:
+    from gdb_mcp.audit import AuditLog, disabled
+
+    if audit is None:
+        audit = (
+            AuditLog(config.log_dir / "audit.log") if config.audit_log else disabled()
+        )
+    server_ctx = ServerContext(
+        config=config, registry=registry, analysis=analysis, audit=audit
+    )
 
     @asynccontextmanager
     async def _lifespan(app: FastMCP):
@@ -71,7 +79,7 @@ def build_app(config: Config, registry: SessionRegistry, analysis=None) -> FastM
     return app
 
 
-async def _serve_http(app: FastMCP, config: Config) -> None:
+async def _serve_http(app: FastMCP, config: Config, audit=None) -> None:
     """Run the streamable-HTTP transport behind the security middleware."""
     import uvicorn
 
@@ -91,6 +99,7 @@ async def _serve_http(app: FastMCP, config: Config) -> None:
         config.mcp_port,
         config.token,
         config.observer_tokens,
+        audit=audit,
     )
     uvicorn_kwargs: dict = {}
     if config.mcp_tls_cert:
@@ -137,14 +146,21 @@ async def serve(config: Config) -> None:
         # off by default so no background work starts unprompted
         analysis = AnalysisManager(config, events=broker)
 
-    listener = PluginTcpListener(config, registry)
+    # security audit log (hash-chained, separate from session journals)
+    from gdb_mcp.audit import AuditLog, disabled
+
+    audit = (
+        AuditLog(config.log_dir / "audit.log") if config.audit_log else disabled()
+    )
+
+    listener = PluginTcpListener(config, registry, audit=audit)
     await listener.start()
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
-            app = build_app(config, registry, analysis)
+            app = build_app(config, registry, analysis, audit=audit)
             if config.mcp_http:
-                await _serve_http(app, config)
+                await _serve_http(app, config, audit=audit)
             else:
                 await app.run_stdio_async()
         else:

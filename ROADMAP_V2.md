@@ -243,3 +243,62 @@ kali 7.1.5 内核）：
 3. 不抢 pwntools 的进程 I/O 主权（fuzz_loop 走 inferior I/O 可选通道）。
 4. 不做"看起来能用"的未验证功能——凡涉真实环境（rr/Ghidra/docker 端到端），
    保持"延期并写明设计"的纪律。
+
+## 9. 外部评审采纳清单（2026-09-29，Claude 架构级评审）
+
+评审基于 README 公开面（未读源码），按 P0→P2 分层给出建议。逐条核实后的
+处置如下——其中多项经源码核对**已经落地**，部分与既有设计决策冲突而拒绝
+（附理由），其余纳入路线图或本轮直接实现。
+
+### 9.1 本轮直接落地（2026-09-29，765 单测全绿）
+
+| 评审建议 | 处置 |
+|---|---|
+| P0 协议层健壮性测试（畸形/截断 JSON-lines） | ✅ `tests/test_protocol_fuzz.py`：种子化随机/变异模糊测试打 `LineReader`/`parse_line`/`unwrap_token`/validate 族、活体 listener、插件 `_dispatch_line`。**过程中发现并修复真 bug**：深嵌套 JSON 触发 `RecursionError` 穿透 `parse_line`（只 catch `JSONDecodeError`），在服务端会绕过 `except ProtocolError` 拆掉整个会话而非拒绝该行；插件侧同步加固 |
+| P0 gdb 版本兼容矩阵 | ✅ CI `gdb-integration` 改为 matrix：ubuntu-22.04（gdb 12.1）+ ubuntu-24.04（gdb 15.x）跑真实 gdb 集成套件（未本地验证，待 push 后首跑）；本地 WSL2 gdb 17.2 全套继续覆盖。插件内的版本回退本来就集中在少数探测点（`_gdb_version` 回退、`qualified` 断点参数、`gdb.interrupt` ≥15、`blocked_signals` 特性探测），刻意不做独立 compat.py——插件保持 stdlib-only 单文件可 `-x` 部署是更硬的约束 |
+| 架构4 journal 显式版本化 | ✅ journal 新文件写 `meta` 首行携带 `SCHEMA_VERSION`，`migrate_entries()` 显式迁移骨架；未知新版本不加载进镜像（语义不明不得进脚本编译）但文件保持可追加；`sessions.json` 的 `version` 字段从被忽略改为显式校验（未知版本拒绝恢复） |
+| 安全2 审计日志与 journal 分离 | ✅ 新增 `audit.py`：SHA-256 哈希链 append-only JSONL（`<log_dir>/audit.log`），`verify_log()` 可独立校验完整性；接线五类事件：握手/握手拒绝（含 token 失配）、握手后协议违规、HTTP 403、观察者越权、UNSAFE 命令拦截。默认开启，`--no-audit-log`/`GDB_MCP_AUDIT_LOG=0` 关闭 |
+| 架构2 并发语义显式化 | ✅ 文档化（README 双语"并发语义"节）：单会话严格串行 + per-request 超时 + `INFERIOR_RUNNING` 快速失败。评审建议的"busy 状态返回"实际上已存在——忙会话的第二调用排队等待而非挂死，执行类动词对运行中 inferior 立即报 `INFERIOR_RUNNING` |
+| 文档/生态（客户端片段、capability 图、版本矩阵） | ✅ README 双语补齐：Claude Code/Cursor/Codex CLI 配置片段、core/pwn/static/kernel capability 分层说明、已验证 gdb 版本表 |
+| 安全3 token TTL | ⚖️ 有意拒绝并文档化（README"关于 token 有效期"）：会话 token 是主 token 的无状态 HMAC 派生，重启免状态重新验证正是设计目标，单独过期与之矛盾；补偿设计=主 token 不出进程 + 按会话隔离 + HTTP 走可吊销的 mTLS + 换主 token 重启即可 |
+
+### 9.2 核实后确认已落地（评审时 README 未体现）
+
+| 评审建议 | 现状 |
+|---|---|
+| 架构5 Ghidra 分析硬超时/取消 | 已有：`analysis_timeout`（默认 900s）双重保障——命令行 `timeout --kill-after` + Python 侧 `asyncio.wait_for` + `proc.kill()`；`decompile_timeout` 同理 |
+| 架构3 core/pwn/static/kernel 解耦 | 已有等价物：工具按模块分层 + 声明式 `@tool(core=)` 注册表推导 `CORE_TOOLS`；`GDB_MCP_TOOL_PROFILE=core` 即最小档。README 本轮补写映射 |
+| 多客户端 controller 互踩 | 已有：server 端 per-session lock 串行化 + 插件单队列单线程 marshal，天然互斥 |
+
+### 9.3 纳入路线图（按价值排序）
+
+1. **ROP 链构造**（评审 P1）：`build_rop_chain(goal, constraints)` ——在
+   `search_gadgets`（已合入）之上做 pwntools ROP 对象式封装，返回候选链 +
+   gadget 来源地址。这是"辅助分析"到"辅助产出利用链"的跃迁，也是与纯静态
+   MCP 的最大差异点。
+2. **angr 符号执行桥**（评审 P2 但差异化价值高）：仿 Ghidra 桥形态（独立
+   进程 + 结果缓存 + 超时保护），`find_path_to_address` /
+   `solve_constraints_for_branch`，把 crash_report 的 backtrace 转成"输入该
+   怎么构造"。
+3. **外部 fuzzer 语料对接**：`import_corpus(dir)` → `triage_batch()` 批量
+   喂给现有 triage_crash 流水线（AFL++/libFuzzer crash 目录直接进 gdb
+   分诊）——比扩张内建 fuzz_loop 的 ROI 高。
+4. **多 agent 会话所有权**：显式 `session.lock(reason)/release()` 或租约
+   语义，为 orchestrator + 子 agent 协作铺路（当前 controller 串行化已防
+   互踩，缺的是"协商所有权"）。
+5. **多架构 bench**：ARM(32/64)/MIPS 任务族进 bench（kernel_launch 已支持
+   QEMU，heap_bins/cyclic 跨架构稳定性待验收）。
+6. **供应链**：锁定已验证依赖版本区间文档（pwndbg/Ghidra/ROPgadget）+
+   发布 SBOM。
+7. **多模型 leaderboard**：bench `cli agent` 已可插拔 provider（deepseek
+   首报已提交），定期多模型跑分发布——差异化营销 + 反向发现"agent 用不
+   明白"的工具设计问题。
+
+### 9.4 拒绝项及理由
+
+| 建议 | 理由 |
+|---|---|
+| rr 集成（GDB_MCP_LAUNCHER=rr + 反向 watchpoint 工具） | rr 已于 3.4 评估并放弃：WSL2 下 PMU 不可用（真机验证）；gdb 原生 `record full` + `reverse_*` 已合入（`continue_execution(mode="reverse_*")`），零依赖覆盖同一场景。rr 待 WSL PMU 成熟或原生 Linux 主力场景出现再议 |
+| MCP Registry 提交 / GitHub topics | 外发动作待用户决策（PyPI 发布已于 2026-09-18 由用户取消，registry 同属发布面）；仓库内文档与客户端片段已备齐，提交随时可做 |
+| Docker 后端默认 seccomp 白名单 | 方向认同，但 docker 运行时路径本身尚未端到端验证（§7.2 诚实标注）；与 docker 后端实机验证一并做，避免"看起来能用"的未验证配置 |
+| session token TTL | 见 9.1——与无状态派生设计冲突，已文档化替代缓解 |

@@ -9,7 +9,7 @@ from gdb_mcp.results import load_result_slice, store_result
 from gdb_mcp.security import is_unsafe_gdb_command
 from gdb_mcp.sessions import RUNNING
 
-from ._common import check_stopped, config_from, resolve_gdb
+from ._common import audit_from, check_stopped, config_from, resolve_gdb
 from .registry import tool
 from .stop_context import collect_stop_context
 
@@ -76,6 +76,7 @@ async def execute_command(
         raise ValueError("limit must be a positive int")
     cfg = config_from(ctx)
     if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
+        audit_from(ctx).record("unsafe_command_blocked", command=command)
         raise GdbMcpError(
             "UNSAFE_BLOCKED",
             "command can execute code outside the debugger "
@@ -123,6 +124,7 @@ async def batch_commands(
     results = []
     for command in commands:
         if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
+            audit_from(ctx).record("unsafe_command_blocked", command=command)
             results.append(
                 {
                     "ok": False,

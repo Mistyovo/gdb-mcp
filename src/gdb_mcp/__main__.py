@@ -82,6 +82,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "(repeatable); observers may query state but mutating tools "
         "reject them",
     )
+    p.add_argument(
+        "--no-audit-log",
+        action="store_true",
+        default=None,
+        help="disable the hash-chained security audit log "
+        "(<log-dir>/audit.log; enabled by default, GDB_MCP_AUDIT_LOG=0 "
+        "also disables)",
+    )
     p.add_argument("--mcp-tls-cert", default=None, help="TLS certificate for MCP HTTPS")
     p.add_argument("--mcp-tls-key", default=None, help="TLS private key for MCP HTTPS")
     p.add_argument(
@@ -124,6 +132,7 @@ def _overrides(args) -> dict:
         "mcp_tls_cert": args.mcp_tls_cert,
         "mcp_tls_key": args.mcp_tls_key,
         "mcp_tls_client_ca": args.mcp_tls_client_ca,
+        "audit_log": None if args.no_audit_log is None else not args.no_audit_log,
     }
 
 

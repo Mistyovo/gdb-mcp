@@ -36,6 +36,24 @@ Claude Code (Windows) ──stdio/MCP──► gdb-mcp server (FastMCP, Windows)
 - gdb 非线程安全：插件内所有 `gdb.*` 调用经 `gdb.post_event` 派发到 gdb 主线程；`stop`/`running`/`exited`/`prompt` 等异步通知经 `gdb.events` 推送。
 - 打断运行中的 inferior：`post_event(execute("interrupt"))`（gdb 17.2 实测唯一可靠机制；`gdb.interrupt()` 与进程 SIGINT 均不可靠）。
 
+**并发语义**：同一会话内工具调用严格串行——插件把所有 gdb API 调用
+marshal 到 gdb 主线程，服务端按会话加锁（`crash_report` 等复合工具在同一
+锁下原子执行）。忙会话上的第二个调用会等待，上限为
+`GDB_MCP_REQUEST_TIMEOUT`（默认 30s）；inferior 运行中调用执行类动词会立刻
+返回 `INFERIOR_RUNNING` 而非静默排队。不同会话之间完全独立。
+
+**兼容性**：插件对 gdb API 的版本差异带显式回退（加载期探测，如
+`gdb.interrupt` 需 gdb ≥ 15、`qualified` 断点参数仅新版存在）。已验证：
+
+| gdb | 验证途径 |
+|---|---|
+| 12.1 | CI（ubuntu-22.04 apt） |
+| 15.x | CI（ubuntu-24.04 apt） |
+| 17.2 + pwndbg | WSL2 本地全套端到端 |
+
+服务器侧 Python 3.10+；插件本体 stdlib-only 单文件，任何带内嵌 Python 的
+gdb 都能 `-x` 直接加载。
+
 ## 安装
 
 **Windows 侧（MCP 服务器）**（在仓库根目录执行）
@@ -72,9 +90,9 @@ export GDB_MCP_HOST=$(ip route show default | awk '{print $3}')
 `GDB_MCP_TOKEN`；gdb 进程侧必须使用相同 token。非 loopback 监听可能触发
 Windows 防火墙授权。
 
-## Claude Code 配置
+## MCP 客户端配置
 
-项目根目录 `.mcp.json`（或 Claude Code 的 MCP 设置）：
+Claude Code（项目根或用户级 `.mcp.json`）：
 
 ```json
 {
@@ -86,6 +104,18 @@ Windows 防火墙授权。
   }
 }
 ```
+
+Cursor：同结构，写入 `~/.cursor/mcp.json`。Codex CLI 写入
+`~/.codex/config.toml`：
+
+```toml
+[mcp_servers.gdb-mcp]
+command = "gdb-mcp"
+env = { GDB_MCP_PORT = "3939" }
+```
+
+其他 MCP 客户端：stdio 方式拉起 `gdb-mcp`（或 `--http` + `--mcp-port`
+走加固 HTTP 传输，配 bearer token）。
 
 ## 用法
 
@@ -150,6 +180,18 @@ token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 
   （`UNSAFE_BLOCKED`），服务端与 gdb 内插件双层拦截；`GDB_MCP_ALLOW_UNSAFE=1`
   （`--allow-unsafe`）显式放行并向下传递给被 launch 的 gdb。注意 gdb 命令
   缩写（如 `sh`、`py`）使前缀黑名单是尽力而为的纵深防御，不是沙箱。
+- **哈希链审计日志**（`<log-dir>/audit.log`，默认开启，`--no-audit-log`
+  关闭）独立于会话 journal 记录安全决策——握手与拒绝、HTTP 403、观察者
+  越权、unsafe 命令拦截；每条记录 SHA-256 提交前一条的哈希，事后篡改可被
+  `gdb_mcp.audit.verify_log` 检出。
+- journal 与 `sessions.json` 持久化带**显式 schema 版本**：未知的新版本
+  拒绝加载而非猜测语义（journal 历史保留在磁盘不删）。
+
+**关于 token 有效期**：会话 token 是主 token 的无状态 HMAC-SHA256 派生——
+这正是插件能在服务器重启后免状态重新验证的原因，因此无法单独过期。补偿
+设计：主 token 不出服务进程、会话 token 对其他会话无效、HTTP 暴露面应走
+TLS/mTLS（客户端证书可吊销）。需要缩短泄漏窗口时，换主 token 重启服务器
+即可——插件自动重新派生。
 
 ## 崩溃定位流程（LLM 视角）
 
@@ -169,6 +211,11 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 ```
 
 ## 工具一览（默认 52 个；`core` 档 12 个；开 `--experimental` 共 60 个）
+
+按职责分组，也按 **capability 层**划分：**core**（会话/执行/断点/状态——
+任何调试场景都需要）、**pwn**（崩溃定位/堆/checkpoint/campaign/委托执行）、
+**static**（Ghidra 静态桥）、**kernel**（实验性 QEMU/gdbstub 工具）。各层共享
+同一套线协议；`core` 档即非漏洞利用后端所需的子集。
 
 | 类别 | 工具 |
 |---|---|
@@ -249,6 +296,7 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 | `GDB_MCP_LAUNCHER` / `GDB_MCP_SSH_HOST` / `GDB_MCP_DOCKER_IMAGE` | 服务器 | 启动后端（wsl/native/docker/ssh）及其参数 |
 | `GDB_MCP_MCP_HTTP` / `GDB_MCP_MCP_HOST` / `GDB_MCP_MCP_PORT` | 服务器 | MCP streamable HTTP 传输（默认关，127.0.0.1:8001） |
 | `GDB_MCP_READONLY` / `GDB_MCP_ALLOW_UNSAFE` | 两侧 | 只读模式；放行逃逸调试器的命令（双层拦截的开关） |
+| `GDB_MCP_AUDIT_LOG` | 服务器 | `0` 关闭哈希链安全审计日志（默认开，`--no-audit-log` 同效） |
 | `GDB_MCP_MAX_MEM_READ` / `GDB_MCP_MAX_ASYNC_LINE` | 两侧 | 内存读取与协议帧上限 |
 
 部分内存读取返回 `segments`（每段都含实际 `addr`、`length`、`hex` 和
@@ -265,7 +313,7 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 
 ```bash
 # 单元测试（无需 gdb）
-python -m pytest tests/ -q                        # 632 项，约 9 秒
+python -m pytest tests/ -q                        # 765 项（含协议层种子模糊测试）
 
 # 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
 wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议

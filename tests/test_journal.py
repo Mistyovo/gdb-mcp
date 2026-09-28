@@ -40,8 +40,11 @@ class TestJournal:
         lines = (tmp_path / "journals" / "s-1.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()
-        assert len(lines) == 2
-        assert '"kind": "request"' in lines[0] or '"kind":"request"' in lines[0]
+        # schema meta line + the two entries; meta is never mirrored
+        assert len(lines) == 3
+        assert json.loads(lines[0])["kind"] == "meta"
+        assert json.loads(lines[0])["schema_version"] >= 1
+        assert '"kind": "request"' in lines[1] or '"kind":"request"' in lines[1]
 
     def test_append_survives_unwritable_path(self, tmp_path):
         journal = Journal(tmp_path / "journals" / "s-2.jsonl")
@@ -62,8 +65,8 @@ class TestJournal:
         assert second.entries()[1]["event"] == "stop"
         second.append("request", {"verb": "break", "params": {}, "ok": True})
         assert len(second) == 3
-        # the file holds the full continuous history
-        assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+        # the file holds the full continuous history (meta + 3 entries)
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 4
 
     def test_torn_tail_line_tolerated(self, tmp_path):
         path = tmp_path / "journals" / "torn.jsonl"
@@ -84,8 +87,66 @@ class TestJournal:
         assert len(journal) == 5
         assert journal.entries()[0]["params"]["i"] == 3
         assert journal.head_truncated is True
-        # the file keeps everything
-        assert len(path.read_text(encoding="utf-8").splitlines()) == 8
+        # the file keeps everything (meta + 8 entries)
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 9
+
+
+class TestJournalSchemaVersion:
+    def test_new_file_records_schema_version(self, tmp_path):
+        from gdb_mcp.journal import SCHEMA_VERSION
+
+        journal = Journal(tmp_path / "j" / "new.jsonl")
+        assert journal.schema_version == SCHEMA_VERSION
+        first = json.loads(
+            (tmp_path / "j" / "new.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert first == {
+            "ts": first["ts"],
+            "kind": "meta",
+            "schema_version": SCHEMA_VERSION,
+        }
+
+    def test_pre_versioning_journal_loads_as_v1(self, tmp_path):
+        path = tmp_path / "old.jsonl"
+        path.write_text(
+            json.dumps({"ts": 1.0, "kind": "request", "verb": "eval", "ok": True})
+            + "\n",
+            encoding="utf-8",
+        )
+        journal = Journal(path, load_existing=True)
+        assert journal.schema_version == 1
+        assert journal.unsupported_schema is False
+        assert len(journal) == 1
+
+    def test_newer_schema_journal_not_loaded_but_still_appendable(self, tmp_path):
+        """A journal from a newer build: history is left on disk untouched,
+        the mirror stays empty (unknown semantics must not leak into script
+        compilation), and appending still works — journaling must never
+        break debugging."""
+        path = tmp_path / "future.jsonl"
+        path.write_text(
+            json.dumps({"kind": "meta", "schema_version": 99, "ts": 1.0})
+            + "\n"
+            + json.dumps({"kind": "request", "verb": "eval", "ok": True})
+            + "\n",
+            encoding="utf-8",
+        )
+        journal = Journal(path, load_existing=True)
+        assert journal.unsupported_schema is True
+        assert journal.schema_version == 99
+        assert len(journal) == 0
+        journal.append("request", {"verb": "ping", "ok": True})
+        assert len(journal) == 1
+        # original two lines preserved, new entry appended after them
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        assert json.loads(lines[0])["schema_version"] == 99
+
+    def test_migrate_entries_identity_for_current_version(self):
+        from gdb_mcp.journal import SCHEMA_VERSION, migrate_entries
+
+        entries = [{"kind": "request", "verb": "eval", "ok": True}]
+        assert migrate_entries(SCHEMA_VERSION, entries) is entries
 
 
 class TestCompileGdbscript:

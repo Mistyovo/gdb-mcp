@@ -26,6 +26,33 @@ MAX_LIST = 32
 #: writes larger than this are not compiled into the script
 MAX_COMPILE_WRITE = 256
 
+#: Journal entry format version. Journals persist across server upgrades,
+#: so a silent schema change would either break deserialization or — worse —
+#: load entries with wrong semantics into script compilation. New files
+#: carry a ``meta`` first line; readers dispatch on the recorded version.
+SCHEMA_VERSION = 1
+
+
+def migrate_entries(from_version: int, entries: list[dict]) -> list[dict]:
+    """Bring journal ``entries`` recorded under ``from_version`` up to
+    :data:`SCHEMA_VERSION`. Each step is an explicit, testable function;
+    unknown newer versions must never reach here (loaders refuse them)."""
+    version = from_version
+    while version < SCHEMA_VERSION:
+        entries = _MIGRATIONS[version](entries)
+        version += 1
+    return entries
+
+
+def _migrate_v1_to_v2(entries: list[dict]) -> list[dict]:  # pragma: no cover
+    """Placeholder for the first real schema change."""
+    raise NotImplementedError
+
+
+_MIGRATIONS = {
+    # 1: _migrate_v1_to_v2,
+}
+
 
 def _trim(value, depth: int = 0):
     if isinstance(value, str):
@@ -65,16 +92,36 @@ class Journal:
         self.path = Path(path)
         self._entries: list[dict] = []
         self.head_truncated = False
+        #: set when the on-disk journal was written by a NEWER schema than
+        #: this build understands: history stays on disk untouched, but it
+        #: is not loaded into the mirror (its entry semantics are unknown)
+        self.unsupported_schema = False
+        #: schema version of the on-disk file (None until read/written)
+        self.schema_version: int | None = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             # journals carry target data and exploit payloads; keep them
             # private where the OS supports it (POSIX)
             if not self.path.exists():
                 self.path.touch(mode=0o600)
+                self._write_meta()
         except OSError:
             pass
         if load_existing:
             self._load_existing()
+
+    def _write_meta(self) -> None:
+        self.schema_version = SCHEMA_VERSION
+        entry = {
+            "ts": round(time.time(), 3),
+            "kind": "meta",
+            "schema_version": SCHEMA_VERSION,
+        }
+        try:
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # journaling must never break debugging
 
     def _load_existing(self) -> None:
         try:
@@ -85,15 +132,32 @@ class Journal:
         if len(lines) > self.LOAD_CAP:
             self.head_truncated = True
             lines = lines[-self.LOAD_CAP :]
-        entries: list[dict] = []
+        parsed: list[dict] = []
         for line in lines:
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue  # torn tail line from a crash mid-write
             if isinstance(entry, dict):
-                entries.append(entry)
-        self._entries = entries
+                parsed.append(entry)
+        file_version = 1  # pre-versioning journals are v1 by definition
+        for entry in parsed:
+            if entry.get("kind") == "meta" and isinstance(
+                entry.get("schema_version"), int
+            ):
+                file_version = entry["schema_version"]
+                break
+        if file_version > SCHEMA_VERSION:
+            # written by a newer build: keep appending (journaling must
+            # never break debugging) but do not interpret the history
+            self.unsupported_schema = True
+            self.schema_version = file_version
+            self._entries = []
+            return
+        self.schema_version = file_version
+        entries = migrate_entries(file_version, parsed)
+        # meta lines are bookkeeping, not history
+        self._entries = [e for e in entries if e.get("kind") != "meta"]
 
     def append(self, kind: str, data: dict) -> None:
         entry = {"ts": round(time.time(), 3), "kind": kind, **_trim(data)}

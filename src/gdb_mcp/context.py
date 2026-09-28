@@ -21,6 +21,9 @@ class ServerContext:
     config: Config
     registry: SessionRegistry
     analysis: Any = None
+    #: hash-chained security audit log (a no-op instance when disabled);
+    #: attached by build_app, read via tools._common.audit_from
+    audit: Any = None
     _launcher: Any = field(default=None, repr=False)
 
     def launcher(self) -> Any:

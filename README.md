@@ -12,7 +12,7 @@ development.
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-lightgrey)](#launchers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-632%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-765%20passing-brightgreen)](#testing)
 
 [Quick Start](#quick-start) · [Tools](#tool-catalog) · [Architecture](#architecture) · [Experimental](#experimental-features) · [Roadmap](ROADMAP_V2.md) · [中文文档](README.zh-CN.md)
 
@@ -39,11 +39,12 @@ with none of the prompt-scraping fragility.
   summaries, so iterating 1,000 times costs one tool call.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
-- **Verified against reality** — 632 unit tests plus end-to-end suites driving
-  real gdb 17.2 in WSL, and a versioned acceptance benchmark
-(`bench/`, 576 tasks across 8 families, reference-solved 576/576) that
-proves every task solvable before any model runs on it — the first
-model report is committed under `bench/reports/`.
+- **Verified against reality** — 765 unit tests (including seeded
+  protocol-layer fuzzing against the JSON-lines control channel) plus
+  end-to-end suites driving real gdb in WSL, and a versioned acceptance
+  benchmark (`bench/`, 576 tasks across 8 families, reference-solved
+  576/576) that proves every task solvable before any model runs on it —
+  the first model report is committed under `bench/reports/`.
 
 ## Quick Start
 
@@ -59,7 +60,9 @@ pip install -e .
 sudo apt install gdb python3 python3-pip gcc   # pwndbg optional but recommended
 ```
 
-**3. Register with your MCP client** (`.mcp.json`):
+**3. Register with your MCP client**:
+
+Claude Code (`.mcp.json` in the project or user scope):
 
 ```json
 {
@@ -71,6 +74,18 @@ sudo apt install gdb python3 python3-pip gcc   # pwndbg optional but recommended
   }
 }
 ```
+
+Cursor — same shape, in `~/.cursor/mcp.json`. Codex CLI — add to
+`~/.codex/config.toml`:
+
+```toml
+[mcp_servers.gdb-mcp]
+command = "gdb-mcp"
+env = { GDB_MCP_PORT = "3939" }
+```
+
+Any other MCP client: a stdio server launching `gdb-mcp` (or the hardened
+HTTP transport via `--http` + `--mcp-port`, with a bearer token).
 
 **4. Start a session** — either let the server launch gdb:
 
@@ -100,7 +115,12 @@ One call. Full picture.
 ## Tool Catalog
 
 **52 tools by default** (12 under `GDB_MCP_TOOL_PROFILE=core`, 60 with
-`--experimental`), grouped by job:
+`--experimental`), grouped by job — and by capability layer: **core**
+(sessions/execution/breakpoints/state — any debugging scenario),
+**pwn** (crash triage, heap, checkpoints, campaign, policies),
+**static** (the Ghidra bridge), and **kernel** (experimental QEMU/gdbstub
+tooling). The layers share one wire protocol; the `core` profile is the
+subset a non-exploitation backend would need.
 
 | Group | Tools |
 |---|---|
@@ -143,6 +163,28 @@ Launchers: **WSL2** · **native Linux** · **Docker** (`SYS_PTRACE` image recipe
 included) · **SSH** — pick with `GDB_MCP_LAUNCHER`. Transport: stdio by
 default, or hardened **streamable HTTP** (`--http`) with Host/Origin
 validation, bearer tokens, TLS and mutual-TLS options.
+
+**Concurrency semantics.** Within one session, tool calls execute strictly
+one-at-a-time: the plugin marshals every gdb API call onto gdb's main
+thread, and the server serializes requests per session (composite tools
+like `crash_report` run atomically under the same lock). A second call on
+a busy session waits — bounded by `GDB_MCP_REQUEST_TIMEOUT` (30s default)
+— rather than interleaving. Execution verbs while the inferior runs fail
+fast with `INFERIOR_RUNNING` instead of queueing silently. Different
+sessions are fully independent.
+
+**Compatibility.** The plugin's gdb API usage carries explicit per-version
+fallbacks (feature-probed at load, e.g. `gdb.interrupt` on gdb ≥ 15,
+`qualified` breakpoints on newer builds). Verified against:
+
+| gdb | Where |
+|---|---|
+| 12.1 | CI (ubuntu-22.04 apt) |
+| 15.x | CI (ubuntu-24.04 apt) |
+| 17.2 + pwndbg | WSL2, full end-to-end suites locally |
+
+Python 3.10+ on the server side; the plugin itself is stdlib-only so it
+can be `source`-deployed into any gdb with an embedded Python.
 
 ## Designed for Agents
 
@@ -192,16 +234,31 @@ variable — a stray shell variable must never destabilize your server):
 - `--readonly` drops mutating tools; debugger-escaping commands
   (`shell`/`python`/…) are blocked at **two layers** unless
   `--allow-unsafe`.
+- A **hash-chained audit log** (`<log-dir>/audit.log`, on by default,
+  `--no-audit-log` to disable) records security decisions — handshakes
+  and rejections, HTTP 403s, observer denials, unsafe-command blocks —
+  as a SHA-256 chain where every record commits to its predecessor, so
+  after-the-fact edits are detectable (`gdb_mcp.audit.verify_log`).
 - Journals, session state and results are written `0600`; persisted state is
-  re-validated on load. GDB can execute arbitrary code on its target — run it
-  on targets you own. Full notes: [ROADMAP_V2.md](ROADMAP_V2.md), CIA audit
-  in the commit history.
+  re-validated on load (journals and `sessions.json` carry explicit schema
+  versions; unknown newer versions are refused, not guessed at). GDB can
+  execute arbitrary code on its target — run it on targets you own. Full
+  notes: [ROADMAP_V2.md](ROADMAP_V2.md), CIA audit in the commit history.
+
+**On token lifetimes:** session tokens are stateless
+HMAC-SHA256 derivations of the master token, which is what lets a plugin
+re-verify after a server restart without state — so they cannot expire
+individually. The compensating design: the master token never leaves the
+server process, per-session tokens are useless for any other session, and
+HTTP exposure should use TLS/mTLS (client certificates *are* revocable).
+If you need a shorter leak window, restart the server with a new master
+token — plugins re-derive automatically.
 
 ## Testing
 
 ```bash
 # unit (no gdb required)
-python -m pytest tests/ -q                        # 632 tests, ~9s
+python -m pytest tests/ -q                        # 765 tests, ~12s
 
 # real-gdb suites (WSL2 or native Linux; each prints its own verdict)
 wsl bash tests/integration/run_wsl_integration.sh # plugin <-> server protocol
@@ -227,7 +284,7 @@ Development status, benchmark results, and the long-term vision live in
 
 ## Contributing
 
-Issues and PRs welcome — the test suite (632 tests, no gdb required for unit
+Issues and PRs welcome — the test suite (765 tests, no gdb required for unit
 runs) is the contract: please add tests for behavior changes and keep
 `ruff check` clean.
 

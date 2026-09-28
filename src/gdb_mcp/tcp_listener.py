@@ -34,9 +34,11 @@ HELLO_TIMEOUT = 10.0
 
 
 class PluginTcpListener:
-    def __init__(self, config: Config, registry: SessionRegistry):
+    def __init__(self, config: Config, registry: SessionRegistry, audit=None):
         self.config = config
         self.registry = registry
+        #: hash-chained security audit log (None/None-enabled => no-op)
+        self.audit = audit
         self.server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -78,6 +80,14 @@ class PluginTcpListener:
             session = await self._handshake(reader, writer)
         except Exception as exc:
             log.warning("handshake with %s failed: %s", peer, exc)
+            if self.audit is not None:
+                code = getattr(exc, "code", "HANDSHAKE_FAILED")
+                self.audit.record(
+                    "handshake_rejected",
+                    peer="%s:%s" % (peer[0], peer[1]) if isinstance(peer, tuple) else str(peer),
+                    reason=code,
+                    detail=str(exc)[:200],
+                )
             writer.close()
             return
         session.reader_task = asyncio.create_task(
@@ -122,6 +132,14 @@ class PluginTcpListener:
         msg = unwrap_token(parsed, expected)
         validate_hello(msg)
         session = self.registry.register_hello(msg, writer)
+        if self.audit is not None:
+            self.audit.record(
+                "handshake",
+                session_id=session.session_id,
+                pid=msg.get("pid"),
+                bound=sid == session.session_id,
+                token_protected=bool(expected),
+            )
         ack = build_hello_ack(
             session.session_id, __version__, self.config.heartbeat_sec
         )
@@ -145,6 +163,15 @@ class PluginTcpListener:
                     await self._dispatch(session, parse_line(line))
         except ProtocolError as exc:
             log.warning("session %s protocol error: %s", session.session_id, exc)
+            if self.audit is not None:
+                # the connection is dropped fail-closed below; keep the
+                # evidence of what came in
+                self.audit.record(
+                    "protocol_violation",
+                    session_id=session.session_id,
+                    reason=exc.code,
+                    detail=exc.message[:200],
+                )
         except (ConnectionError, asyncio.IncompleteReadError, OSError) as exc:
             log.debug("session %s connection closed: %s", session.session_id, exc)
         finally:
