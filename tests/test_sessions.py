@@ -581,3 +581,26 @@ class TestPersistence:
         dest = tmp_path / "archive" / s.session_id
         # the server only collects logs it owns (under its log dir)
         assert not list(dest.glob("*.log"))
+
+
+class TestSessionRemovedHook:
+    def test_remove_calls_on_session_removed(self, registry):
+        """Final per-session cleanup (kernel QEMU teardown) rides this
+        hook; a regression here leaks a running VM per killed session."""
+        seen = []
+        registry.on_session_removed = seen.append
+        s = registry.reserve("s-hooked")
+        registry.remove(s.session_id)
+        assert seen == ["s-hooked"]
+
+    def test_hook_failure_does_not_block_remove(self, registry):
+        registry.on_session_removed = None
+        s = registry.reserve("s-hook-boom")
+
+        def boom(_sid):
+            raise RuntimeError("hook exploded")
+
+        registry.on_session_removed = boom
+        registry.remove(s.session_id)
+        with pytest.raises(NoSuchSessionError):
+            registry.get(s.session_id)

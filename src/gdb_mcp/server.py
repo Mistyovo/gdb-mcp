@@ -167,6 +167,11 @@ async def serve(config: Config) -> None:
 
     reaper = Launcher(config, registry)
     registry.on_reserved_drop = reaper.kill_stale
+    # kernel sessions own a QEMU VM; the registry's final hook takes it
+    # down when the session goes away for any reason
+    from gdb_mcp.tools.experimental import drop_session_qemu
+
+    registry.on_session_removed = drop_session_qemu
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:

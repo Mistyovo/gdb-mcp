@@ -40,10 +40,7 @@ async def campaign(
     if action == "set":
         if not section or not key or value is None:
             raise ValueError("set requires section, key and value")
-        try:
-            camp.campaign_set(data, section, key, value)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from None
+        camp.campaign_set(data, section, key, value)
         registry_from(ctx).save()
         return {"session_id": session.session_id, "set": {section: {key: value}}}
     if action == "note":

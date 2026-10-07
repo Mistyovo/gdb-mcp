@@ -53,6 +53,28 @@ def _run_ropgadget(binary: str, only: str) -> tuple[int, str]:
 _QEMU_BY_SESSION: dict = {}
 
 
+async def _stop_qemu_of(session_id: str) -> None:
+    qemu = _QEMU_BY_SESSION.pop(session_id, None)
+    if qemu is None:
+        return
+    try:
+        await qemu.stop()
+    except Exception:
+        pass
+
+
+def drop_session_qemu(session_id: str) -> None:
+    """Registry on_session_removed hook: a kernel session going away
+    (kill_session, GC, shutdown cleanup) must take its QEMU VM with it —
+    the handle map alone would leak a running VM."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no loop: drop the handle, nothing to await
+        _QEMU_BY_SESSION.pop(session_id, None)
+        return
+    loop.create_task(_stop_qemu_of(session_id))
+
+
 async def _qemu_stub_up(port: int, distro: str | None, timeout_s: float) -> bool:
     from gdb_mcp.kernel.qemu_runner import stub_check_argv
 

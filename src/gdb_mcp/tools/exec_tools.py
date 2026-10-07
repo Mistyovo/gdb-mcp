@@ -9,25 +9,16 @@ from gdb_mcp.results import load_result_slice, store_result
 from gdb_mcp.security import is_unsafe_gdb_command
 from gdb_mcp.sessions import RUNNING
 
-from ._common import audit_from, check_stopped, config_from, resolve_gdb
+from ._common import audit_from, check_stopped, config_from, resolve_gdb, validate_page
 from .registry import tool
 from .stop_context import collect_stop_context
 
-_MODES = (
-    "continue",
-    "step",
-    "next",
-    "stepi",
-    "nexti",
-    "finish",
-    "until",
-    # gdb native record/replay (recording must be started first with
-    # execute_command('record full')); requires the reverse_* resume
-    # modes below
-    "reverse_continue",
-    "reverse_step",
-    "reverse_next",
-)
+# the plugin's async verb table is the single source: this tool's mode
+# parameter accepts exactly those resumes (imported, not retyped, so a
+# new verb cannot drift between the two tables)
+from gdb_mcp.protocol import ASYNC_VERBS  # noqa: E402
+
+_MODES = tuple(sorted(ASYNC_VERBS))
 
 _BATCH_LIMIT = 32
 
@@ -66,14 +57,7 @@ async def execute_command(
     exceeding the inline limit are stored on disk — the response then
     carries result_file/result_sha256 and read_result serves the
     rest."""
-    if offset is not None and (
-        isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
-    ):
-        raise ValueError("offset must be a non-negative int")
-    if limit is not None and (
-        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
-    ):
-        raise ValueError("limit must be a positive int")
+    validate_page(offset, limit)
     cfg = config_from(ctx)
     if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
         audit_from(ctx).record("unsafe_command_blocked", command=command)
@@ -159,12 +143,7 @@ def read_result(
     path returned when an execute_command output was too large for an
     inline response). offset is a 0-based line number; the response
     carries total_lines and truncated."""
-    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-        raise ValueError("offset must be a non-negative int")
-    if limit is not None and (
-        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
-    ):
-        raise ValueError("limit must be a positive int")
+    validate_page(offset, limit)
     cfg = config_from(ctx)
     return load_result_slice(cfg.log_dir, path, offset, limit)
 

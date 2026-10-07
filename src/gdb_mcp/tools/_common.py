@@ -10,6 +10,18 @@ from gdb_mcp.errors import InferiorRunningError, SessionStateError
 from gdb_mcp.sessions import EXITED, RUNNING, Session, SessionRegistry
 
 
+def validate_page(offset: int | None, limit: int | None) -> None:
+    """Pagination guard shared by the paged read paths."""
+    if offset is not None and (
+        isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+    ):
+        raise ValueError("offset must be a non-negative int")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+    ):
+        raise ValueError("limit must be a positive int")
+
+
 def server_ctx(ctx: Any) -> ServerContext:
     """The :class:`ServerContext` behind a FastMCP ``Context``."""
     return ctx.request_context.lifespan_context

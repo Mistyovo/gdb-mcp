@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import secrets
-from typing import Any
 
 from gdb_mcp import PROTOCOL_VERSION
 from gdb_mcp.errors import ProtocolError
@@ -159,7 +158,11 @@ class LineReader:
             self._check_len(raw)
             lines.append(raw)
         # Guard against a never-terminated line growing unboundedly.
-        self._check_len(bytes(self._buf))
+        # len() only — a bytes() copy here made slow-drip feeds O(n^2)
+        if len(self._buf) > self.max_line:
+            raise ProtocolError(
+                "MALFORMED", f"line exceeds {self.max_line} bytes"
+            )
         return lines
 
     def _check_len(self, raw: bytes) -> None:
@@ -358,20 +361,8 @@ def validate_plugin_message(msg: dict) -> None:
 # --- message validation helpers --------------------------------------------
 
 
-def error_message(code: str, message: str) -> dict:
-    return {"code": code, "message": message}
-
-
 def is_ok_response(msg: dict) -> bool:
     return bool(msg.get("ok", False))
 
 
-def response_result(msg: dict) -> Any:
-    """Extract ``result`` from a response; raise on error responses."""
-    if is_ok_response(msg):
-        return msg.get("result", {})
-    err = msg.get("error", {})
-    raise ProtocolError(
-        err.get("code", "PLUGIN_ERROR"),
-        err.get("message", "unknown plugin error"),
-    )
+

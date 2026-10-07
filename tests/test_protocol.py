@@ -17,7 +17,6 @@ from gdb_mcp.protocol import (
     encode,
     is_ok_response,
     parse_line,
-    response_result,
     unwrap_token,
     validate_hello,
     validate_plugin_message,
@@ -267,18 +266,3 @@ class TestResponseHelpers:
         assert is_ok_response({"ok": True, "result": {}}) is True
         assert is_ok_response({"ok": False, "error": {}}) is False
         assert is_ok_response({}) is False
-
-    def test_response_result_ok(self):
-        assert response_result({"ok": True, "result": {"output": "x"}}) == {"output": "x"}
-
-    def test_response_result_error_raises(self):
-        with pytest.raises(ProtocolError) as ei:
-            response_result(
-                {"ok": False, "error": {"code": "INFERIOR_RUNNING", "message": "m"}}
-            )
-        assert ei.value.code == "INFERIOR_RUNNING"
-
-    def test_response_result_defaults_error_code(self):
-        with pytest.raises(ProtocolError) as ei:
-            response_result({"ok": False, "error": {}})
-        assert ei.value.code == "PLUGIN_ERROR"

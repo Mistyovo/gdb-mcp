@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from gdb_mcp.campaign import sanitize_campaign
+from gdb_mcp.campaign import new_campaign, sanitize_campaign
 from gdb_mcp.config import Config
 from gdb_mcp.errors import (
     AmbiguousSessionError,
@@ -123,15 +123,7 @@ class Session:
     #: optional event fan-out (None => no external subscribers)
     events: EventBroker | None = field(default=None, repr=False)
     #: structured exploit-campaign state (campaign tool / brief injection)
-    campaign: dict = field(
-        default_factory=lambda: {
-            "protections": {},
-            "libc": {},
-            "offsets": {},
-            "primitives": {},
-            "notes": [],
-        }
-    )
+    campaign: dict = field(default_factory=new_campaign)
     #: 3.5 static bridge: attached analysis + last mapped runtime location
     analysis_id: str | None = None
     analysis_error: str | None = None
@@ -452,8 +444,7 @@ class Session:
             await self.wake_stop_waiters()
         else:
             log.debug("session %s: unknown notification event %r", self.session_id, event)
-        if isinstance(event, str):
-            self.publish(event, payload)
+        self.publish(event, payload)
 
     async def wait_for_stop(self, timeout: float) -> bool:
         """Wait until the inferior stops (or gdb is idle/exited).
@@ -543,6 +534,9 @@ class SessionRegistry:
         #: and would outlive the record as an unowned process. Wired by
         #: serve(); None in tests/embedded use.
         self.on_reserved_drop: Any = None
+        #: final per-session cleanup hook (sync, best-effort), called by
+        #: remove(); wired by the server to drop kernel-session QEMU VMs
+        self.on_session_removed: Any = None
 
     # -- registration -------------------------------------------------------
 
@@ -726,6 +720,13 @@ class SessionRegistry:
                     self._by_pid.pop(pid, None)
             self._archive_session(session)
             session.publish("removed")
+        if self.on_session_removed is not None:
+            # best-effort final cleanup (e.g. a kernel session's QEMU
+            # process); never blocks registry bookkeeping
+            try:
+                self.on_session_removed(session_id)
+            except Exception:
+                log.exception("on_session_removed hook failed")
         self.save()
 
     # -- B4: per-session artifact archiving ---------------------------------

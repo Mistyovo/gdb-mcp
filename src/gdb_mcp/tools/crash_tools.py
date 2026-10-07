@@ -16,7 +16,7 @@ from gdb_mcp.campaign import (
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.output import parse_proc_mappings
 from gdb_mcp.results import store_result
-from gdb_mcp.sessions import RUNNING, Session
+from gdb_mcp.sessions import Session
 
 from ._common import (
     check_stopped,
@@ -132,11 +132,6 @@ async def crash_report(
     cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    if session.state == RUNNING:
-        raise GdbMcpError(
-            "INFERIOR_RUNNING",
-            "inferior is running; interrupt + wait_for_stop first",
-        )
     return await _collect_crash_report(
         session, cfg, registry_from(ctx), session.stop_info or {}, max_frames
     )
