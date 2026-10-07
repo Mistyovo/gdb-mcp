@@ -38,6 +38,10 @@ branch = true
 source = ["gdb_mcp"]
 omit = [
     "*/gdb_mcp/__main__.py",
+    # conftest loads the plugin under an alias module name via
+    # importlib, which coverage's source filter does not trace (verified
+    # 2026-10-08: 0% while 300+ mock tests execute it); its real coverage
+    # is the plugin unit tests plus the real-gdb CI smokes
     "*/gdb_mcp/plugin/gdb_mcp_plugin.py",
 ]
 
