@@ -12,12 +12,6 @@ build/
 .ruff_cache/
 logs/
 
-# Local exhaustive/LLM test harnesses
-/src/gdb_mcp/agent.py
-/tests/test_agent.py
-/tests/integration/launch_child_gdb.py
-/tests/integration/run_mcp_tools_e2e.py
-
 # Local experiment artifacts (core dumps, fixture binaries, throwaway harnesses)
 /tests/bridge/
 /tests/ezheap/
