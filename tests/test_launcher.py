@@ -132,7 +132,20 @@ class TestBuildPkillCommand:
 
     def test_force(self):
         cmd = build_pkill_command("s-001", force=True)
-        assert cmd.startswith("pkill -9 -f 'gdbmcp_s-001'")
+        assert cmd.endswith("pkill -9 -f 'gdbmcp_s-001' || true")
+
+    def test_kills_inferior_children_of_marker(self):
+        """Audit 2026-10-07: the marker names only the gdb process; the
+        inferior is a child with its own argv[0] and used to survive the
+        kill. Children of every marker process must be killed too."""
+        for force in (False, True):
+            cmd = build_pkill_command("s-001", force=force)
+            assert "pkill -TERM -P $p" in cmd or "pkill -KILL -P $p" in cmd
+            assert "$(pgrep -f 'gdbmcp_s-001')" in cmd
+        # children get the same escalation ladder as the marker itself
+        graceful = build_pkill_command("s-001", force=False)
+        assert "pkill -TERM -P $p" in graceful
+        assert "pkill -KILL -P $p" in graceful
 
 
 class TestBuildGdbArgv:
@@ -482,3 +495,109 @@ class TestLauncherLifecycle:
                 env=None,
                 timeout_ms=100,
             )
+
+
+class TestStaleLaunchReaping:
+    """Audit 2026-10-07: un-handshook (RESERVED) launches used to leak
+    their gdb forever — GC dropped the record without killing, shutdown
+    dropped everything, and the inferior survived pkill regardless."""
+
+    @pytest.mark.asyncio
+    async def test_gc_terminates_stale_reserved_before_remove(self, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.sessions import SessionRegistry
+
+        registry = SessionRegistry(Config(log_dir=tmp_path, gc_idle_reserved=0.0))
+        dropped = []
+
+        async def on_drop(session):
+            dropped.append((session.session_id, session.distro))
+
+        registry.on_reserved_drop = on_drop
+        stale = registry.reserve("s-stale", kind="gdb")
+        stale.distro = "kali-linux"
+        stale.created_at -= 3600.0
+
+        removed = await registry.gc_once()
+        assert removed == 1
+        assert dropped == [("s-stale", "kali-linux")]
+        assert not registry.has_session("s-stale")
+
+    @pytest.mark.asyncio
+    async def test_gc_hook_failure_still_removes_record(self, tmp_path, caplog):
+        from gdb_mcp.config import Config
+        from gdb_mcp.sessions import SessionRegistry
+
+        registry = SessionRegistry(Config(log_dir=tmp_path, gc_idle_reserved=0.0))
+
+        async def on_drop(session):
+            raise RuntimeError("pkill backend unavailable")
+
+        registry.on_reserved_drop = on_drop
+        stale = registry.reserve("s-stale2", kind="gdb")
+        stale.created_at -= 3600.0
+
+        with caplog.at_level("WARNING"):
+            removed = await registry.gc_once()
+        assert removed == 1
+        assert not registry.has_session("s-stale2")  # record dropped either way
+        assert any("s-stale2" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_sweep_kills_only_unhandshook_launched(self, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+        killed = []
+
+        async def fake_pkill(session_id, force, distro=None):
+            killed.append((session_id, force, distro))
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(launcher, "pkill_marker", fake_pkill)
+        try:
+            reserved = registry.reserve("s-res", kind="gdb")
+            reserved.distro = "kali-linux"
+            # a handshook live session must survive shutdown (B1 design)
+            from test_sessions import FakeWriter, hello
+
+            live = registry.register_hello(hello(), FakeWriter())
+            # an external (not server-launched) reservation: not ours to kill
+            external = registry.reserve(
+                "s-ext", kind="gdb", launched=False, token=None
+            )
+            n = await launcher.terminate_all_reserved()
+            assert n == 1
+            assert killed == [("s-res", False, "kali-linux")]
+            assert registry.get(live.session_id) is live
+            assert registry.get("s-ext") is external
+        finally:
+            monkeypatch.undo()
+
+    @pytest.mark.asyncio
+    async def test_spawn_distro_failure_leaves_no_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        """Audit 2026-10-07: distro detection used to run AFTER reserve —
+        its failure stranded a never-handshook placeholder record."""
+        from gdb_mcp.config import Config
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import SessionRegistry
+
+        config = Config(log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+
+        async def boom(override=None):
+            raise ValueError("no distro available")
+
+        monkeypatch.setattr(launcher, "distro", boom)
+        with pytest.raises(ValueError):
+            await launcher._spawn(
+                ["gdb"], {}, None, "s-x", tmp_path / "x.log", "gdb", True
+            )
+        assert not registry.has_session("s-x")

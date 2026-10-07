@@ -159,6 +159,14 @@ async def serve(config: Config) -> None:
 
     listener = PluginTcpListener(config, registry, audit=audit)
     await listener.start()
+    # stale-launch reaping: GC dropping (or shutdown leaving) a session
+    # that never handshook must also terminate its process tree, or the
+    # gdb leaks with no owner. Handshook sessions deliberately survive a
+    # server restart (B1: re-hello revives them).
+    from gdb_mcp.launcher import Launcher
+
+    reaper = Launcher(config, registry)
+    registry.on_reserved_drop = reaper.kill_stale
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
@@ -180,3 +188,11 @@ async def serve(config: Config) -> None:
         with suppress(asyncio.CancelledError):
             await gc_task
         await listener.stop()
+        # launches that never handshook have nothing to re-hello to:
+        # terminate their process trees instead of leaking them
+        try:
+            killed = await reaper.terminate_all_reserved()
+            if killed:
+                log.info("terminated %d un-handshook session(s) at shutdown", killed)
+        except Exception:  # pragma: no cover - best-effort teardown
+            log.exception("shutdown sweep failed")

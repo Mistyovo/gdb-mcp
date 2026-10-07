@@ -126,13 +126,24 @@ def build_bash_command(
 
 def build_pkill_command(session_id: str, force: bool) -> str:
     """bash snippet killing the process tree of a launched session by its
-    argv[0] marker."""
+    argv[0] marker.
+
+    The marker only names the gdb itself (renamed via ``exec -a``); the
+    inferior is a CHILD of gdb with its own argv[0], so matching the
+    marker alone leaves it alive. Children of every marker process are
+    killed first (TERM, then KILL after the grace period), then the
+    marker processes themselves."""
     marker = _MARKER_PREFIX + session_id
+    m = bash_quote(marker)
+    kids_term = "for p in $(pgrep -f %s); do pkill -TERM -P $p 2>/dev/null; done" % m
+    kids_kill = "for p in $(pgrep -f %s); do pkill -KILL -P $p 2>/dev/null; done" % m
     if force:
-        return "pkill -9 -f %s || true" % bash_quote(marker)
-    return "pkill -TERM -f %s || true; sleep 3; pkill -9 -f %s || true" % (
-        bash_quote(marker),
-        bash_quote(marker),
+        return "%s; pkill -9 -f %s || true" % (kids_kill, m)
+    return "%s; pkill -TERM -f %s || true; sleep 3; %s; pkill -9 -f %s || true" % (
+        kids_term,
+        m,
+        kids_kill,
+        m,
     )
 
 
@@ -296,9 +307,13 @@ class Launcher:
             cwd_wsl,
             marker=_MARKER_PREFIX + session_id if marker else None,
         )
+        # resolve the distro BEFORE reserving the session: a distro
+        # detection failure must not leave a reserved (never-handshook)
+        # placeholder behind — those are exactly the records whose
+        # process nobody reaps
+        wsl_distro = await self.distro(distro_override) if launcher == "wsl" else None
         if launcher == "wsl":
-            distro = await self.distro(distro_override)
-            exec_argv = ["wsl.exe", "-d", distro, "--", "bash", "-lc", bash_cmd]
+            exec_argv = ["wsl.exe", "-d", wsl_distro, "--", "bash", "-lc", bash_cmd]
         elif launcher == "native":
             exec_argv = ["bash", "-lc", bash_cmd]
         elif launcher == "docker":
@@ -314,9 +329,7 @@ class Launcher:
         session = self.registry.reserve(
             session_id, kind=kind, log_file=str(log_file)
         )
-        session.distro = (
-            await self.distro(distro_override) if launcher == "wsl" else None
-        )
+        session.distro = wsl_distro
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fh = open(log_file, "w", encoding="utf-8", errors="replace")
@@ -496,6 +509,35 @@ class Launcher:
             await asyncio.wait_for(proc.wait(), 15)
         except asyncio.TimeoutError:
             log.warning("pkill for %s timed out", session_id)
+
+    async def kill_stale(self, session) -> None:
+        """Terminate the process tree of a session the registry is about
+        to drop while still RESERVED: the launch never handshook, so
+        after the record is gone nobody owns or reaps that gdb."""
+        if session.launched:
+            await self.pkill_marker(
+                session.session_id, force=False, distro=session.distro
+            )
+
+    async def terminate_all_reserved(self) -> int:
+        """Shutdown sweep: kill every still-RESERVED launched session —
+        its plugin is retrying against a server that is going away, and
+        without this server (and its registry) the process is an orphan.
+        Handshook/live sessions are deliberately left running: gdb is
+        designed to outlive the server and revive via re-hello (B1)."""
+        count = 0
+        for session in self.registry.list_all():
+            if session.state == RESERVED and session.launched:
+                try:
+                    await self.kill_stale(session)
+                    count += 1
+                except Exception:
+                    log.warning(
+                        "failed to terminate reserved session %s at shutdown",
+                        session.session_id,
+                        exc_info=True,
+                    )
+        return count
 
     def log_tail(self, log_file: str | None, lines: int = 20) -> str:
         if not log_file:

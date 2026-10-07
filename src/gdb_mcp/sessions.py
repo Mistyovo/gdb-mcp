@@ -538,6 +538,11 @@ class SessionRegistry:
         self._sessions: dict[str, Session] = {}
         self._by_pid: dict[int, str] = {}
         self._persist_path: Path | None = None
+        #: async callback (Launcher.kill_stale) invoked when GC is about to
+        #: drop a still-RESERVED launched session: its gdb never handshook
+        #: and would outlive the record as an unowned process. Wired by
+        #: serve(); None in tests/embedded use.
+        self.on_reserved_drop: Any = None
 
     # -- registration -------------------------------------------------------
 
@@ -880,6 +885,22 @@ class SessionRegistry:
             elif s.kind == "script" and s.proc is not None and s.proc.returncode is not None:
                 drop = now - last > cfg.gc_idle_disconnected
             if drop:
+                if (
+                    s.state == RESERVED
+                    and s.launched
+                    and self.on_reserved_drop is not None
+                ):
+                    # the launch never handshook: once the record is gone
+                    # its gdb is an unowned process — terminate the tree
+                    # before forgetting about it
+                    try:
+                        await self.on_reserved_drop(s)
+                    except Exception:
+                        log.warning(
+                            "failed to terminate stale reserved session %s",
+                            sid,
+                            exc_info=True,
+                        )
                 self.remove(sid)
                 removed += 1
         if removed:
