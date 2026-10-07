@@ -11,6 +11,7 @@ import argparse
 import hmac
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -160,7 +161,17 @@ def run(port, crasher):
     # Before any file is loaded, Debian's multiarch gdb defaults to i386;
     # the arch becomes x86_64 once the ELF is loaded.
     assert hello.get("arch") in ("x86_64", "i386", None), hello
-    assert "gdb_interrupt" in hello.get("features", []), hello
+    features = hello.get("features", [])
+    major = 0
+    m = re.match(r"(\d+)", hello.get("gdb_version") or "")
+    if m:
+        major = int(m.group(1))
+    # gdb.interrupt() exists from gdb 15; older gdbs must NOT advertise it
+    # (they interrupt via the posted `interrupt` command instead).
+    if major >= 15:
+        assert "gdb_interrupt" in features, hello
+    else:
+        assert "gdb_interrupt" not in features, hello
     srv.send(
         {
             "type": "hello_ack",
@@ -232,9 +243,11 @@ def run(port, crasher):
     srv.request("eval", {"command": "set args loop"})
     srv.send_only("eval", {"command": "run"}, rid=9000)  # runs until interrupt
     srv.wait_for_event("running")
-    # the restart stops at breakpoint #1 at main again; continue into the loop
+    # the restart stops at breakpoint #1 at main again; continue into the loop.
+    # (reason comes either from event.details (gdb >= 15 MI details) or the
+    # event.breakpoints attribute — both yield "breakpoint-hit".)
     stop = srv.wait_for_event("stop")
-    assert stop["payload"]["details"].get("reason") == "breakpoint-hit", stop
+    assert stop["payload"].get("reason") == "breakpoint-hit", stop
     srv.request("continue", {})
     srv.wait_for_event("running")
     time.sleep(1.0)  # let it spin in the loop

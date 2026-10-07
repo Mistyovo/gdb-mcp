@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "coverage[toml]>=7",
+    "psutil>=5",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.9",
