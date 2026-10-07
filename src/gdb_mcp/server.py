@@ -26,7 +26,9 @@ def build_app(config: Config, registry: SessionRegistry, analysis=None, audit=No
 
     if audit is None:
         audit = (
-            AuditLog(config.log_dir / "audit.log") if config.audit_log else disabled()
+            AuditLog(config.log_dir / "audit.log", key=config.token)
+            if config.audit_log
+            else disabled()
         )
     server_ctx = ServerContext(
         config=config, registry=registry, analysis=analysis, audit=audit
@@ -150,7 +152,9 @@ async def serve(config: Config) -> None:
     from gdb_mcp.audit import AuditLog, disabled
 
     audit = (
-        AuditLog(config.log_dir / "audit.log") if config.audit_log else disabled()
+        AuditLog(config.log_dir / "audit.log", key=config.token)
+            if config.audit_log
+            else disabled()
     )
 
     listener = PluginTcpListener(config, registry, audit=audit)

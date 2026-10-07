@@ -225,3 +225,93 @@ class TestWiring:
         cfg_off = Config(log_dir=tmp_path / "logs2", audit_log=False)
         build_app(cfg_off, SessionRegistry(cfg_off))
         assert not (tmp_path / "logs2" / "audit.log").exists()
+
+
+class TestHmacChain:
+    """Audit 2026-10-07 hardening: a plain hash chain cannot resist an
+    attacker who rewrites the whole file; with the master token the chain
+    is HMAC-SHA256 and a downgrade to plain hashes is itself detected."""
+
+    def test_keyed_chain_verifies_and_detects_tamper(self, tmp_path):
+        path = tmp_path / "audit.log"
+        audit = AuditLog(path, key="master-secret")
+        audit.record("handshake", session_id="s-1")
+        audit.record("http_rejected", reason="x")
+        assert verify_log(path, key="master-secret")["ok"] is True
+        assert verify_log(path, key="master-secret")["records"] == 2
+        # a rewrite with recomputed PLAIN hashes is rejected in keyed mode
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rec = json.loads(lines[0])
+        rec["details"]["session_id"] = "forged"
+        lines[0] = json.dumps(rec)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert verify_log(path, key="master-secret")["ok"] is False
+        # and so is editing without even recomputing
+        assert verify_log(path)["ok"] is False
+
+    def test_keyed_records_need_the_key(self, tmp_path):
+        path = tmp_path / "audit.log"
+        AuditLog(path, key="master-secret").record("handshake")
+        report = verify_log(path)  # no key
+        assert report["ok"] is False
+        assert "master token" in report["error"]
+
+    def test_plain_records_rejected_when_verifying_keyed(self, tmp_path):
+        path = tmp_path / "audit.log"
+        AuditLog(path).record("handshake")  # tokenless deployment
+        report = verify_log(path, key="master-secret")
+        assert report["ok"] is False
+        assert "unkeyed record" in report["error"]
+
+    def test_records_declare_algorithm(self, tmp_path):
+        path = tmp_path / "audit.log"
+        AuditLog(path, key="k").record("handshake")
+        rec = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert rec["algo"] == "hmac-sha256"
+
+    def test_keyed_chain_over_legacy_file_warns(self, tmp_path, caplog):
+        path = tmp_path / "audit.log"
+        AuditLog(path).record("legacy", n=1)  # written before a token existed
+        with caplog.at_level("WARNING", logger="gdb_mcp.audit"):
+            restarted = AuditLog(path, key="master-secret")
+            restarted.record("handshake")
+        assert any("unkeyed" in r.message for r in caplog.records)
+        # chain stays continuous across the algorithm switch
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert json.loads(lines[1])["prev"] == json.loads(lines[0])["hash"]
+
+
+class TestAuditHealth:
+    """Audit 2026-10-07: a dead audit log (disk full, permissions) used to
+    fail with zero observable signal; now it counts and warns once."""
+
+    def test_write_failure_counted_and_warned_once(self, tmp_path, caplog):
+        path = tmp_path / "audit.log"
+        audit = AuditLog(path)
+        audit.record("handshake", ok=1)
+        # make the path unwritable mid-run: replace the file with a
+        # directory (open-for-append raises on both POSIX and Windows)
+        path.unlink()
+        path.mkdir()
+        with caplog.at_level("WARNING", logger="gdb_mcp.audit"):
+            audit.record("handshake", ok=2)
+            audit.record("handshake", ok=3)
+        assert audit.failed_writes == 2
+        warnings = [r for r in caplog.records if "write failed" in r.message]
+        assert len(warnings) == 1  # once, not per dropped record
+        assert audit.stats()["failed_writes"] == 2
+        assert audit.stats()["seq"] == 1  # only the pre-failure record
+
+    def test_chain_anchor_logged_outside_file(self, tmp_path, caplog):
+        path = tmp_path / "audit.log"
+        audit = AuditLog(path)
+        audit.ANCHOR_INTERVAL = 3
+        with caplog.at_level("WARNING", logger="gdb_mcp.audit"):
+            for i in range(6):
+                audit.record("handshake", n=i)
+        anchors = [r for r in caplog.records if "anchor" in r.message]
+        assert len(anchors) == 2  # at seq 3 and seq 6
+        assert audit.stats()["seq"] == 6
+        # the anchor names the head it saw — a truncation afterwards is
+        # detectable by diffing the last anchor against the file tail
+        assert audit.stats()["head"] in anchors[-1].getMessage()

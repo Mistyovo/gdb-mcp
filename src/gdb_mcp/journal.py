@@ -12,9 +12,12 @@ turned into an acceptance test.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
+
+log = logging.getLogger("gdb_mcp.journal")
 
 #: single string fields longer than this are trimmed with a length note
 MAX_FIELD = 256
@@ -33,13 +36,28 @@ MAX_COMPILE_WRITE = 256
 SCHEMA_VERSION = 1
 
 
+class UnsupportedMigration(Exception):
+    """No registered migration step from the file's schema version.
+
+    Raised (instead of a bare ``KeyError``) so a future SCHEMA_VERSION
+    bump with a forgotten migration fails loudly in tests and degrades
+    to ``unsupported_schema`` at load time — never a crash that takes
+    down session creation."""
+
+
 def migrate_entries(from_version: int, entries: list[dict]) -> list[dict]:
     """Bring journal ``entries`` recorded under ``from_version`` up to
     :data:`SCHEMA_VERSION`. Each step is an explicit, testable function;
     unknown newer versions must never reach here (loaders refuse them)."""
     version = from_version
     while version < SCHEMA_VERSION:
-        entries = _MIGRATIONS[version](entries)
+        step = _MIGRATIONS.get(version)
+        if step is None:
+            raise UnsupportedMigration(
+                "no journal migration registered from schema v%d "
+                "(this build understands up to v%d)" % (version, SCHEMA_VERSION)
+            )
+        entries = step(entries)
         version += 1
     return entries
 
@@ -92,6 +110,11 @@ class Journal:
         self.path = Path(path)
         self._entries: list[dict] = []
         self.head_truncated = False
+        #: appends that failed after init — the mirror keeps serving
+        #: exports while the file silently stops growing; the drift must
+        #: at least be observable
+        self.failed_appends = 0
+        self._warned_failure = False
         #: set when the on-disk journal was written by a NEWER schema than
         #: this build understands: history stays on disk untouched, but it
         #: is not loaded into the mirror (its entry semantics are unknown)
@@ -129,6 +152,21 @@ class Journal:
                 lines = fh.readlines()
         except OSError:
             return
+        if not lines:
+            return
+        # The schema version is declared by the file's FIRST line (meta).
+        # Probe it before the LOAD_CAP head-truncation below: once the
+        # meta line is sliced away the version would silently fall back
+        # to 1 and a v2 file would be parsed (or migrated) with v1 eyes.
+        file_version = 1  # pre-versioning journals are v1 by definition
+        try:
+            first = json.loads(lines[0])
+            if isinstance(first, dict) and first.get("kind") == "meta" and isinstance(
+                first.get("schema_version"), int
+            ):
+                file_version = first["schema_version"]
+        except ValueError:
+            pass
         if len(lines) > self.LOAD_CAP:
             self.head_truncated = True
             lines = lines[-self.LOAD_CAP :]
@@ -140,13 +178,6 @@ class Journal:
                 continue  # torn tail line from a crash mid-write
             if isinstance(entry, dict):
                 parsed.append(entry)
-        file_version = 1  # pre-versioning journals are v1 by definition
-        for entry in parsed:
-            if entry.get("kind") == "meta" and isinstance(
-                entry.get("schema_version"), int
-            ):
-                file_version = entry["schema_version"]
-                break
         if file_version > SCHEMA_VERSION:
             # written by a newer build: keep appending (journaling must
             # never break debugging) but do not interpret the history
@@ -155,7 +186,17 @@ class Journal:
             self._entries = []
             return
         self.schema_version = file_version
-        entries = migrate_entries(file_version, parsed)
+        try:
+            entries = migrate_entries(file_version, parsed)
+        except UnsupportedMigration as exc:
+            # a migration step is missing (build skew): same degradation
+            # as an unknown newer version — never kill session creation
+            log.warning(
+                "journal %s cannot be migrated (%s); history stays on "
+                "disk, exports start empty", self.path, exc)
+            self.unsupported_schema = True
+            self._entries = []
+            return
         # meta lines are bookkeeping, not history
         self._entries = [e for e in entries if e.get("kind") != "meta"]
 
@@ -168,8 +209,18 @@ class Journal:
         try:
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except OSError:
-            pass  # journaling must never break debugging
+        except OSError as exc:
+            # journaling must never break debugging — but the mirror and
+            # the file drifting apart must be observable, not silent
+            self.failed_appends += 1
+            if not self._warned_failure:
+                self._warned_failure = True
+                log.warning(
+                    "journal append failed (%s); %s stopped growing while "
+                    "the in-memory mirror continues — exports may reference "
+                    "operations missing from the file", exc, self.path)
+            return
+        self._warned_failure = False
 
     def entries(self) -> list[dict]:
         return list(self._entries)

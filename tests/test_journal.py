@@ -148,6 +148,50 @@ class TestJournalSchemaVersion:
         entries = [{"kind": "request", "verb": "eval", "ok": True}]
         assert migrate_entries(SCHEMA_VERSION, entries) is entries
 
+    def test_missing_migration_step_degrades_not_crashes(self, tmp_path):
+        """Audit 2026-10-07: a future SCHEMA_VERSION bump with a forgotten
+        migration used to KeyError inside Journal construction, killing
+        every session creation. It must degrade like an unknown schema."""
+        path = tmp_path / "skewed.jsonl"
+        path.write_text(
+            json.dumps({"kind": "meta", "schema_version": 0, "ts": 1.0}) + "\n"
+            + json.dumps({"kind": "request", "verb": "eval", "ok": True}) + "\n",
+            encoding="utf-8",
+        )
+        journal = Journal(path, load_existing=True)
+        assert journal.unsupported_schema is True
+        assert len(journal) == 0
+        # append still works — journaling never breaks debugging
+        journal.append("request", {"verb": "ping", "ok": True})
+        assert len(journal) == 1
+
+    def test_version_probe_reads_first_line_before_truncation(
+        self, tmp_path, monkeypatch
+    ):
+        """Audit 2026-10-07: LOAD_CAP head-truncation used to eat the meta
+        line, silently re-classifying a v2 file as v1. Simulate a build
+        that understands v2 (with no v1->v2 migration registered): the
+        first-line probe must keep the file loadable, not degraded."""
+        import gdb_mcp.journal as journal_mod
+
+        monkeypatch.setattr(journal_mod, "SCHEMA_VERSION", 2)
+        path = tmp_path / "v2.jsonl"
+        lines = [json.dumps({"kind": "meta", "schema_version": 2, "ts": 1.0})]
+        lines += [
+            json.dumps({"kind": "request", "verb": "eval", "ok": True})
+            for _ in range(10)
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.setattr(Journal, "LOAD_CAP", 5)
+        journal = Journal(path, load_existing=True)
+        # with the old tail-scan probe the meta line would be gone, the
+        # version would fall back to 1, and the missing 1->2 migration
+        # would flip unsupported_schema on
+        assert journal.unsupported_schema is False
+        assert journal.schema_version == 2
+        assert journal.head_truncated is True
+        assert len(journal) == 5  # last 5 lines, meta excluded
+
 
 class TestCompileGdbscript:
     def _entries(self):
