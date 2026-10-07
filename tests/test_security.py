@@ -49,6 +49,21 @@ UNSAFE = [
     "set exec-wrapper env LD_PRELOAD=/tmp/x.so",
     "set exec-wrap env A=B",
     "se logging on",  # first-word abbreviation still reaches the root
+    # --- host file writes / auto-load chain (audit 2026-10-07 round 2) ---
+    "append binary memory /home/u/.bashrc 0x1000 0x1010",
+    "app value w /tmp/out $rsp",  # "app" IS append (no other app* command)
+    "append binary value /tmp/out 1",
+    "document helper",  # pairs with define; body is gdb commands
+    "doc helper",
+    "add-auto-load-safe-path /",  # whitelists ELF-embedded script loading
+    "add-auto /",
+    "add-auto-load-scripts-directory /tmp/hostile",  # second root of the
+    # same family (real gdb: "add-auto" is ambiguous between the two)
+    "set auto-load python-scripts on",  # hostile .debug_gdb_scripts chain
+    "set auto-load scripts-directory /",
+    "set auto-lo safe-path /",
+    "set startup-with-shell on",  # `run` gains $(cmd) / > file via /bin/sh
+    "set startup-with-sh off",  # both directions gated, like exec-wrapper
     # --- multi-line injection: only the 2nd line is unsafe ---
     "info registers\nshell id",
     "x/4gx $rsp\npy import os",
@@ -82,6 +97,12 @@ SAFE = [
     "delete breakpoints",
     "return",
     "run",
+    # --- share prefix space with the 2026-10-07 additions ---
+    "attach 123",  # "at" is attach, not append
+    "appr on",  # apropos: "appr" does not prefix-match append
+    "add-symbol-file /tmp/x 0x401000",  # not add-auto-load-safe-path
+    "show auto-load python-scripts",  # show, never set
+    "display/x $pc",  # "dis" is display/disable, not document
 ]
 
 

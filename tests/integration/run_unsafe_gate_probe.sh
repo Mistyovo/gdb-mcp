@@ -49,6 +49,28 @@ expect_out "2nd line executes" \
     "python gdb.execute('print 42\nshe echo GATE_PROBE_2ND')" \
     'GATE_PROBE_2ND'
 
+echo "== premise 4: 2026-10-08 gate additions resolve as assumed =="
+# append: unambiguous prefix "app" must reach the append command (its
+# subcommand listing proves resolution), never something innocent
+expect_out "'app' resolves to append"      'app'   'append'
+# the two add-auto-load* commands: "add-auto" is AMBIGUOUS between them
+# (gdb rejects it), so each full root is its own surface
+expect_out "add-auto-load-safe-path exists" \
+    'add-auto-load-safe-path' 'argument required'
+expect_out "add-auto-load-scripts-directory exists" \
+    'add-auto-load-scripts-directory' 'argument required'
+# document: "doc" must resolve to document (its usage error proves it)
+expect_out "'doc' resolves to document"    'doc'   'Argument required'
+# the two set-subcommand surfaces exist under exactly these names
+expect_out "set auto-load python-scripts exists" \
+    'show auto-load python-scripts' 'Auto-loading of'
+expect_out "set startup-with-shell exists" \
+    'show startup-with-shell' 'subprocesses'
+# prefix-space sanity for the safe exemptions: attach is never append
+expect_out "'att' resolves to attach"      'att 999999999' 'ptrace'
+# apropos shares "app" prefix space but is a distinct full command
+expect_out "'apropos' lists append"        'apropos ^append$' 'append'
+
 if [ "$fail" -ne 0 ]; then
     echo "UNSAFE GATE PREMISES BROKEN"
     exit 1

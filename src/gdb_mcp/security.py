@@ -41,11 +41,25 @@ UNSAFE_COMMAND_ROOTS: tuple[str, ...] = (
     "source",
     "make",  # runs the build system on the host
     "define",  # defines a command whose body runs later, ungated
+    "document",  # pairs with define; body lines are gdb commands
     "alias",  # can alias any root above to an innocent-looking name
     "dump",  # dump binary memory …: arbitrary host file write
+    "append",  # append binary memory/value …: host file write (audit P1)
     "restore",  # reads a host file into inferior memory (exfil path)
+    "add-auto-load-safe-path",  # whitelists gdb-script auto-loading (see
+    # the "set auto-load" root below for the chain this enables)
+    "add-auto-load-scripts-directory",  # same family: adds hostile-path
+    # script search directories (verified on real gdb: the add-auto
+    # prefix is ambiguous between exactly these two commands)
     "set logging",  # set logging file/on: arbitrary host file write
     "set exec-wrapper",  # wrapper runs as a host shell command on `run`
+    "set auto-load",  # set auto-load python-scripts on + a hostile ELF's
+    # .debug_gdb_scripts section = gdb-embedded python execution on the
+    # HOST; also gates scripts-directory/safe-path (off included — use
+    # --allow-unsafe to harden deliberately)
+    "set startup-with-shell",  # off-mutating too, like exec-wrapper: `run`
+    # under startup-with-shell=on gives shell redirects $(cmd) and >
+    # file host writes through the inferior's /bin/sh -c (audit P2)
 )
 
 #: single-letter commands gdb resolves to step/run/print/delete BEFORE

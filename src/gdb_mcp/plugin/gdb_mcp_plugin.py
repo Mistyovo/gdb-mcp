@@ -103,11 +103,17 @@ _UNSAFE_ROOTS = (
     "source",
     "make",
     "define",
+    "document",
     "alias",
     "dump",
+    "append",
     "restore",
+    "add-auto-load-safe-path",
+    "add-auto-load-scripts-directory",
     "set logging",
     "set exec-wrapper",
+    "set auto-load",
+    "set startup-with-shell",
 )
 
 #: single-letter commands gdb resolves to step/run/print/delete before any
