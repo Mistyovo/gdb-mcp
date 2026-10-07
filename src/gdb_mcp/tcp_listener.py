@@ -143,7 +143,10 @@ class PluginTcpListener:
         ack = build_hello_ack(
             session.session_id, __version__, self.config.heartbeat_sec
         )
-        writer.write(encode(ack, self.config.token))
+        # wrap with the token the plugin actually holds: launched
+        # sessions carry the session-scoped derivation and silently drop
+        # master-token frames (the plugin's dispatch checks every line)
+        writer.write(encode(ack, session.token or self.config.token))
         await writer.drain()
         return session
 
@@ -219,7 +222,13 @@ class PluginTcpListener:
                     return
                 async with session.lock:
                     if session.writer is writer and not writer.is_closing():
-                        writer.write(encode(build_ping(), self.config.token))
+                        # same rule as hello_ack: the ping must carry the
+                        # session's token or the plugin drops it — a
+                        # dropped ping reads as a heartbeat timeout and
+                        # needlessly churns the connection
+                        writer.write(
+                            encode(build_ping(), session.token or self.config.token)
+                        )
                         await writer.drain()
         except asyncio.CancelledError:
             pass

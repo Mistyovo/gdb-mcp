@@ -270,6 +270,11 @@ async def test_scoped_session_token_handshake(listener):
     )
     reader2, writer2 = await _connect(port, good)
     envelope = json.loads(await asyncio.wait_for(reader2.readline(), 5))
+    # the ack must be wrapped with the SESSION token: the plugin holds
+    # only the derivation and silently drops master-token frames (audit
+    # 2026-10-07: hello_ack/heartbeat pings used the master token, so a
+    # scoped session lost protocol negotiation and heartbeat health)
+    assert envelope["token"] == scoped
     ack = envelope.get("msg", envelope)
     assert ack["session_id"] == "s-scoped"
     writer2.close()
@@ -289,3 +294,49 @@ async def test_scoped_session_token_handshake(listener):
 
     # after restart-style revival the scoped token is recomputed
     registry.remove("s-scoped")
+
+
+@pytest.mark.asyncio
+async def test_scoped_session_receives_heartbeat_ping():
+    """The heartbeat ping must carry the session token: the plugin drops
+    token-mismatched lines silently, so a master-wrapped ping reads as a
+    missed pong and churns a healthy connection (audit 2026-10-07)."""
+    from gdb_mcp.sessions import derive_session_token
+
+    cfg = Config(
+        host_bind="127.0.0.1", port=0, heartbeat_sec=0.2, token="master-secret"
+    )
+    registry = SessionRegistry(cfg)
+    lis = PluginTcpListener(cfg, registry)
+    await lis.start()
+    port = lis.server.sockets[0].getsockname()[1]
+    try:
+        registry.reserve("s-hb")
+        scoped = derive_session_token("master-secret", "s-hb")
+        hello = encode(
+            {
+                "token": scoped,
+                "msg": {**json.loads(HELLO), "session_id": "s-hb"},
+            }
+        )
+        reader, writer = await _connect(port, hello)
+        ack_env = json.loads(await asyncio.wait_for(reader.readline(), 5))
+        assert ack_env["token"] == scoped
+
+        # the heartbeat ping is a reader-thread request (verb=ping);
+        # the fake client never pongs, so the listener will close the
+        # connection after 2 intervals — the frame itself is the assertion
+        ping_env = None
+        for _ in range(10):
+            line = await asyncio.wait_for(reader.readline(), 5)
+            if not line:
+                break
+            env = json.loads(line)
+            if env["msg"].get("verb") == "ping":
+                ping_env = env
+                break
+        assert ping_env is not None, "no heartbeat ping before close"
+        assert ping_env["token"] == scoped
+        writer.close()
+    finally:
+        await lis.stop()
