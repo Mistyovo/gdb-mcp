@@ -88,29 +88,58 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _TRUNC_MARKER = "\n...[truncated]"
 
 #: commands that escape the debugger; blocked unless GDB_MCP_ALLOW_UNSAFE=1.
-#: Mirrors gdb_mcp.security.UNSAFE_COMMAND_PREFIXES (stdlib-only copy).
-_UNSAFE_PREFIXES = (
-    ("shell", True),
-    ("!", False),
-    ("pipe", True),
-    ("python", True),
-    ("python-interactive", True),
-    ("pi", True),
-    ("source", True),
+#: Mirrors gdb_mcp.security (stdlib-only copy — keep both in lockstep, the
+#: parity tests assert table equality and verdict agreement).
+#:
+#: Abbreviation-aware and per-line: gdb resolves unambiguous prefixes
+#: ("she" IS shell, "py" IS python, "so" IS source — verified on real gdb
+#: 12/15/17), and one string can carry several newline-separated commands.
+_UNSAFE_ROOTS = (
+    "shell",
+    "!",
+    "pipe",
+    "python",
+    "python-interactive",
+    "source",
+    "make",
+    "define",
+    "alias",
+    "dump",
+    "restore",
+    "set logging",
+    "set exec-wrapper",
 )
+
+#: single-letter commands gdb resolves to step/run/print/delete before any
+#: unsafe root sharing the letter; the gate must not block them.
+_SAFE_ABBREVIATIONS = frozenset(("s", "r", "p", "d"))
+
+
+def _tokens_hit_unsafe_root(tokens):
+    first = tokens[0]
+    if first.startswith("!"):
+        return True
+    if first in _SAFE_ABBREVIATIONS:
+        return False
+    for root in _UNSAFE_ROOTS:
+        root_tokens = root.split()
+        if len(root_tokens) == 1:
+            if root.startswith(first):
+                return True
+        else:
+            head, sub = root_tokens
+            if head != first and not head.startswith(first):
+                continue
+            rest = tokens[1:]
+            if rest and (sub == rest[0] or sub.startswith(rest[0])):
+                return True
+    return False
 
 
 def _is_unsafe_command(command):
-    text = str(command).lstrip().lower()
-    if not text:
-        return False
-    for prefix, needs_boundary in _UNSAFE_PREFIXES:
-        if not text.startswith(prefix):
-            continue
-        if not needs_boundary:
-            return True
-        rest = text[len(prefix) :]
-        if rest == "" or rest[0] in (" ", "\t", "-"):
+    for line in str(command).splitlines():
+        tokens = [t.lower() for t in line.split()]
+        if tokens and _tokens_hit_unsafe_root(tokens):
             return True
     return False
 

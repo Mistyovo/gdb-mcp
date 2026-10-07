@@ -4,11 +4,16 @@ The in-gdb plugin deliberately carries its own stdlib-only copy of this
 gate (so the rule also holds for a plugin driven without this server), and
 the two copies are checked against each other here: a drift between them is
 a security hole, not a style problem.
+
+The abbreviation cases are not speculation — gdb really resolves "she" to
+shell, "py" to python, "so" to source, while "s"/"r"/"p"/"d" resolve to
+step/run/print/delete. ``tests/integration/run_unsafe_gate_probe.sh``
+keeps those premises verified against real gdb in CI.
 """
 
 import pytest
 
-from gdb_mcp.security import UNSAFE_COMMAND_PREFIXES, is_unsafe_gdb_command
+from gdb_mcp.security import SAFE_ABBREVIATIONS, UNSAFE_COMMAND_ROOTS, is_unsafe_gdb_command
 
 UNSAFE = [
     "shell pwd",
@@ -24,6 +29,30 @@ UNSAFE = [
     "pi",
     "source /tmp/script.gdb",
     "python-",
+    # --- abbreviations (audit 2026-10-07; gdb resolves these) ---
+    "she echo pwned",  # "she" IS shell
+    "py print(1)",  # "py" IS python
+    "sou /tmp/x",  # "sou" IS source
+    "so /tmp/x",  # even "so" resolves to source
+    "pyt print(1)",
+    "rest /tmp/core.dump",  # restore reads a host file into memory
+    "dump binary memory /tmp/out 0x0 0x10",
+    "du binary memory /tmp/out 0x0 0x10",
+    "make",
+    "ma",
+    "def x",
+    "alias pw = shell",
+    "al pw = shell",
+    "set logging file /etc/cron.d/backdoor",
+    "set logging on",
+    "set log on",  # subcommand abbreviation
+    "set exec-wrapper env LD_PRELOAD=/tmp/x.so",
+    "set exec-wrap env A=B",
+    "se logging on",  # first-word abbreviation still reaches the root
+    # --- multi-line injection: only the 2nd line is unsafe ---
+    "info registers\nshell id",
+    "x/4gx $rsp\npy import os",
+    "step\n\nsource /tmp/x",
 ]
 
 SAFE = [
@@ -36,6 +65,23 @@ SAFE = [
     "vmmap",
     "heap bins",
     "quit",
+    # --- single-letter canonical commands (verified on real gdb) ---
+    "s",  # step, never shell/source
+    "r",  # run, never restore
+    "p $rsp",  # print, never python/pipe
+    "d 3",  # delete, never dump/define
+    # --- other common commands that share prefix space with roots ---
+    "del 3",  # delete: not define
+    "step",
+    "set args loop",  # "set" with an ungated subcommand
+    "set $pc = 0x401000",
+    "set breakpoint pending on",
+    "set pagination off",
+    "sharedlibrary",  # shares "sh" but is its own full command
+    "show logging",
+    "delete breakpoints",
+    "return",
+    "run",
 ]
 
 
@@ -49,13 +95,29 @@ class TestIsUnsafeGdbCommand:
         assert is_unsafe_gdb_command(command) is False
 
 
+class TestUnsafeGatePremises:
+    def test_roots_table_shape(self):
+        # multi-word roots must be lowercase with single spaces so the
+        # token matcher's split() agrees with them
+        for root in UNSAFE_COMMAND_ROOTS:
+            assert root == root.lower()
+            assert "  " not in root
+            assert root == root.strip()
+
+    def test_safe_abbreviations_are_single_letters(self):
+        assert all(len(a) == 1 for a in SAFE_ABBREVIATIONS)
+
+
 class TestPluginCopyAgrees:
     @pytest.fixture(autouse=True)
     def _plugin(self, plugin_mod):
         self.plugin = plugin_mod
 
-    def test_prefix_tables_match(self):
-        assert self.plugin._UNSAFE_PREFIXES == UNSAFE_COMMAND_PREFIXES
+    def test_root_tables_match(self):
+        assert self.plugin._UNSAFE_ROOTS == UNSAFE_COMMAND_ROOTS
+
+    def test_safe_abbreviations_match(self):
+        assert self.plugin._SAFE_ABBREVIATIONS == SAFE_ABBREVIATIONS
 
     @pytest.mark.parametrize("command", UNSAFE + SAFE)
     def test_verdicts_match(self, command):

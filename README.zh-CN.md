@@ -176,14 +176,21 @@ token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 
 ## 安全分级
 
 - `GDB_MCP_READONLY=1`（`--readonly`）：不注册 `write_memory`/`write_register`。
-- `shell`/`!`/`pipe`/`python`/`source` 类逃逸调试器的命令默认拒绝
-  （`UNSAFE_BLOCKED`），服务端与 gdb 内插件双层拦截；`GDB_MCP_ALLOW_UNSAFE=1`
-  （`--allow-unsafe`）显式放行并向下传递给被 launch 的 gdb。注意 gdb 命令
-  缩写（如 `sh`、`py`）使前缀黑名单是尽力而为的纵深防御，不是沙箱。
-- **哈希链审计日志**（`<log-dir>/audit.log`，默认开启，`--no-audit-log`
+- `shell`/`!`/`pipe`/`python`/`source`/`dump`/`restore`/`set exec-wrapper`
+  类逃逸调试器的命令默认拒绝（`UNSAFE_BLOCKED`），服务端与 gdb 内插件
+  双层拦截；`GDB_MCP_ALLOW_UNSAFE=1`（`--allow-unsafe`）显式放行并向下
+  传递给被 launch 的 gdb。门是**缩写感知**的（真机 gdb 里 `she`/`py`/`so`
+  就是 shell/python/source，已实证并纳入匹配），且逐行检查多命令字符串
+  （防换行注入）；单字母 `s`/`r`/`p`/`d` 实证解析为 step/run/print/delete
+  不受影响。所依赖的命令解析前提由 CI 真机探针持续验证
+  （`tests/integration/run_unsafe_gate_probe.sh`）。黑名单仍是尽力而为的
+  纵深防御，不是沙箱——完整逃逸口请显式 `--allow-unsafe`。
+- **链式审计日志**（`<log-dir>/audit.log`，默认开启，`--no-audit-log`
   关闭）独立于会话 journal 记录安全决策——握手与拒绝、HTTP 403、观察者
-  越权、unsafe 命令拦截；每条记录 SHA-256 提交前一条的哈希，事后篡改可被
-  `gdb_mcp.audit.verify_log` 检出。
+  越权、unsafe 命令拦截；每条记录提交前一条的哈希：配置了主 token 时为
+  HMAC-SHA256（无 token 的整链重写过不了校验），否则为明文 SHA-256；
+  链头周期性锚定到服务器日志（尾部截断可检）。离线校验：
+  `python -m gdb_mcp.audit <log> [--token …]`。
 - journal 与 `sessions.json` 持久化带**显式 schema 版本**：未知的新版本
   拒绝加载而非猜测语义（journal 历史保留在磁盘不删）。
 

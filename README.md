@@ -232,13 +232,21 @@ variable — a stray shell variable must never destabilize your server):
 - HTTP transport adds Host/Origin validation, bearer tokens (controller +
   read-only **observer** roles), TLS and mutual TLS.
 - `--readonly` drops mutating tools; debugger-escaping commands
-  (`shell`/`python`/…) are blocked at **two layers** unless
-  `--allow-unsafe`.
-- A **hash-chained audit log** (`<log-dir>/audit.log`, on by default,
+  (`shell`/`python`/`source`/`dump`/`restore`/`set exec-wrapper`/…) are
+  blocked at **two layers** unless `--allow-unsafe`. The gate is
+  abbreviation-aware (`she`/`py`/`so` resolve to shell/python/source in
+  real gdb) and checks every line of a multi-command string; the
+  command-resolution premises it relies on are verified against real gdb
+  in CI (`tests/integration/run_unsafe_gate_probe.sh`).
+- A **chained audit log** (`<log-dir>/audit.log`, on by default,
   `--no-audit-log` to disable) records security decisions — handshakes
   and rejections, HTTP 403s, observer denials, unsafe-command blocks —
-  as a SHA-256 chain where every record commits to its predecessor, so
-  after-the-fact edits are detectable (`gdb_mcp.audit.verify_log`).
+  as a tamper-evident chain where every record commits to its
+  predecessor: HMAC-SHA256 when a master token is configured (a full
+  rewrite without the token fails verification), plain SHA-256
+  otherwise; chain heads are anchored to the server log periodically so
+  tail truncation is detectable. Verify offline with
+  `python -m gdb_mcp.audit <log> [--token …]`.
 - Journals, session state and results are written `0600`; persisted state is
   re-validated on load (journals and `sessions.json` carry explicit schema
   versions; unknown newer versions are refused, not guessed at). GDB can

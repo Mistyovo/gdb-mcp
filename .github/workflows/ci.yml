@@ -32,6 +32,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y gdb gcc
       - run: gdb --version | head -1
       - run: bash tests/integration/run_wsl_integration.sh
+      # keeps the unsafe gate's command-resolution premises true on every
+      # gdb major in the matrix (abbreviations, s/r/p/d, newline injection)
+      - run: bash tests/integration/run_unsafe_gate_probe.sh
 
   bench:
     # Goal §9 regression gate: the committed selfcheck baseline is the floor.
