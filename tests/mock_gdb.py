@@ -232,8 +232,18 @@ class MockEventRegistry:
             self.handlers.remove(handler)
 
     def fire(self, *args):
-        for handler in list(self.handlers):
-            handler(*args)
+        # stop-event depth: resumes issued from INSIDE a stop handler are
+        # synchronous on real gdb (verified 17.2) — execute() checks this
+        # to decide whether to defer
+        is_stop = self is events.stop
+        if is_stop:
+            state._in_stop_event += 1
+        try:
+            for handler in list(self.handlers):
+                handler(*args)
+        finally:
+            if is_stop:
+                state._in_stop_event -= 1
 
 
 class MockEvents:
@@ -292,6 +302,27 @@ class _State:
         self.interrupt_calls = 0
         self.continue_script = []  # simulated stops for execute("continue")
         self.stepi_stride = 4  # pc advance per execute("stepi")
+        # fidelity switches (audit 2026-10-07):
+        # - resume commands (step/stepi/...) always fire a stop event, like
+        #   a real gdb — without it the plugin's state machine never returns
+        #   to "stopped" after a synchronous _resume
+        # - strict execute raises gdb.error for unmodeled commands, like a
+        #   real gdb rejects unknown input (default stays lenient so tests
+        #   only modeling output, not errors, keep passing)
+        # - async_posted_resume: a resume issued from a posted event (but
+        #   NOT from inside a stop handler — nested resumes there are
+        #   synchronous, verified on real gdb 17.2) returns immediately;
+        #   the stop event fires later from the "event loop", i.e. on the
+        #   next flush_posted() — exactly the race _policy_drive exists
+        #   to survive, so deferred-policy tests must enable this
+        self.fire_stop_on_resume = True
+        self.execute_strict = False
+        self.async_posted_resume = False
+        self.inferior_exited = False  # resume commands raise, like real gdb
+        self.resume_hook = None  # optional: hook(cmd) -> True = handled
+        self._in_posted = 0  # depth: running inside flush_posted()
+        self._in_stop_event = 0  # depth: running inside a stop event fire
+        self.writes = []  # gdb.write captures: (text, stream)
         MockBreakpoint._next = 1
 
 
@@ -323,30 +354,86 @@ def execute(cmd, to_string=False):
         name, expression = register_assignment.groups()
         frame._regs[name] = int(parse_and_eval(expression))
         return ""
-    if cmd == "continue" and state.continue_script:
-        # simulate the next stop of a real resume: fire the connected
-        # event handlers exactly like a real gdb stop would
-        action = state.continue_script.pop(0)
-        if action[0] == "bp":
-            last = state.breakpoints[-1] if state.breakpoints else None
-            events.stop.fire(FakeBreakHitEvent([last] if last else []))
-        elif action[0] == "bp_num":
-            target = next(
-                (b for b in state.breakpoints if b.number == action[1]), None
-            )
-            events.stop.fire(FakeBreakHitEvent([target] if target else []))
-        elif action[0] == "sig":
-            if state.newest_frame is not None:
-                state.newest_frame._pc += action[2] if len(action) > 2 else 0x10
-            events.stop.fire(FakeStopEvent(action[1], {"reason": "signal-received"}))
-        return ""
-    if cmd == "stepi":
-        if state.newest_frame is not None:
-            state.newest_frame._pc += state.stepi_stride
+    if cmd == "continue" or cmd in _STEP_CMDS:
+        if (
+            state.async_posted_resume
+            and state._in_posted > 0
+            and state._in_stop_event == 0
+        ):
+            # posted-context resume: gdb.execute returns while the
+            # inferior still runs; the stop event fires from the event
+            # loop — modeled as the next flush_posted() round
+            post_event(lambda: _run_resume(cmd))
+            return ""
+        _run_resume(cmd)
         return ""
     if cmd in state.output_map:
         return state.output_map[cmd]
+    if state.execute_strict:
+        # real gdb rejects unknown commands; the lenient default only
+        # exists so tests that model output for the commands they care
+        # about are not forced to enumerate the rest
+        raise error('Undefined command: "%s".' % cmd.split()[0])
     return ""
+
+
+_STEP_CMDS = ("step", "stepi", "next", "nexti", "finish")
+
+
+def _fire_exit(exit_code):
+    state.inferior_exited = True
+    state.newest_frame = None
+    state.selected_frame = None
+    events.exited.fire(FakeExitedEvent(exit_code))
+
+
+def _run_resume(cmd):
+    """Fire the stop/exit event a real gdb would produce for a resume.
+
+    Runs synchronously when called from execute() and again from the
+    deferred posted closure — both contexts must behave identically.
+    """
+    if state.resume_hook is not None and state.resume_hook(cmd):
+        return
+    if state.inferior_exited:
+        raise error("The program is not being run.")
+    if cmd == "continue":
+        if state.continue_script:
+            # simulate the next stop of a real resume: fire the connected
+            # event handlers exactly like a real gdb stop would
+            action = state.continue_script.pop(0)
+            if action[0] == "bp":
+                last = state.breakpoints[-1] if state.breakpoints else None
+                events.stop.fire(FakeBreakHitEvent([last] if last else []))
+            elif action[0] == "bp_num":
+                target = next(
+                    (b for b in state.breakpoints if b.number == action[1]),
+                    None,
+                )
+                events.stop.fire(FakeBreakHitEvent([target] if target else []))
+            elif action[0] == "sig":
+                if state.newest_frame is not None:
+                    state.newest_frame._pc += action[2] if len(action) > 2 else 0x10
+                events.stop.fire(
+                    FakeStopEvent(action[1], {"reason": "signal-received"})
+                )
+            elif action[0] == "exit":
+                _fire_exit(action[1] if len(action) > 1 else 0)
+            return
+        # no scripted stop: a real continue with no breakpoint to hit runs
+        # the target to completion — tests must script the stops they mean
+        if state.fire_stop_on_resume:
+            _fire_exit(0)
+        return
+    if cmd in _STEP_CMDS:
+        # a real gdb ALWAYS stops again after a step-family resume (no
+        # script needed) — firing the stop is what returns the plugin's
+        # state machine to "stopped" after a synchronous _resume
+        if cmd == "stepi" and state.newest_frame is not None:
+            state.newest_frame._pc += state.stepi_stride
+        if state.fire_stop_on_resume:
+            events.stop.fire(FakeStopEvent(None, {"reason": "stepi"}))
+        return
 
 
 def parse_and_eval(expr):
@@ -361,14 +448,31 @@ def parse_and_eval(expr):
     raise error("No symbol \"%s\" in current context." % expr)
 
 
+STDOUT = 1
+ERROR = 2
+
+
+def write(text, stream=STDOUT):
+    """Capture gdb.write output instead of printing (assertable, silent)."""
+    state.writes.append((text, stream))
+
+
 def post_event(callback):
     state.posted.append(callback)
 
 
 def flush_posted():
+    # one batch per call: callbacks queued DURING this batch wait for
+    # the next call — one flush_posted() is one beat of gdb's event
+    # loop, so tests can observe intermediate states (a deferred policy
+    # response mid-chain) by pumping one beat at a time
     pending, state.posted = state.posted, []
-    for cb in pending:
-        cb()
+    state._in_posted += 1
+    try:
+        for cb in pending:
+            cb()
+    finally:
+        state._in_posted -= 1
 
 
 def selected_inferior():
@@ -420,6 +524,7 @@ class Command:
 def set_inferior(filename="/tmp/vuln"):
     state.progspace_filename = filename
     state.inferior = MockInferior()
+    state.inferior_exited = False
     state.newest_frame = MockFrame(0x401000, "main", {"rax": 1, "rbx": 2, "rcx": 3})
     state.selected_frame = None
     state.selected_thread = state.threads[0] if state.threads else None

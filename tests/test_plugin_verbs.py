@@ -21,11 +21,21 @@ def drain(plugin):
 
 
 def call(plugin, verb, params, req_id=1):
-    """Run a request through the main-thread dispatch path."""
+    """Run a request through the main-thread dispatch path, then pump the
+    posted queue to quiescence (the sync-mode event loop catches up)."""
     plugin._handle_request(
         {"type": "request", "id": req_id, "verb": verb, "params": params}
     )
+    pump(plugin)
     return drain(plugin)[-1]
+
+
+def pump(plugin, rounds=10_000):
+    """Advance the mock event loop until the posted queue is idle."""
+    for _ in range(rounds):
+        if not mock_gdb.state.posted:
+            return
+        mock_gdb.flush_posted()
 
 
 class TestEval:
@@ -716,6 +726,7 @@ class TestPolicies:
                 },
             }
         )
+        pump(plugin)  # posted hops: the drive settles over event beats
         messages = drain(plugin)
         # a policy drives the inferior through the plugin's internal resume
         # path; it must never answer on a request id the server never sent
@@ -768,6 +779,7 @@ class TestPolicies:
         plugin._connect_events()
         set_inferior()
         # reset() rewound the counter: the two probes are numbers 1, 2
+        # (the stepi kick consumes no scripted stop)
         mock_gdb.state.continue_script = [("bp_num", 1)]
         r = call(
             plugin,
@@ -834,6 +846,120 @@ class TestPolicies:
         bp_b.stop()
         assert counts == {"fn_a": 1, "fn_b": 2}
         assert total == [3]
+
+
+class TestPolicyDeferred:
+    """The deferred policy drive under the async-fidelity mock: a resume
+    from posted context returns before the stop fires (the race the whole
+    rework exists for), so these drive the plugin the way gdb does —
+    requests via _dispatch_request, events via flush_posted()."""
+
+    def _start_policy(self, plugin, req_id, params):
+        plugin._connect_events()
+        plugin._dispatch_request(
+            {
+                "type": "request",
+                "id": req_id,
+                "verb": "policy",
+                "params": params,
+            }
+        )
+        mock_gdb.flush_posted()  # the pump runs; the kick defers its stop
+
+    def test_response_deferred_until_stop_fires(self, plugin):
+        set_inferior()
+        mock_gdb.state.async_posted_resume = True
+        mock_gdb.state.stepi_stride = 4
+        self._start_policy(plugin, 21, {"kind": "trace", "max_steps": 5})
+        # the kick's stepi returned while the inferior "runs": no wire
+        # response may exist yet — this is the race real gdb exposed
+        # (mock-sync tests can never catch it)
+        assert drain(plugin) == []
+        assert plugin._policy_active is not None
+        pump(plugin)  # event-loop beats: stop fires, hops run the machine
+        resp = [
+            m for m in drain(plugin) if m.get("type") == "response"
+        ][0]
+        assert resp["id"] == 21 and resp["ok"] is True
+        assert resp["result"]["steps"] == 5
+        assert resp["result"]["stop"] == "max_steps"
+        assert resp["result"]["unique_pc"][:2] == ["0x401000", "0x401004"]
+        assert plugin._policy_active is None
+        assert plugin.state == "stopped"
+
+    def test_exit_during_kick_answers_via_on_exit(self, plugin):
+        set_inferior()
+        mock_gdb.state.async_posted_resume = True
+        plugin._connect_events()
+
+        def exit_on_stepi(cmd):
+            if cmd == "stepi":
+                mock_gdb._fire_exit(0)
+                return True
+            return False
+
+        mock_gdb.state.resume_hook = exit_on_stepi
+        self._start_policy(plugin, 22, {"kind": "trace", "max_steps": 5})
+        assert drain(plugin) == []
+        pump(plugin)  # deferred kick fires exited; on_exit hops the judge
+        resp = [
+            m for m in drain(plugin) if m.get("type") == "response"
+        ][0]
+        assert resp["id"] == 22 and resp["ok"] is True
+        # one instruction ran, then the program ended: no frame to read
+        assert resp["result"]["steps"] == 1
+        assert resp["result"]["stop"] == "no_frame"
+        assert plugin._policy_active is None
+
+    def test_shutdown_aborts_pending_drive(self, plugin):
+        set_inferior()
+        mock_gdb.state.async_posted_resume = True
+        self._start_policy(plugin, 23, {"kind": "trace", "max_steps": 5})
+        assert plugin._policy_active is not None
+        plugin._shutdown(False)
+        resp = [
+            m for m in drain(plugin) if m.get("type") == "response"
+        ][0]
+        assert resp["id"] == 23 and resp["ok"] is False
+        assert resp["error"]["code"] == "SHUTDOWN"
+        assert plugin._policy_active is None
+        # the orphaned kick closure must find no chain to re-enter
+        pump(plugin)
+        assert [m for m in drain(plugin) if m.get("type") == "response"] == []
+
+    def test_stale_drive_aborted_by_new_policy(self, plugin):
+        set_inferior()
+        mock_gdb.state.async_posted_resume = True
+        self._start_policy(plugin, 31, {"kind": "trace", "max_steps": 3})
+        # while the kick flies the reader gate rejects concurrent policy
+        # requests (INFERIOR_RUNNING); the window this covers is a drive
+        # left pending with the inferior back at a stop — force it: the
+        # stop arrived but not through our chain
+        plugin.state = "stopped"
+        plugin._handle_request(
+            {
+                "type": "request",
+                "id": 32,
+                "verb": "policy",
+                "params": {"kind": "trace", "max_steps": 3},
+            }
+        )
+        first = drain(plugin)
+        stale = [m for m in first if m.get("id") == 31]
+        assert stale and stale[0]["error"]["code"] == "POLICY_STALE"
+        # request 32's machine settles once the event loop catches up
+        pump(plugin)
+        resp = [
+            m for m in drain(plugin) if m.get("type") == "response"
+        ][0]
+        assert resp["id"] == 32 and resp["ok"] is True
+        assert resp["result"]["steps"] == 3
+        assert plugin._policy_active is None
+        # the stale drive's orphaned stop closure must not re-enter it
+        pump(plugin)
+        assert [
+            m for m in drain(plugin) if m.get("type") == "response"
+        ] == []
 
 
 class TestResolveAddr:

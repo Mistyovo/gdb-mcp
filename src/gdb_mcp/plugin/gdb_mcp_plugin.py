@@ -173,6 +173,11 @@ POLICY_MAX_PAYLOADS = 64
 POLICY_MAX_CRASHES = 32
 POLICY_MAX_LOCATIONS = 32
 POLICY_MAX_HITS = 1_000_000
+
+#: sentinel a policy handler returns when its response will be sent later
+#: (from the stop-event chain — see _policy_drive): _handle_request must
+#: not answer the request itself in that case
+_DEFERRED = object()
 IO_BUFFER_CHUNKS = 1024
 IO_READ_CHUNK = 4096
 IO_MAX_CHUNKS_PER_READ = 64
@@ -590,6 +595,10 @@ class Plugin(object):
         self._timeline_bps = []
         self._timeline_events = []
         self._timeline_max = POLICY_MAX_EVENTS
+        #: in-flight deferred policy drive ({abort: fail}, if any); a
+        #: second policy request or shutdown aborts it so its event chain
+        #: can never wake later and run a ghost loop the server abandoned
+        self._policy_active = None
         self._io = None
         self._io_buf = deque(maxlen=IO_BUFFER_CHUNKS)
         self._io_seq = 0
@@ -646,6 +655,12 @@ class Plugin(object):
         if self._shutdown_done:
             return
         self._shutdown_done = True
+        active = self._policy_active
+        if active is not None:
+            # a pending deferred policy must not fire its chain into a
+            # half-torn-down plugin; fail it now (the response may no
+            # longer flush, but the chain is gone either way)
+            active["abort"]("SHUTDOWN", "gdb is shutting down")
         self.shutdown_evt.set()
         self._disconnect_events()
         sock = self.sock
@@ -999,8 +1014,12 @@ class Plugin(object):
                 raise PluginError("UNKNOWN_VERB", "unknown verb %r" % verb)
             if verb in GATED_VERBS:
                 self._guard_stopped()
-            result = handler(self, params)
-            self._send_response(req_id, True, result=result)
+            if verb == "policy":
+                result = self._handle_policy(params, req_id)
+            else:
+                result = handler(self, params)
+            if result is not _DEFERRED:
+                self._send_response(req_id, True, result=result)
         except PluginError as exc:
             self._send_response(
                 req_id, False, error={"code": exc.code, "message": exc.message}
@@ -1778,7 +1797,7 @@ class Plugin(object):
 
     # -- delegated policies (plugin-side loops, constant-size summaries) -----
 
-    def _handle_policy(self, params):
+    def _handle_policy(self, params, req_id):
         kind = params.get("kind")
         handlers = {
             "trace": self._policy_trace,
@@ -1798,9 +1817,120 @@ class Plugin(object):
                 % (kind, ", ".join(sorted(handlers))),
             )
         self._guard_stopped()
-        return handler(params)
+        # defense-in-depth: a drive that is still pending once a NEW
+        # policy passes the guards was abandoned by the server (its
+        # per-session serialization means this request superseded the
+        # old one) — abort it so its chain can never wake later and run
+        # a ghost loop the server no longer waits for
+        stale = self._policy_active
+        if stale is not None:
+            stale["abort"](
+                "POLICY_STALE", "superseded by a new policy request"
+            )
+        return handler(params, req_id)
 
-    def _policy_trace(self, params):
+    def _policy_drive(self, req_id, stepper):
+        """Run a resume-loop policy as a posted-hop state machine.
+
+        Three facts, all verified against real gdb 17.2 (2026-10-08
+        probe battery): (1) a resume issued from a posted event is
+        asynchronous — gdb.execute() returns while the inferior runs —
+        but the resume really happens and its stop event fires; (2) a
+        resume issued from INSIDE a stop-event handler also returns
+        immediately, and the stop it produces is never delivered to
+        later handlers — the event chain dies inside the handler; (3) a
+        stop handler that only posts work, with the posted callback
+        issuing the next resume, hops reliably forever. The drive
+        therefore never resumes from an event handler: each stop hops
+        one step of the caller's state machine into posted context, and
+        only that step issues resumes. The kick is one stepi (the only
+        resume guaranteed to stop again — a continue would step over a
+        same-pc breakpoint and run away); it consumes one instruction,
+        which steppers account for. ``stepper()`` returns None to keep
+        the machine hopping (it resumed) or a result dict to finish;
+        PluginError fails the policy. The wire response is sent when the
+        machine finishes (or fails); _DEFERRED tells _handle_request not
+        to answer itself."""
+        self._require_inferior()
+        done = [False]
+        pending = [False]
+
+        def disconnect():
+            try:
+                gdb.events.stop.disconnect(chain)
+            except Exception:
+                pass
+            try:
+                gdb.events.exited.disconnect(on_exit)
+            except Exception:
+                pass
+
+        def settle():
+            if self._policy_active is active:
+                self._policy_active = None
+
+        def finish(result):
+            if done[0]:
+                return
+            done[0] = True
+            disconnect()
+            settle()
+            self._send_response(req_id, True, result=result)
+
+        def fail(code, message):
+            if done[0]:
+                return
+            done[0] = True
+            disconnect()
+            settle()
+            self._send_response(
+                req_id, False, error={"code": code, "message": message}
+            )
+
+        def process():
+            # posted context: the ONLY place a policy may resume (fact 1)
+            pending[0] = False
+            if done[0]:
+                return
+            try:
+                outcome = stepper()
+            except PluginError as exc:
+                fail(exc.code, exc.message)
+            except Exception as exc:
+                fail("PLUGIN_ERROR", "policy loop failed: %s" % exc)
+            else:
+                if outcome is not None:
+                    finish(outcome)
+
+        def hop():
+            if done[0] or pending[0]:
+                return
+            pending[0] = True
+            gdb.post_event(process)
+
+        def chain(event):
+            # NEVER resume in here (fact 2): hop into posted context
+            hop()
+
+        def on_exit(event):
+            hop()
+
+        active = {"abort": fail}
+        self._policy_active = active
+        gdb.events.stop.connect(chain)
+        gdb.events.exited.connect(on_exit)
+        try:
+            # the kick: one stepi from the request pump (posted context,
+            # fact 1) guarantees the first stop the chain hops from
+            self._resume("stepi")
+        except PluginError:
+            # resume failed synchronously: the chain will never fire
+            disconnect()
+            settle()
+            raise
+        return _DEFERRED
+
+    def _policy_trace(self, params, req_id):
         max_steps = _bounded_int(
             params.get("max_steps"), 200, 1, POLICY_MAX_STEPS
         )
@@ -1813,35 +1943,52 @@ class Plugin(object):
             seen.add(first_pc)
         except Exception:
             pass
-        steps = 0
-        stop = "max_steps"
-        for _ in range(max_steps):
-            try:
-                self._handle_eval({"command": "stepi"})
-            except PluginError as exc:
-                stop = "error:%s" % exc.code
-                break
-            except Exception as exc:
-                stop = "error:%s" % exc
-                break
-            steps += 1
-            try:
-                pc = int(gdb.selected_frame().pc())
-            except Exception:
-                stop = "no_frame"
-                break
+        steps = [0]
+        stop = ["max_steps"]
+
+        def record(pc):
             if pc not in seen:
                 seen.add(pc)
                 visited.append(pc)
-        return {
-            "steps": steps,
-            "unique_count": len(visited),
-            "unique_pc": ["0x%x" % pc for pc in visited[:POLICY_TRACE_CAP]],
-            "truncated": len(visited) > POLICY_TRACE_CAP,
-            "stop": stop,
-        }
 
-    def _policy_heap_arm(self, params):
+        def result():
+            return {
+                "steps": steps[0],
+                "unique_count": len(visited),
+                "unique_pc": [
+                    "0x%x" % pc for pc in visited[:POLICY_TRACE_CAP]
+                ],
+                "truncated": len(visited) > POLICY_TRACE_CAP,
+                "stop": stop[0],
+            }
+
+        def stepper():
+            if steps[0] == 0:
+                # first hop: the drive's stepi kick is step 1 of the
+                # trace; it landed one instruction past the start (or
+                # the program exited during it, leaving no frame)
+                steps[0] = 1
+            try:
+                record(int(gdb.selected_frame().pc()))
+            except Exception:
+                stop[0] = "no_frame"
+                return result()
+            if steps[0] >= max_steps:
+                return result()
+            steps[0] += 1
+            try:
+                self._resume("stepi")
+            except PluginError as exc:
+                stop[0] = "error:%s" % exc.code
+                return result()
+            except Exception as exc:
+                stop[0] = "error:%s" % exc
+                return result()
+            return None
+
+        return self._policy_drive(req_id, stepper)
+
+    def _policy_heap_arm(self, params, req_id=None):
         if self._timeline_bps:
             raise PluginError(
                 "BAD_PARAMS", "timeline already armed; heap_disarm first"
@@ -1870,7 +2017,7 @@ class Plugin(object):
             )
         return {"armed": armed, "skipped": skipped, "max_events": max_events}
 
-    def _policy_heap_read(self, params):
+    def _policy_heap_read(self, params, req_id=None):
         if not self._timeline_bps:
             raise PluginError("BAD_PARAMS", "timeline not armed")
         events = self._timeline_events
@@ -1881,7 +2028,7 @@ class Plugin(object):
             "truncated": len(events) > POLICY_TIMELINE_READ,
         }
 
-    def _policy_heap_disarm(self, params):
+    def _policy_heap_disarm(self, params, req_id=None):
         if not self._timeline_bps:
             raise PluginError("BAD_PARAMS", "timeline not armed")
         total = len(self._timeline_events)
@@ -1894,7 +2041,7 @@ class Plugin(object):
         self._timeline_events = []
         return {"disarmed": True, "total_events": total}
 
-    def _policy_fuzz_loop(self, params):
+    def _policy_fuzz_loop(self, params, req_id):
         sid, _snap = self._find_snapshot(params)
         payloads = params.get("payloads")
         if not isinstance(payloads, list) or not payloads:
@@ -1911,51 +2058,92 @@ class Plugin(object):
             )
         buffer_addr = self._resolve_addr(params.get("buffer_addr"))
         stop_location = str(params.get("stop_location"))
-        crashes = []
-        survived = 0
-        rounds = 0
-        signatures = set()
-        for index, payload_hex in enumerate(payloads):
-            if not isinstance(payload_hex, str) or not payload_hex.strip():
-                continue
-            try:
-                payload = _hex_to_bytes(payload_hex)
-            except ValueError as exc:
-                raise PluginError("BAD_PARAMS", str(exc))
-            rounds += 1
-            verdict = self._fuzz_round(sid, buffer_addr, payload, stop_location)
-            if verdict["error"] is not None:
-                crashes.append(
-                    {
-                        "round": rounds,
-                        "payload_index": index,
-                        "error": verdict["error"],
-                    }
-                )
-                break
-            if verdict["survived"]:
-                survived += 1
-            else:
-                stop = verdict["stop"]
-                signature = (stop.get("signal"), stop.get("pc"))
-                if signature not in signatures:
-                    signatures.add(signature)
-                    crashes.append(
+        st = {
+            "i": 0,  # next payload index to consider
+            "marker": None,  # in-flight round's marker, if any
+            "last": None,  # (payload_index, payload_len) of that round
+            "rounds": 0,
+            "survived": 0,
+            "crashes": [],
+            "signatures": set(),
+            "stop": False,
+        }
+
+        def result():
+            crashes = st["crashes"]
+            return {
+                "snapshot_id": sid,
+                "rounds": st["rounds"],
+                "survived": st["survived"],
+                "crash_count": len(crashes),
+                "crashes": crashes[:POLICY_MAX_CRASHES],
+                "truncated": len(crashes) > POLICY_MAX_CRASHES,
+            }
+
+        def stepper():
+            if st["marker"] is not None:
+                verdict = self._fuzz_judge(st["marker"])
+                st["marker"] = None
+                index, length = st["last"]
+                if verdict["error"] is not None:
+                    st["crashes"].append(
                         {
-                            "round": rounds,
+                            "round": st["rounds"],
                             "payload_index": index,
-                            "payload_bytes": len(payload),
-                            "stop": stop,
+                            "error": verdict["error"],
                         }
                     )
-        return {
-            "snapshot_id": sid,
-            "rounds": rounds,
-            "survived": survived,
-            "crash_count": len(crashes),
-            "crashes": crashes[:POLICY_MAX_CRASHES],
-            "truncated": len(crashes) > POLICY_MAX_CRASHES,
-        }
+                    st["stop"] = True
+                elif verdict["survived"]:
+                    st["survived"] += 1
+                else:
+                    stop = verdict["stop"]
+                    signature = (stop.get("signal"), stop.get("pc"))
+                    if signature not in st["signatures"]:
+                        st["signatures"].add(signature)
+                        st["crashes"].append(
+                            {
+                                "round": st["rounds"],
+                                "payload_index": index,
+                                "payload_bytes": length,
+                                "stop": stop,
+                            }
+                        )
+            if st["stop"]:
+                return result()
+            # advance to the next valid payload and launch its round
+            while st["i"] < len(payloads):
+                index = st["i"]
+                st["i"] += 1
+                payload_hex = payloads[index]
+                if not isinstance(payload_hex, str) or not payload_hex.strip():
+                    continue
+                try:
+                    payload = _hex_to_bytes(payload_hex)
+                except ValueError as exc:
+                    raise PluginError("BAD_PARAMS", str(exc))
+                st["rounds"] += 1
+                st["last"] = (index, len(payload))
+                try:
+                    st["marker"] = self._fuzz_launch(
+                        sid, buffer_addr, payload, stop_location
+                    )
+                except PluginError as exc:
+                    # a failed resume poisons the round; report it
+                    # instead of spinning on a bad state
+                    st["crashes"].append(
+                        {
+                            "round": st["rounds"],
+                            "payload_index": index,
+                            "error": exc.message,
+                        }
+                    )
+                    st["stop"] = True
+                    return result()
+                return None  # round in flight; judged on the next hop
+            return result()
+
+        return self._policy_drive(req_id, stepper)
 
     # -- experimental: inferior stdio over a pty -----------------------------
 
@@ -2040,30 +2228,38 @@ class Plugin(object):
             self._io_buf.clear()
         return {"torn_down": True, "total_chunks_seen": total}
 
-    def _fuzz_round(self, sid, buffer_addr, payload, stop_location):
-        """One restore -> write -> resume cycle. Returns
-        ``{"survived", "stop", "error"}`` — survived means the marker
-        breakpoint (a guaranteed stop) was hit rather than the run
-        dying."""
+    def _fuzz_launch(self, sid, buffer_addr, payload, stop_location):
+        """One round's restore -> write -> marker -> resume. The resume
+        is asynchronous in posted context (see _policy_drive); the stop
+        it produces is judged by _fuzz_judge on the next hop. Returns
+        the marker breakpoint number."""
         self._handle_snapshot_restore({"snapshot_id": sid})
         if payload:
             self._handle_write_mem({"addr": buffer_addr, "hex": payload.hex()})
         marker = self._handle_break(
             {"location": stop_location, "temporary": True}
         )
-        try:
-            self._policy_resume()
-        except PluginError as exc:
-            # a failed resume poisons the round; report it instead of
-            # spinning on a bad state
-            self._drop_breakpoint(marker["number"])
-            return {"survived": False, "stop": None, "error": exc.message}
+        self._policy_resume()
+        return marker["number"]
+
+    def _fuzz_judge(self, marker_num):
+        """Judge the stop that ended a _fuzz_launch round. Returns
+        ``{"survived", "stop", "error"}`` — survived means the marker
+        breakpoint (a guaranteed stop) was hit rather than the run
+        dying."""
+        if self.state == "exited":
+            self._drop_breakpoint(marker_num)
+            return {
+                "survived": False,
+                "stop": None,
+                "error": "inferior exited during round",
+            }
         stop = self.stop_info or {}
-        survived = marker["number"] in (stop.get("breakpoints") or [])
-        self._drop_breakpoint(marker["number"])
+        survived = marker_num in (stop.get("breakpoints") or [])
+        self._drop_breakpoint(marker_num)
         return {"survived": survived, "stop": stop, "error": None}
 
-    def _policy_crash_check(self, params):
+    def _policy_crash_check(self, params, req_id):
         sid, _snap = self._find_snapshot(params)
         if "buffer_addr" not in params or "stop_location" not in params:
             raise PluginError(
@@ -2072,16 +2268,24 @@ class Plugin(object):
             )
         buffer_addr = self._resolve_addr(params.get("buffer_addr"))
         payload = _hex_to_bytes(params.get("payload", ""))
-        verdict = self._fuzz_round(
-            sid, buffer_addr, payload, str(params.get("stop_location"))
-        )
-        return {
-            "survived": verdict["survived"],
-            "stop": verdict["stop"],
-            "error": verdict["error"],
-        }
+        marker = [None]
 
-    def _policy_minimize(self, params):
+        def stepper():
+            if marker[0] is not None:
+                verdict = self._fuzz_judge(marker[0])
+                return {
+                    "survived": verdict["survived"],
+                    "stop": verdict["stop"],
+                    "error": verdict["error"],
+                }
+            marker[0] = self._fuzz_launch(
+                sid, buffer_addr, payload, str(params.get("stop_location"))
+            )
+            return None
+
+        return self._policy_drive(req_id, stepper)
+
+    def _policy_minimize(self, params, req_id):
         sid, _snap = self._find_snapshot(params)
         if "buffer_addr" not in params or "stop_location" not in params:
             raise PluginError(
@@ -2093,59 +2297,110 @@ class Plugin(object):
         if not payload:
             raise PluginError("BAD_PARAMS", "payload (hex) is required")
         max_rounds = _bounded_int(params.get("max_rounds"), 128, 1, 512)
-        initial_len = len(payload)
-        first = self._fuzz_round(sid, buffer_addr, payload, stop_location)
-        rounds = 1
-        if first["error"] is not None:
-            raise PluginError("PLUGIN_ERROR", first["error"])
-        if first["survived"]:
-            raise PluginError(
-                "BAD_PARAMS",
-                "payload does not crash (marker hit); nothing to minimize",
-            )
-        signature = (first["stop"] or {}).get("signal")
-        # classic delta debugging: try dropping chunks, shrink the grain
-        # on success, coarsen when a full sweep removes nothing. Removals
-        # are only accepted while the crash signal stays the same — a
-        # changed signal means the minimizer drifted to a different bug.
-        chunks = 2
-        while len(payload) > 1 and rounds < max_rounds:
-            chunk_len = max(1, (len(payload) + chunks - 1) // chunks)
-            removed = False
-            i = 0
-            while i < chunks and rounds < max_rounds:
-                candidate = (
-                    payload[: i * chunk_len] + payload[(i + 1) * chunk_len :]
-                )
-                i += 1
-                if not candidate or candidate == payload:
-                    continue
-                rounds += 1
-                verdict = self._fuzz_round(
-                    sid, buffer_addr, candidate, stop_location
-                )
-                if verdict["error"] is not None or verdict["survived"]:
-                    continue
-                if (verdict["stop"] or {}).get("signal") == signature:
-                    payload = candidate
-                    removed = True
-                    chunks = max(2, chunks - 1)
-                    break
-            if not removed:
-                if chunks >= len(payload):
-                    break
-                chunks = min(chunks * 2, len(payload))
-        return {
-            "original_bytes": initial_len,
-            "minimized_bytes": len(payload),
-            "minimized_hex": payload.hex(),
-            "signal": signature,
-            "rounds": rounds,
-            "reduced": len(payload) < initial_len,
-            "rounds_truncated": rounds >= max_rounds,
+        st = {
+            "work": payload,
+            "rounds": 0,
+            "chunks": 2,
+            "i": 0,
+            "marker": None,
+            "phase": "first",  # first | sweep
+            "signature": None,
         }
 
-    def _policy_bp_stats(self, params):
+        def result():
+            work = st["work"]
+            return {
+                "original_bytes": len(payload),
+                "minimized_bytes": len(work),
+                "minimized_hex": work.hex(),
+                "signal": st["signature"],
+                "rounds": st["rounds"],
+                "reduced": len(work) < len(payload),
+                "rounds_truncated": st["rounds"] >= max_rounds,
+            }
+
+        def start_round(candidate):
+            st["rounds"] += 1
+            st["marker"] = self._fuzz_launch(
+                sid, buffer_addr, candidate, stop_location
+            )
+
+        def stepper():
+            if st["marker"] is not None:
+                verdict = self._fuzz_judge(st["marker"])
+                st["marker"] = None
+                if st["phase"] == "first":
+                    if verdict["error"] is not None:
+                        raise PluginError(
+                            "PLUGIN_ERROR", verdict["error"]
+                        )
+                    if verdict["survived"]:
+                        raise PluginError(
+                            "BAD_PARAMS",
+                            "payload does not crash (marker hit); nothing "
+                            "to minimize",
+                        )
+                    st["signature"] = (verdict["stop"] or {}).get("signal")
+                    st["phase"] = "sweep"
+                    # fall through: launch the first candidate now
+                # classic delta debugging: try dropping chunks, shrink
+                # the grain on success, coarsen when a full sweep removes
+                # nothing. Removals are only accepted while the crash
+                # signal stays the same — a changed signal means the
+                # minimizer drifted to a different bug.
+                candidate_ok = (
+                    verdict["error"] is None
+                    and not verdict["survived"]
+                    and (verdict["stop"] or {}).get("signal")
+                    == st["signature"]
+                )
+                if candidate_ok:
+                    # recompute the candidate this round tested: it is
+                    # chunk i-1 of the sweep that launched it
+                    work = st["work"]
+                    chunk_len = max(
+                        1, (len(work) + st["chunks"] - 1) // st["chunks"]
+                    )
+                    st["work"] = (
+                        work[: (st["i"] - 1) * chunk_len]
+                        + work[st["i"] * chunk_len:]
+                    )
+                    st["chunks"] = max(2, st["chunks"] - 1)
+                    st["i"] = 0
+                    # fall through: restart the sweep on the new work
+            # launch the next candidate (or the initial payload)
+            if st["phase"] == "first":
+                start_round(st["work"])
+                return None
+            work = st["work"]
+            while len(work) > 1 and st["rounds"] < max_rounds:
+                chunk_len = max(1, (len(work) + st["chunks"] - 1) // st["chunks"])
+                if st["i"] >= st["chunks"]:
+                    # full sweep removed nothing: coarsen or give up
+                    if st["chunks"] >= len(work):
+                        return result()
+                    st["chunks"] = min(st["chunks"] * 2, len(work))
+                    st["i"] = 0
+                    continue
+                i = st["i"]
+                st["i"] += 1
+                candidate = (
+                    work[: i * chunk_len] + work[(i + 1) * chunk_len :]
+                )
+                if not candidate or candidate == work:
+                    continue
+                try:
+                    start_round(candidate)
+                except PluginError:
+                    # a failed resume poisons the round; treat the
+                    # candidate as rejected and sweep on
+                    continue
+                return None
+            return result()
+
+        return self._policy_drive(req_id, stepper)
+
+    def _policy_bp_stats(self, params, req_id):
         """Hit-count probes at ``locations`` plus a temporary marker at
         ``stop_location``; resumes until the hit budget, the pass count
         or the inferior's own stop ends the run, then reports per-
@@ -2188,53 +2443,85 @@ class Plugin(object):
                 "PLUGIN_ERROR", "no location could be armed"
             )
         probe_numbers = {bp.number for bp in probes}
-        passes = 0
-        stop_reason = "max_passes"
-        final_stop = None
-        while True:
-            marker = self._handle_break(
-                {"location": stop_location, "temporary": True}
-            )
+        st = {
+            "marker": None,  # in-flight pass's marker, if any
+            "passes": 0,
+            "stop_reason": "max_passes",
+            "final_stop": None,
+            "done": False,
+        }
+
+        def cleanup_probes():
+            # a leaked _StatsBreakpoint auto-continues forever and
+            # randomly stops the target once its budget drains
+            for bp in probes:
+                try:
+                    bp.delete()
+                except Exception:
+                    pass
+
+        def result():
+            cleanup_probes()
+            return {
+                "counts": counts,
+                "total_hits": total[0],
+                "passes": st["passes"],
+                "armed": armed,
+                "skipped": skipped,
+                "max_hits": max_hits,
+                "stop_reason": st["stop_reason"],
+                "stop": st["final_stop"],
+            }
+
+        def stepper():
+            if st["marker"] is not None:
+                marker_num = st["marker"]
+                st["marker"] = None
+                exited = self.state == "exited"
+                stop = self.stop_info or {}
+                stopped_at = set(stop.get("breakpoints") or [])
+                if not exited and marker_num in stopped_at:
+                    st["passes"] += 1
+                    self._drop_breakpoint(marker_num)
+                    if total[0] >= max_hits:
+                        st["stop_reason"] = "max_hits"
+                        st["done"] = True
+                    elif st["passes"] >= max_passes:
+                        st["stop_reason"] = "max_passes"
+                        st["done"] = True
+                else:
+                    # stopped away from the marker: probe budget,
+                    # crash or exit
+                    self._drop_breakpoint(marker_num)
+                    st["final_stop"] = stop
+                    st["stop_reason"] = (
+                        "max_hits"
+                        if not exited and stopped_at & probe_numbers
+                        else "inferior_stop"
+                    )
+                    st["done"] = True
+            if st["done"]:
+                return result()
+            try:
+                marker = self._handle_break(
+                    {"location": stop_location, "temporary": True}
+                )
+            except PluginError as exc:
+                st["stop_reason"] = "error:%s" % exc.code
+                return result()
             try:
                 self._policy_resume()
             except PluginError as exc:
-                stop_reason = "error:%s" % exc.code
+                st["stop_reason"] = "error:%s" % exc.code
                 self._drop_breakpoint(marker["number"])
-                break
-            stop = self.stop_info or {}
-            stopped_at = set(stop.get("breakpoints") or [])
-            if marker["number"] in stopped_at:
-                passes += 1
-                self._drop_breakpoint(marker["number"])
-                if total[0] >= max_hits:
-                    stop_reason = "max_hits"
-                    break
-                if passes >= max_passes:
-                    stop_reason = "max_passes"
-                    break
-                continue
-            # stopped away from the marker: probe budget or crash/exit
-            final_stop = stop
-            self._drop_breakpoint(marker["number"])
-            stop_reason = (
-                "max_hits" if stopped_at & probe_numbers else "inferior_stop"
-            )
-            break
-        for bp in probes:
-            try:
-                bp.delete()
+                return result()
             except Exception:
-                pass
-        return {
-            "counts": counts,
-            "total_hits": total[0],
-            "passes": passes,
-            "armed": armed,
-            "skipped": skipped,
-            "max_hits": max_hits,
-            "stop_reason": stop_reason,
-            "stop": final_stop,
-        }
+                cleanup_probes()
+                raise
+            st["marker"] = marker["number"]
+            return None  # pass in flight; judged on the next hop
+
+        return self._policy_drive(req_id, stepper)
 
     # -- gdb events (main thread; never block) ------------------------------
 
