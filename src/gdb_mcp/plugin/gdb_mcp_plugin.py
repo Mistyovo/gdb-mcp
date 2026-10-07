@@ -1466,6 +1466,18 @@ class Plugin(object):
             raise PluginError(
                 "BAD_PARAMS", "type must be one of %s" % sorted(type_map)
             )
+        # Validate and gate `commands` BEFORE creating the breakpoint so a
+        # rejected request leaves no half-configured breakpoint behind.
+        commands = params.get("commands")
+        if commands is not None and not isinstance(commands, list):
+            raise PluginError("BAD_PARAMS", "commands must be a list of strings")
+        if commands and any(not isinstance(c, str) for c in commands):
+            raise PluginError("BAD_PARAMS", "commands must be a list of strings")
+        if commands:
+            # bp.commands run as raw gdb CLI on hit — they reach the same
+            # debugger-escape surface as eval, so the same gate applies.
+            for c in commands:
+                _guard_unsafe_command(c)
         # Note: gdb.Breakpoint has no `pending` constructor arg (the
         # breakpoint.pending attribute is read-only); pending creation is
         # done via the global "set breakpoint pending" setting.
@@ -1485,13 +1497,10 @@ class Plugin(object):
         finally:
             if pending:
                 self._exec("set breakpoint pending auto")
-        commands = params.get("commands")
-        if commands is not None and not isinstance(commands, list):
-            raise PluginError("BAD_PARAMS", "commands must be a list of strings")
         auto_continue = bool(params.get("auto_continue", False))
         has_commands = bool(commands) or auto_continue
         if has_commands:
-            lines = ["silent"] + [str(c) for c in (commands or [])]
+            lines = ["silent"] + list(commands or [])
             if auto_continue:
                 lines.append("continue")
             try:

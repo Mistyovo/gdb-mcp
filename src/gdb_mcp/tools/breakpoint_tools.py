@@ -5,8 +5,9 @@ from __future__ import annotations
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.security import is_unsafe_gdb_command
 
-from ._common import check_stopped, config_from, resolve_gdb
+from ._common import audit_from, check_stopped, config_from, resolve_gdb
 from .registry import tool
 
 _BP_TYPES = ("breakpoint", "hw", "watch", "hw_watch")
@@ -30,7 +31,9 @@ async def set_breakpoint(
     hw (hardware), watch, hw_watch. With commands (gdb CLI strings),
     they run automatically on hit (prefixed with `silent` so the stop
     is quiet); with auto_continue the hit also resumes immediately —
-    together they turn a breakpoint into an unattended probe."""
+    together they turn a breakpoint into an unattended probe. Commands
+    pass the same unsafe gate as execute_command: anything that can
+    execute code outside the debugger requires --allow-unsafe."""
     if type not in _BP_TYPES:
         raise GdbMcpError(
             "BAD_PARAMS", "type must be one of %s" % ", ".join(_BP_TYPES)
@@ -40,6 +43,19 @@ async def set_breakpoint(
         or any(not isinstance(c, str) for c in commands)
     ):
         raise GdbMcpError("BAD_PARAMS", "commands must be a list of strings")
+    if commands:
+        # The plugin joins these into bp.commands and gdb runs them as raw
+        # CLI on hit — the same debugger-escape surface as execute_command.
+        cfg = config_from(ctx)
+        if not cfg.allow_unsafe:
+            for c in commands:
+                if is_unsafe_gdb_command(c):
+                    audit_from(ctx).record("unsafe_command_blocked", command=c)
+                    raise GdbMcpError(
+                        "UNSAFE_BLOCKED",
+                        "breakpoint command %r can execute code outside the "
+                        "debugger; start with --allow-unsafe to allow it" % c,
+                    )
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
     params = {

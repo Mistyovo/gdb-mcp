@@ -1371,6 +1371,44 @@ class TestUnsafeGate:
         assert (await task)["output"] == "ok"
 
     @pytest.mark.asyncio
+    async def test_breakpoint_commands_are_gated(self, env):
+        """Regression (audit 2026-10-07): breakpoint `commands` bypassed
+        the unsafe gate — `commands=["shell ..."]` executed outside the
+        debugger even with allow_unsafe=False."""
+        registry, cfg, tools = env
+        assert cfg.allow_unsafe is False
+        s = add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["set_breakpoint"],
+                {
+                    "location": "main",
+                    "commands": ["shell pwd"],
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        assert ei.value.code == "UNSAFE_BLOCKED"
+        assert s.writer.sent == []  # nothing reached the plugin
+
+    @pytest.mark.asyncio
+    async def test_breakpoint_commands_mixed_gate_names_offender(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["set_breakpoint"],
+                {
+                    "location": "main",
+                    "commands": ["x/1gx $rsp", "source /tmp/evil.gdb"],
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        assert ei.value.code == "UNSAFE_BLOCKED"
+        assert "source" in ei.value.message
+
+    @pytest.mark.asyncio
     async def test_batch_stops_on_unsafe(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)

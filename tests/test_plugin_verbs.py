@@ -392,6 +392,27 @@ class TestBreakpoints:
         resp = call(plugin, "break", {"location": "main", "commands": "x/1i $pc"})
         assert resp["error"]["code"] == "BAD_PARAMS"
 
+    def test_break_commands_invalid_element(self, plugin):
+        set_inferior()
+        resp = call(plugin, "break", {"location": "main", "commands": [42]})
+        assert resp["error"]["code"] == "BAD_PARAMS"
+
+    def test_break_commands_unsafe_blocked(self, plugin, monkeypatch):
+        """Regression (audit 2026-10-07): `commands` joined into
+        bp.commands executed `shell` on hit without any unsafe gate."""
+        monkeypatch.delenv("GDB_MCP_ALLOW_UNSAFE", raising=False)
+        set_inferior()
+        resp = call(plugin, "break", {"location": "main", "commands": ["shell id"]})
+        assert resp["error"]["code"] == "UNSAFE_BLOCKED"
+        assert not mock_gdb.state.breakpoints
+
+    def test_break_commands_unsafe_opt_in_env(self, plugin, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_ALLOW_UNSAFE", "1")
+        set_inferior()
+        resp = call(plugin, "break", {"location": "main", "commands": ["shell id"]})
+        assert resp["result"]["has_commands"] is True
+        assert mock_gdb.state.breakpoints[0].commands == "silent\nshell id"
+
     def test_break_invalid_type(self, plugin):
         set_inferior()
         assert call(plugin, "break", {"location": "main", "type": "weird"})["error"]["code"] == "BAD_PARAMS"
