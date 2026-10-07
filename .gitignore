@@ -1,7 +1,13 @@
 __pycache__/
 *.pyc
 .venv/
+.venv*/
 venv/
+.coverage
+
+# throwaway probe scripts (one-off gdb/python experiments)
+.probe_*
+.async_probe*
 .env
 .env.*
 !.env.example

@@ -19,7 +19,7 @@ MCP 服务器，让大模型（Claude Code 等）驱动 Linux 下的 **gdb 进�
 
 本项目的进程内插件路线：pwndbg 上下文天然可用、不依赖 MI 解析与终端模拟（无 prompt
 兼容问题）、`stop`/`running`/`exited` 事件经 `gdb.events` 主动推送。生态全景与后续
-路线见 [ROADMAP.md](ROADMAP.md)。
+路线见 [ROADMAP_V2.md](ROADMAP_V2.md)。
 
 ## 架构
 
@@ -212,7 +212,7 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
   结构化内存映射）
 → evaluate / read_memory / write_memory 验证利用思路
 → execute_command("vmmap") 拿 libc/PIE 基址（大输出自动落盘，read_result 续读）
-→ set_reg / write_memory 现场修补
+→ write_register / write_memory 现场修补
 → continue_execution 复跑
 两次调用之间错过的事件用 get_events 兜底。
 ```
@@ -253,7 +253,7 @@ shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动�
 }
 ```
 
-开启后额外注册 6 个实验工具（可能在没有弃用周期的情况下变动）：
+开启后额外注册 8 个实验工具（可能在没有弃用周期的情况下变动）：
 
 - **Inferior stdio 通道**：`io_setup` / `send_to_inferior` / `read_inferior_output` /
   `io_teardown` — 把 inferior 的 stdio 重定向到插件管理的 pty，无需 pwntools 即可
@@ -320,10 +320,11 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 
 ```bash
 # 单元测试（无需 gdb）
-python -m pytest tests/ -q                        # 765 项（含协议层种子模糊测试）
+python -m pytest tests/ -q                        # 902 项（含协议层种子模糊测试）
 
 # 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
 wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议
+wsl bash tests/integration/run_policy_smoke.sh   # policy 循环原语（trace/bp_stats）
 python tests/integration/run_mcp_tools_e2e.py --distro kali-linux
                                                   # 逐个工具端到端走查
 wsl bash tests/integration/run_io_smoke.sh        # inferior stdio（pty）

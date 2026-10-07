@@ -161,3 +161,48 @@ class TestPackagingInputs:
         matches = [line for line in lines if line.rstrip().endswith(destination)]
         assert matches, "nothing COPYs the plugin to %s" % destination
         assert (root / matches[0].split()[1]).is_file()
+
+
+class TestDocumentedCounts:
+    """README numbers are load-bearing claims, and every one of them had
+    drifted by 2026-10-07 (tests, experimental tools, static tools). The
+    declarations are the source of truth; these checks fail when a tool
+    change is not carried into BOTH READMEs, so the docs cannot lag the
+    code again. Adding a tool means updating these numbers on purpose."""
+
+    @staticmethod
+    def _counts():
+        import gdb_mcp.tools as tools
+
+        tools._load_tool_modules()
+        from gdb_mcp.tools.registry import SPECS
+
+        total = len(SPECS)
+        experimental = sum(1 for spec in SPECS if spec.experimental)
+        core = sum(1 for spec in SPECS if spec.core)
+        return total, experimental, core, total - experimental
+
+    def test_declared_tool_counts(self):
+        # (total, experimental, core, default-visible)
+        assert self._counts() == (60, 8, 12, 52)
+
+    def test_readmes_state_the_declared_counts(self):
+        root = SRC.parent.parent
+        _, experimental, core, default = self._counts()
+        claims = {
+            "README.md": [
+                "**%d tools by default**" % default,
+                "%d under `GDB_MCP_TOOL_PROFILE=core`" % core,
+                "**%d experimental tools**" % experimental,
+                "**15 static-analysis tools**",
+            ],
+            "README.zh-CN.md": [
+                "默认 %d 个" % default,
+                "`core` 档 %d 个" % core,
+                "%d 个实验工具" % experimental,
+            ],
+        }
+        for name, needles in claims.items():
+            text = (root / name).read_text(encoding="utf-8")
+            for needle in needles:
+                assert needle in text, "%s lost its %r claim" % (name, needle)
