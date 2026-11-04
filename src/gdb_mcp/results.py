@@ -10,6 +10,7 @@ the content, so identical outputs deduplicate.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from gdb_mcp.errors import GdbMcpError
@@ -54,7 +55,11 @@ def store_result(log_dir: Path, text: str) -> dict:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / ("%s.txt" % digest[:16])
     if not path.exists():
-        path.write_bytes(data)
+        fd = os.open(
+            str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
     prune_results(log_dir)
     return {"path": str(path), "sha256": digest, "bytes": len(data)}
 

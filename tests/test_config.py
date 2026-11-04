@@ -55,7 +55,7 @@ class TestPhase3Options:
 
 class TestPhase1Options:
     def test_tool_profile_default_and_validation(self):
-        assert Config().tool_profile == "full"
+        assert Config().tool_profile == "pwn"
         with pytest.raises(ValueError):
             Config(tool_profile="mega").validate()
 

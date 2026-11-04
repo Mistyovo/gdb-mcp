@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 from mcp.server.fastmcp import Context
@@ -26,7 +27,7 @@ def list_sessions(ctx: Context) -> dict:
     return {"sessions": sessions}
 
 
-@tool(readonly_safe=True)
+@tool()
 def session_status(session_id: str | None = None, ctx: Context = None) -> dict:
     """Detailed status of one gdb session: state, inferior info,
     last stop reason."""
@@ -37,29 +38,6 @@ def session_status(session_id: str | None = None, ctx: Context = None) -> dict:
     )
     info["exited_code"] = session.exited_code
     return info
-
-
-@tool()
-async def quit_gdb(
-    kill_gdb: bool = False,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Detach the MCP plugin from gdb. With kill_gdb=True, also quit
-    gdb itself (and with it the debugged process). Default leaves the
-    externally launched gdb running."""
-    session = resolve_gdb(ctx, session_id)
-    if session.state == RESERVED:
-        raise GdbMcpError(
-            "DISCONNECTED", "session is not connected (hello pending)"
-        )
-    await session.send_quit(kill_gdb=kill_gdb)
-    return {
-        "session_id": session.session_id,
-        "detached": True,
-        "kill_gdb": kill_gdb,
-        "note": "gdb process left running" if not kill_gdb else "gdb quit requested",
-    }
 
 
 @tool(core=True)
@@ -79,11 +57,12 @@ def get_events(
         "session_id": session.session_id,
         "state": session.state,
         "events": session.recent_events(last),
-        "total_recorded": len(session.event_log),
+        "total_recorded": session.event_seq,
+        "stored": len(session.event_log),
     }
 
 
-@tool()
+@tool(capability="host")
 def export_session_script(
     session_id: str | None = None, ctx: Context = None
 ) -> dict:
@@ -97,16 +76,22 @@ def export_session_script(
         raise GdbMcpError(
             "NO_JOURNAL", "session has no journal entries yet"
         )
+    launch = session.launch_info or {}
     meta = {
         "session_id": session.session_id,
         "inferior": (session.hello or {}).get("inferior"),
+        "program": launch.get("program"),
+        "args": launch.get("args"),
+        "cwd": launch.get("cwd"),
     }
     script, stats = compile_gdbscript(meta, session.journal.entries())
     cfg = config_from(ctx)
     out_dir = cfg.log_dir / "scripts"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / ("%s.gdb" % session.session_id)
-    path.write_text(script, encoding="utf-8")
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(script)
     return {
         "session_id": session.session_id,
         "path": str(path),

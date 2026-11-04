@@ -415,6 +415,11 @@ class Launcher:
             marker=True,
             distro_override=distro,
         )
+        session.launch_info = {
+            "program": program_wsl,
+            "args": list(args or []),
+            "cwd": wsl_cwd,
+        }
         # the plugin's hello or the process dying are both state changes:
         # wait for one instead of polling for it
         await session.wait_for_state(_launch_settled, max(0.1, timeout_ms / 1000.0))

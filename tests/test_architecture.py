@@ -71,9 +71,8 @@ class TestLayering:
 
     def test_launcher_and_bridge_talk_to_sessions_only_through_the_registry(self):
         """Session state changes are a documented API (set_state /
-        note_process_exit / attach_analysis / note_location); assigning the
-        attributes from outside the sessions module is how the state machine
-        got bypassed before."""
+        note_process_exit); assigning the attributes from outside the
+        sessions module is how the state machine got bypassed before."""
         offenders = []
         for relative in ("launcher.py", "tcp_listener.py", "campaign.py", "journal.py"):
             path = SRC / relative
@@ -84,7 +83,7 @@ class TestLayering:
                     if (
                         isinstance(target, ast.Attribute)
                         and target.attr
-                        in {"state", "token", "stop_info", "exited_code", "location", "analysis_id"}
+                        in {"state", "token", "stop_info", "exited_code"}
                         and isinstance(target.value, ast.Name)
                         and target.value.id in {"session", "s", "gdb_session", "script_session"}
                     ):
@@ -180,29 +179,41 @@ class TestDocumentedCounts:
         total = len(SPECS)
         experimental = sum(1 for spec in SPECS if spec.experimental)
         core = sum(1 for spec in SPECS if spec.core)
-        return total, experimental, core, total - experimental
+        static = sum(1 for spec in SPECS if spec.extension == "static")
+        pwn = sum(
+            1
+            for spec in SPECS
+            if not spec.experimental and spec.extension is None
+        )
+        return total, experimental, core, pwn, total - experimental, static
 
     def test_declared_tool_counts(self):
-        # (total, experimental, core, default-visible)
-        assert self._counts() == (60, 8, 12, 52)
+        # (total, experimental, core, pwn-default, full-stable, static)
+        assert self._counts() == (56, 6, 12, 35, 50, 15)
 
     def test_readmes_state_the_declared_counts(self):
         root = SRC.parent.parent
-        _, experimental, core, default = self._counts()
+        _, experimental, core, pwn, full, static = self._counts()
         claims = {
             "README.md": [
-                "**%d tools by default**" % default,
-                "%d under `GDB_MCP_TOOL_PROFILE=core`" % core,
+                "**%d tools by default**" % pwn,
+                "**%d** under `GDB_MCP_TOOL_PROFILE=core`" % core,
+                "**%d stable tools**" % full,
                 "**%d experimental tools**" % experimental,
-                "**15 static-analysis tools**",
+                "**%d static-analysis tools**" % static,
             ],
             "README.zh-CN.md": [
-                "默认 %d 个" % default,
+                "`pwn` 档 %d 个" % pwn,
                 "`core` 档 %d 个" % core,
-                "%d 个实验工具" % experimental,
+                "`full` 档 %d 个稳定工具" % full,
+                "额外 %d 个" % experimental,
             ],
         }
         for name, needles in claims.items():
-            text = (root / name).read_text(encoding="utf-8")
+            # README wrapping is prose, not a contract; compare on a
+            # whitespace-normalized view so a reflow cannot fail the guard
+            text = " ".join(
+                (root / name).read_text(encoding="utf-8").split()
+            )
             for needle in needles:
                 assert needle in text, "%s lost its %r claim" % (name, needle)

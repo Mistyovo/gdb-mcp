@@ -4,7 +4,7 @@ There is deliberately no environment variable for this gate: a stray
 variable in a shell profile or MCP config would silently turn these
 tools on for every server start. Anything here is subject to change or
 removal without a deprecation cycle. Current contents: the inferior
-stdio channel (send_to_inferior / read_inferior_output) that pairs with
+stdio channel (`inferior_io` / `read_inferior_output`) that pairs with
 the plugin's io_* verbs, libc identification via a libc.rip-compatible
 API, structured ROP gadget search via the ROPgadget CLI, and the QEMU
 kernel-VM helpers.
@@ -93,24 +93,35 @@ async def _qemu_stub_up(port: int, distro: str | None, timeout_s: float) -> bool
     return False
 
 
-@tool(experimental=True)
-async def send_to_inferior(
-    hex: str,
+@tool(experimental=True, capability="target")
+async def inferior_io(
+    action: str,
+    hex: str | None = None,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """EXPERIMENTAL. Write raw bytes (hex string) to the inferior's
-    stdin. Requires io_setup on the session (the inferior's stdio is
-    redirected to a pty on its next run/start); works while the
-    inferior is running, which is the point."""
+    """EXPERIMENTAL. Manage the inferior stdio pty. Actions:
+    setup (redirect the inferior's stdio on its next run/start),
+    send (raw bytes as a hex string; works while the inferior runs), and
+    teardown (close the channel and restore the previous inferior-tty).
+    Read recorded output with read_inferior_output."""
+    if action not in ("setup", "send", "teardown"):
+        raise ValueError("action must be setup, send or teardown")
     session = resolve_gdb(ctx, session_id)
-    try:
-        hex_to_bytes(hex)
-    except ValueError as exc:
-        raise GdbMcpError("BAD_PARAMS", str(exc)) from None
-    return await session.request(
-        "io_send", {"hex": hex}, timeout=config_from(ctx).request_timeout
-    )
+    timeout = config_from(ctx).request_timeout
+    if action == "setup":
+        return await session.request("io_setup", {}, timeout=timeout)
+    if action == "send":
+        if hex is None:
+            raise GdbMcpError("BAD_PARAMS", "hex is required for action=send")
+        try:
+            hex_to_bytes(hex)
+        except ValueError as exc:
+            raise GdbMcpError("BAD_PARAMS", str(exc)) from None
+        return await session.request(
+            "io_send", {"hex": hex}, timeout=timeout
+        )
+    return await session.request("io_teardown", {}, timeout=timeout)
 
 
 @tool(experimental=True)
@@ -132,30 +143,7 @@ async def read_inferior_output(
     )
 
 
-@tool(experimental=True)
-async def io_setup(session_id: str | None = None, ctx: Context = None) -> dict:
-    """EXPERIMENTAL. Redirect the inferior's stdio to a pty managed by
-    the gdb-mcp plugin, enabling send_to_inferior/read_inferior_output.
-    Takes effect on the inferior's next run/start; Unix only."""
-    session = resolve_gdb(ctx, session_id)
-    return await session.request(
-        "io_setup", {}, timeout=config_from(ctx).request_timeout
-    )
-
-
-@tool(experimental=True)
-async def io_teardown(
-    session_id: str | None = None, ctx: Context = None
-) -> dict:
-    """EXPERIMENTAL. Close the inferior stdio channel and restore the
-    previous inferior-tty behavior on the next run."""
-    session = resolve_gdb(ctx, session_id)
-    return await session.request(
-        "io_teardown", {}, timeout=config_from(ctx).request_timeout
-    )
-
-
-@tool(experimental=True)
+@tool(experimental=True, capability="host")
 async def identify_libc(
     leaks: dict[str, str],
     use_api: bool = True,
@@ -203,7 +191,7 @@ async def identify_libc(
     return {"matches": matches[:16], "query": normalized}
 
 
-@tool(experimental=True)
+@tool(experimental=True, capability="host")
 async def search_gadgets(
     binary: str,
     pattern: str = "pop rdi",
@@ -212,9 +200,11 @@ async def search_gadgets(
     ctx: Context = None,
 ) -> dict:
     """EXPERIMENTAL. Search ROP gadgets in a binary via the ROPgadget
-    CLI (pip install ROPgadget), then filter gadget instruction text
-    by a case-insensitive regex (pattern). Returns address +
-    instruction text per gadget, at most max_results."""
+    CLI (pip install ROPgadget) on the SERVER host, then filter gadget
+    instruction text by a case-insensitive regex (pattern). Returns
+    address + instruction text per gadget, at most max_results. The
+    binary path must be readable from the server host (not a WSL-only
+    path)."""
     if not binary.strip():
         raise GdbMcpError("BAD_PARAMS", "binary is required")
     try:
@@ -269,7 +259,7 @@ async def search_gadgets(
     }
 
 
-@tool(experimental=True)
+@tool(experimental=True, capability="host")
 async def kernel_launch(
     kernel: str,
     initrd: str | None = None,
@@ -343,7 +333,7 @@ async def kernel_launch(
     }
 
 
-@tool(experimental=True)
+@tool(experimental=True, capability="host")
 async def kernel_snapshot(
     action: str,
     tag: str = "bench",

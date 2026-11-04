@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -33,6 +34,10 @@ def env(tmp_path):
         max_mem_read=1024,
         log_dir=tmp_path / "logs",
         result_inline_limit=64,
+        # the fixture exercises the complete stable surface, including the
+        # full-profile static extension; profile-specific tests build their
+        # own Config
+        tool_profile="full",
     )
     ids = iter("s-%03d" % i for i in range(100))
     registry = SessionRegistry(cfg, session_id_factory=lambda: next(ids))
@@ -109,17 +114,25 @@ class TestSessionTools:
         assert "uptime_sec" in result
 
     @pytest.mark.asyncio
-    async def test_quit_gdb_sends_quit_message(self, env):
+    async def test_kill_session_default_detaches_and_keeps_record(self, env):
         registry, _, _ = env
         s = add_gdb_session(registry)
-        result = await run_tool(
-            env[2]["quit_gdb"], {"session_id": s.session_id}, ctx_for(env)
+        task = asyncio.create_task(
+            run_tool(
+                env[2]["kill_session"],
+                {"session_id": s.session_id, "force": False},
+                ctx_for(env),
+            )
         )
-        assert result["detached"] is True
-        assert result["kill_gdb"] is False
-        line = json.loads(s.writer.sent[0].decode("utf-8"))
+        line = await next_request(s, s.writer)
         assert line["type"] == "quit"
         assert line["kill_gdb"] is False
+        await s.on_disconnect()
+        result = await task
+        assert result["detached"] is True
+        assert result["killed"] is False
+        assert result["record_kept"] is True
+        assert registry.has_session(s.session_id)
 
     @pytest.mark.asyncio
     async def test_get_process_output(self, env, tmp_path):
@@ -160,6 +173,70 @@ class TestSessionTools:
 
 
 class TestLaunchTools:
+    def test_unsafe_launch_args_are_detected(self):
+        from gdb_mcp.tools.launch_tools import _unsafe_launch_arg
+
+        assert _unsafe_launch_arg(None) is None
+        assert _unsafe_launch_arg(["-ex", "set pagination off"]) is None
+        assert _unsafe_launch_arg(["-ex", "shell id"]) == "shell id"
+        assert _unsafe_launch_arg(["--eval-command=python print(1)"]) == (
+            "--eval-command=python print(1)"
+        )
+        # sourcing a file cannot be inspected here, so it is gated whole
+        assert _unsafe_launch_arg(["-x", "/tmp/hostile.gdb"]) == "-x"
+
+    def test_attach_pid_is_prepended_to_gdb_args(self):
+        from gdb_mcp.tools.launch_tools import _with_attach
+
+        assert _with_attach(None, 4242) == ["-p", "4242"]
+        assert _with_attach(["-ex", "set pagination off"], 7) == [
+            "-p",
+            "7",
+            "-ex",
+            "set pagination off",
+        ]
+        assert _with_attach(["-ex", "x"], None) == ["-ex", "x"]
+
+    @pytest.mark.asyncio
+    async def test_attach_pid_reaches_launcher(self, env, monkeypatch):
+        registry, _, tools = env
+        captured = {}
+
+        async def fake_launch(self, **kwargs):
+            captured.update(kwargs)
+            return registry.reserve("s-attach")
+
+        monkeypatch.setattr("gdb_mcp.launcher.Launcher.launch_gdb", fake_launch)
+        result = await run_tool(
+            tools["launch_gdb"], {"attach_pid": 4242}, ctx_for(env)
+        )
+        assert captured["gdb_args"] == ["-p", "4242"]
+        assert result["session_id"] == "s-attach"
+
+    @pytest.mark.asyncio
+    async def test_attach_pid_rejects_program_and_run(self, env):
+        _, _, tools = env
+        for kwargs in (
+            {"attach_pid": 123, "program": "/tmp/vuln"},
+            {"attach_pid": 123, "args": ["x"]},
+            {"attach_pid": 123, "run": True},
+            {"attach_pid": 0},
+        ):
+            with pytest.raises(GdbMcpError) as ei:
+                await run_tool(tools["launch_gdb"], kwargs, ctx_for(env))
+            assert ei.value.code == "BAD_PARAMS"
+
+    @pytest.mark.asyncio
+    async def test_unsafe_gdb_args_rejected_before_launch(self, env):
+        _, _, tools = env
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["launch_gdb"],
+                {"gdb_args": ["-ex", "shell id"]},
+                ctx_for(env),
+            )
+        assert ei.value.code == "UNSAFE_BLOCKED"
+
     @pytest.mark.asyncio
     async def test_launch_script_reports_completed_pure_script(
         self, env, monkeypatch, tmp_path
@@ -404,14 +481,14 @@ class TestExecTools:
         assert result["stop_info"]["signal"] == "SIGSEGV"
 
     @pytest.mark.asyncio
-    async def test_get_stop_reason(self, env):
+    async def test_session_status_carries_last_stop(self, env):
         registry, _, tools = env
         s = add_gdb_session(registry)
         await s.push_notification("stop", {"signal": "SIGTRAP"})
         result = await run_tool(
-            tools["get_stop_reason"], {"session_id": s.session_id}, ctx_for(env)
+            tools["session_status"], {"session_id": s.session_id}, ctx_for(env)
         )
-        assert result["stop_info"]["signal"] == "SIGTRAP"
+        assert result["last_stop"]["signal"] == "SIGTRAP"
 
 
 class TestStateTools:
@@ -934,6 +1011,7 @@ class TestGetEvents:
         seqs = [e["seq"] for e in result["events"]]
         assert seqs[1] > seqs[0]
         assert result["total_recorded"] == 3
+        assert result["stored"] == 3
 
     def test_get_events_validates_last(self, env):
         _, _, tools = env
@@ -975,6 +1053,16 @@ class TestResultStore:
         assert tail["output"].splitlines()[0] == "line-0045"
         assert tail["truncated"] is False
         assert tail["sha256"] == result["result_sha256"]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_stored_result_is_private(self, tmp_path):
+        import stat
+
+        from gdb_mcp.results import store_result
+
+        stored = store_result(tmp_path, "secret")
+        mode = stat.S_IMODE(os.stat(stored["path"]).st_mode)
+        assert mode == 0o600
 
     @pytest.mark.asyncio
     async def test_small_output_not_stored(self, env):
@@ -1045,6 +1133,19 @@ class TestToolProfile:
     def test_core_set_matches_contract(self):
         assert set(CORE_TOOLS) == self.EXPECTED_CORE
 
+    def test_observer_allowlist_matches_default_observe_surface(self):
+        from gdb_mcp.roles import OBSERVER_ALLOWED_TOOLS
+        from gdb_mcp.tools.registry import SPECS
+
+        expected = {
+            spec.name
+            for spec in SPECS
+            if spec.capability == "observe"
+            and not spec.experimental
+            and spec.extension is None
+        }
+        assert OBSERVER_ALLOWED_TOOLS == expected
+
     def test_every_handler_is_declared(self):
         """A tool function that lost its @tool() decorator would vanish
         from the MCP surface silently; catch that here."""
@@ -1072,12 +1173,25 @@ class TestToolProfile:
         assert "write_memory" not in names
         assert "execute_command" in names
 
-    def test_full_profile_registers_everything(self, tmp_path):
+    def test_default_profile_is_pwn_without_static_extension(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l")
+        app = build_app(cfg, SessionRegistry(cfg))
+        names = set(registered_tools(app))
+        assert cfg.tool_profile == "pwn"
+        assert "write_memory" in names
+        assert "kill_session" in names
+        assert "analyze_binary" not in names
+        assert "decompile_function" not in names
+        assert len(names) > len(CORE_TOOLS)
+
+    def test_full_profile_registers_static_extension(self, tmp_path):
+        cfg = Config(log_dir=tmp_path / "l", tool_profile="full")
         app = build_app(cfg, SessionRegistry(cfg))
         names = set(registered_tools(app))
         assert "write_memory" in names
         assert "kill_session" in names
+        assert "analyze_binary" in names
+        assert "decompile_function" in names
         assert len(names) > len(CORE_TOOLS)
 
 
@@ -1428,14 +1542,18 @@ class TestUnsafeGate:
         # already consumed the only request line)
         assert len(s.writer.sent) == 0
 
-    def test_readonly_drops_write_tools(self, tmp_path):
+    def test_readonly_keeps_only_observe_tools(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l", readonly=True)
         app = build_app(cfg, SessionRegistry(cfg))
         names = set(registered_tools(app))
         assert "write_memory" not in names
         assert "write_register" not in names
+        assert "continue_execution" not in names
+        assert "launch_gdb" not in names
+        assert "execute_command" not in names
         assert "read_memory" in names
-        assert "continue_execution" in names
+        assert "crash_report" in names
+        assert "list_sessions" in names
 
 
 class TestJournal:
@@ -1504,6 +1622,35 @@ class TestExportSessionScript:
         assert "break main" in result["script"]
         assert result["script"].splitlines()[-1] == "quit"
         assert (cfg.log_dir / "scripts" / ("%s.gdb" % s.session_id)).exists()
+
+    @pytest.mark.asyncio
+    async def test_export_includes_launch_prologue(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        s.launch_info = {
+            "program": "/tmp/vuln",
+            "args": ["A", "B C"],
+            "cwd": "/tmp/work",
+        }
+        task = asyncio.create_task(
+            run_tool(
+                tools["set_breakpoint"],
+                {"location": "main", "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(s, s.writer, {"number": 1, "type": "breakpoint", "enabled": True})
+        await task
+        result = await run_tool(
+            tools["export_session_script"],
+            {"session_id": s.session_id},
+            ctx_for(env),
+        )
+        lines = result["script"].splitlines()
+        assert 'file "/tmp/vuln"' in lines
+        assert 'cd "/tmp/work"' in lines
+        assert 'set args "A" "B C"' in lines
+        assert result["prologue"] == 3
 
     @pytest.mark.asyncio
     async def test_empty_journal_errors(self, env):
@@ -1667,6 +1814,25 @@ class TestDiffSessions:
         assert result["registers_truncated"] is False
 
     @pytest.mark.asyncio
+    async def test_register_diff_truncates_at_64(self, env):
+        registry, _, tools = env
+        sa = add_gdb_session(registry, pid=555)
+        sb = add_gdb_session(registry, pid=666)
+        task = asyncio.create_task(
+            run_tool(
+                tools["diff_sessions"],
+                {"session_a": sa.session_id, "session_b": sb.session_id},
+                ctx_for(env),
+            )
+        )
+        names = ["r%d" % i for i in range(70)]
+        await respond_to(sa, sa.writer, {"regs": {n: "0x0" for n in names}})
+        await respond_to(sb, sb.writer, {"regs": {n: "0x1" for n in names}})
+        result = await task
+        assert len(result["registers_changed"]) == 64
+        assert result["registers_truncated"] is True
+
+    @pytest.mark.asyncio
     async def test_memory_diff(self, env):
         registry, _, tools = env
         sa = add_gdb_session(registry, pid=333)
@@ -1716,23 +1882,16 @@ class TestExperimentalGating:
     def test_hidden_by_default(self, tmp_path):
         _, _, app = self._app_with(False, tmp_path)
         names = set(registered_tools(app))
-        assert "send_to_inferior" not in names
+        assert "inferior_io" not in names
         assert "read_inferior_output" not in names
-        assert "io_setup" not in names
-        assert "io_teardown" not in names
 
     def test_registered_when_enabled(self, tmp_path):
         _, registry, app = self._app_with(True, tmp_path)
         names = set(registered_tools(app))
-        assert {
-            "send_to_inferior",
-            "read_inferior_output",
-            "io_setup",
-            "io_teardown",
-        } <= names
+        assert {"inferior_io", "read_inferior_output"} <= names
 
     @pytest.mark.asyncio
-    async def test_send_to_inferior_passthrough(self, tmp_path):
+    async def test_inferior_io_send_passthrough(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l", experimental=True)
         registry = SessionRegistry(cfg)
         app = build_app(cfg, registry)
@@ -1740,8 +1899,8 @@ class TestExperimentalGating:
         s = add_gdb_session(registry)
         task = asyncio.create_task(
             run_tool(
-                tools["send_to_inferior"],
-                {"hex": "3120", "session_id": s.session_id},
+                tools["inferior_io"],
+                {"action": "send", "hex": "3120", "session_id": s.session_id},
                 ctx_for((registry, cfg, tools)),
             )
         )
@@ -1751,7 +1910,7 @@ class TestExperimentalGating:
         assert await task == {"sent": 2}
 
     @pytest.mark.asyncio
-    async def test_send_to_inferior_validates_hex(self, tmp_path):
+    async def test_inferior_io_validates_hex(self, tmp_path):
         cfg = Config(log_dir=tmp_path / "l", experimental=True)
         registry = SessionRegistry(cfg)
         app = build_app(cfg, registry)
@@ -1759,8 +1918,8 @@ class TestExperimentalGating:
         add_gdb_session(registry)
         with pytest.raises(GdbMcpError) as ei:
             await run_tool(
-                tools["send_to_inferior"],
-                {"hex": "zz"},
+                tools["inferior_io"],
+                {"action": "send", "hex": "zz"},
                 ctx_for((registry, cfg, tools)),
             )
         assert ei.value.code == "BAD_PARAMS"
@@ -1814,6 +1973,28 @@ class TestObserverGuard:
             await respond_to(s, s.writer, {"regs": {"rax": "0x1"}})
             result = await task
             assert result["regs"] == {"rax": "0x1"}
+        finally:
+            role.reset(token)
+
+    @pytest.mark.asyncio
+    async def test_observer_target_side_effects_rejected(self, tmp_path):
+        cfg, registry, tools, role = self._env_with_observers(tmp_path)
+        s = add_gdb_session(registry)
+        token = role.set("observer")
+        try:
+            for tool, kwargs in (
+                ("evaluate", {"expression": "system(\"id\")"}),
+                ("load_target", {"path": "/tmp/other"}),
+                ("export_session_script", {}),
+                ("select_frame", {"level": 0}),
+            ):
+                with pytest.raises(GdbMcpError) as ei:
+                    await run_tool(
+                        tools[tool],
+                        {**kwargs, "session_id": s.session_id},
+                        ctx_for((registry, cfg, tools)),
+                    )
+                assert ei.value.code == "OBSERVER_READONLY"
         finally:
             role.reset(token)
 

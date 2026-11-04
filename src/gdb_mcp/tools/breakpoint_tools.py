@@ -13,7 +13,7 @@ from .registry import tool
 _BP_TYPES = ("breakpoint", "hw", "watch", "hw_watch")
 
 
-@tool(core=True)
+@tool(core=True, capability="debug")
 async def set_breakpoint(
     location: str,
     type: str = "breakpoint",
@@ -90,7 +90,7 @@ async def list_breakpoints(
     )
 
 
-@tool()
+@tool(capability="debug")
 async def manage_breakpoint(
     number: int,
     action: str,

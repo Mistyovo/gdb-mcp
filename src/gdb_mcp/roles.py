@@ -2,10 +2,14 @@
 
 A controller token drives everything; observer tokens (configured via
 ``GDB_MCP_OBSERVER_TOKENS`` / ``--observer-token``) may attach to the
-same sessions read-only — every tool outside
-``OBSERVER_ALLOWED_TOOLS`` raises ``OBSERVER_READONLY`` for them.
-The allowlist is default-deny: tools added later are observer-invisible
-until explicitly listed, which is the safe direction for new tools.
+same sessions read-only. The registry derives the gate from each tool's
+declared capability: only ``observe`` tools are callable; every other
+capability raises ``OBSERVER_READONLY``. New tools are therefore
+observer-invisible by default unless they declare ``capability="observe"``.
+
+``OBSERVER_ALLOWED_TOOLS`` is the smoke-test contract for the default
+``pwn`` profile's observe surface (the capability declarations remain the
+source of truth).
 """
 
 from __future__ import annotations
@@ -14,44 +18,28 @@ from contextvars import ContextVar
 
 CURRENT_ROLE: ContextVar[str] = ContextVar("gdb_mcp_client_role", default="controller")
 
+#: The observe-only surface of the default (pwn) profile. The registry
+#: itself derives the observer gate from each tool's declared capability;
+#: this set is the smoke-test contract for that surface (a name here that
+#: is not actually registered, or a declared-observe tool missing here,
+#: means the two views drifted).
 OBSERVER_ALLOWED_TOOLS = frozenset(
     {
         "list_sessions",
         "session_status",
         "get_events",
-        "get_stop_reason",
         "get_process_output",
         "read_memory",
         "read_registers",
         "get_backtrace",
         "disassemble",
-        "evaluate",
         "list_threads",
-        "select_frame",
         "get_memory_map",
-        "load_target",
         "list_breakpoints",
         "heap_bins",
         "crash_report",
-        "export_session_script",
         "read_result",
         "diff_sessions",
-        # 3.5 static bridge queries (analysis itself is a write)
-        "list_analyses",
-        "get_analysis_status",
-        "get_binary_overview",
-        "list_sections",
-        "list_symbols",
-        "list_functions",
-        "decompile_function",
-        "get_static_disassembly",
-        "list_strings",
-        "get_xrefs",
-        "get_call_graph",
-        "search_decompiled_code",
+        "wait_for_stop",
     }
 )
-
-
-def observer_allowed(tool_name: str) -> bool:
-    return tool_name in OBSERVER_ALLOWED_TOOLS

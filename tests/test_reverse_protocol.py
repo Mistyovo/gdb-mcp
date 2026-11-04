@@ -68,19 +68,3 @@ async def test_ghidra_detect_executes_posix_test(monkeypatch):
     executable, _ = await runner.detect()
     assert executable == "/opt/ghidra/headless"
     assert seen == [["test", "-x", "/opt/ghidra/headless"]]
-
-
-@pytest.mark.asyncio
-async def test_backend_probe_reports_missing_ghidra(tmp_path, monkeypatch):
-    from gdb_mcp.events import EventBroker
-    from gdb_mcp.reverse import AnalysisManager
-
-    manager = AnalysisManager(Config(analysis_dir=tmp_path), EventBroker())
-
-    async def detect(distro=None):
-        return None, "kali-linux"
-
-    monkeypatch.setattr(manager.runner, "detect", detect)
-    await manager._probe_backend()
-    assert manager.backend_status["status"] == "unavailable"
-    assert "not found" in manager.backend_status["error"]

@@ -1,13 +1,14 @@
-"""Static-bridge coordinator: analysis queueing and live location mapping.
+"""Optional static-analysis extension: Ghidra analysis queueing + queries.
 
-Owns the *async* half of the static bridge — queueing Ghidra runs,
-following session lifecycle events to attach an analysis to a session, and
-mapping a runtime stop back to a static function and line.
+This is a *query-only* extension, enabled by the full tool profile. It owns
+the asynchronous half — queueing Ghidra runs and exposing the SHA-256
+addressed cache. It deliberately has no gdb-session coupling: the removed
+dashboard used to map live stops onto static addresses, but the plugin
+never emitted module metadata, so that path was dead and is not advertised.
 
 Two collaborators take the rest: :class:`~gdb_mcp.reverse.store.AnalysisStore`
 owns the on-disk cache and the in-memory indexes over it, and
 :class:`~gdb_mcp.reverse.ghidra.GhidraRunner` owns the headless process.
-Everything here is state that only exists while the server runs.
 """
 
 from __future__ import annotations
@@ -15,8 +16,6 @@ from __future__ import annotations
 import asyncio
 from bisect import bisect_left, bisect_right
 from collections import deque
-import copy
-from contextlib import suppress
 import json
 import logging
 import re
@@ -24,12 +23,10 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Coroutine
+from typing import Any
 
 from gdb_mcp.config import Config
 from gdb_mcp.errors import GdbMcpError
-from gdb_mcp.events import EventBroker
-from gdb_mcp.sessions import RUNNING, Session, SessionRegistry
 
 from .ghidra import GhidraRunner
 from .store import AnalysisRecord, AnalysisStore
@@ -43,52 +40,21 @@ MAX_GRAPH_NODES = 1000
 
 
 class AnalysisManager:
-    def __init__(self, config: Config, events: EventBroker | None = None):
+    """Query facade over the SHA-256-addressed Ghidra analysis cache.
+
+    This is an optional static-analysis extension. It deliberately knows
+    nothing about gdb sessions: live location mapping was removed with the
+    dashboard (the plugin never emitted module metadata, so the old path
+    was dead). Ghidra runs are queued explicitly through ``analyze_binary``.
+    """
+
+    def __init__(self, config: Config):
         self.config = config
-        self.events = events or EventBroker()
         self.runner = GhidraRunner(config)
         self.store = AnalysisStore(config)
         #: Ghidra runs are serialized: the analyzer is slow and memory-hungry
         self._semaphore = asyncio.Semaphore(1)
         self._tasks: dict[str, asyncio.Task] = {}
-        self._attachments: dict[str, asyncio.Task] = {}
-        self._attachment_targets: dict[str, str] = {}
-        self._background: set[asyncio.Task] = set()
-        self._registry: SessionRegistry | None = None
-        self._event_queue: asyncio.Queue | None = None
-        self._event_task: asyncio.Task | None = None
-        self._probe_task: asyncio.Task | None = None
-        self.backend_status: dict[str, Any] = {
-            "name": "ghidra",
-            "status": "unknown",
-            "executable": None,
-            "distro": None,
-            "error": None,
-        }
-
-    # -- task bookkeeping -----------------------------------------------------
-
-    def _spawn(self, coro: Coroutine[Any, Any, Any], name: str) -> asyncio.Task:
-        """Run a background coroutine, keeping it referenced and its failure
-        visible.
-
-        A task nobody references can be garbage-collected mid-flight, and an
-        exception nobody retrieves is dropped silently — both easy to hit in
-        an event-driven coordinator.
-        """
-        task = asyncio.create_task(coro, name=name)
-        self._background.add(task)
-
-        def _done(finished: asyncio.Task) -> None:
-            self._background.discard(finished)
-            if finished.cancelled():
-                return
-            exc = finished.exception()
-            if exc is not None:
-                log.warning("background task %s failed: %s", name, exc)
-
-        task.add_done_callback(_done)
-        return task
 
     @staticmethod
     def _forget(registry: dict, key: str):
@@ -106,150 +72,6 @@ class AnalysisManager:
 
         return _done
 
-    # -- lifecycle ------------------------------------------------------------
-
-    async def start(self, registry: SessionRegistry) -> None:
-        if self._event_task is not None:
-            return
-        self._registry = registry
-        self._event_queue = self.events.subscribe()
-        self._event_task = self._spawn(self._consume_events(), "reverse.events")
-        self.backend_status["status"] = "checking"
-        self._probe_task = self._spawn(self._probe_backend(), "reverse.probe")
-
-    async def stop(self) -> None:
-        if self._event_queue is not None:
-            self.events.unsubscribe(self._event_queue)
-        tracked = (
-            [self._event_task, self._probe_task]
-            + list(self._tasks.values())
-            + list(self._attachments.values())
-            + list(self._background)
-        )
-        for task in tracked:
-            if task is not None:
-                task.cancel()
-        pending = [task for task in tracked if task is not None]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._tasks.clear()
-        self._attachments.clear()
-        self._background.clear()
-
-    async def _probe_backend(self) -> None:
-        try:
-            executable, distro = await self.runner.detect()
-        except Exception as exc:
-            self.backend_status.update(status="unavailable", error=str(exc))
-        else:
-            self.backend_status.update(
-                status="available" if executable else "unavailable",
-                executable=executable,
-                distro=distro,
-                error=None if executable else "Ghidra Headless was not found",
-            )
-        self.events.publish("analysis.updated", {"backend": dict(self.backend_status)})
-
-    # -- following sessions ---------------------------------------------------
-
-    async def _consume_events(self) -> None:
-        assert self._event_queue is not None
-        while True:
-            event = await self._event_queue.get()
-            if event["type"] == "resync":
-                await self._resync_sessions()
-                continue
-            if event["type"] != "session.updated" or self._registry is None:
-                continue
-            data = event["data"]
-            try:
-                session = self._registry.get(data["session_id"])
-            except GdbMcpError as exc:
-                # the session was removed while this event waited its turn
-                log.debug("dropping event for absent session: %s", exc.message)
-                continue
-            await self._on_session_event(session, data.get("event"))
-
-    async def _on_session_event(self, session: Session, event_name: str | None) -> None:
-        if event_name in {"connected", "ready", "target"}:
-            target = session.info().get("inferior")
-            if self.config.auto_analyze and target:
-                self._schedule_attachment(session, target)
-        if event_name == "running" and session.location:
-            self._publish_location(session)
-        elif event_name == "stop":
-            self._spawn(self._resolve_stop(session), "reverse.resolve_stop")
-
-    async def _resync_sessions(self) -> None:
-        """Re-derive every session's location after the broker dropped
-        events (a slow subscriber gets a resync marker, not a replay)."""
-        if self._registry is None:
-            return
-        stopped = []
-        for session in self._registry.list_all():
-            target = session.info().get("inferior")
-            if self.config.auto_analyze and target:
-                self._schedule_attachment(session, target)
-            if session.state == RUNNING and session.location:
-                self._publish_location(session)
-            elif session.stop_info:
-                stopped.append(self._resolve_stop(session))
-        if stopped:
-            await asyncio.gather(*stopped, return_exceptions=True)
-
-    async def _resolve_stop(self, session: Session) -> None:
-        location = await self.refresh_session_location(session)
-        if not location or location.get("analysis_id") or not location.get("runtime_pc"):
-            return
-        # with no analysis for this module, fall back to the runtime text so
-        # the stop is still readable
-        try:
-            dynamic = await session.request(
-                "disasm",
-                {"start": location["runtime_pc"], "count": 48},
-                timeout=self.config.request_timeout,
-            )
-        except Exception as exc:
-            location["dynamic_disassembly_error"] = str(exc)
-        else:
-            location["dynamic_disassembly"] = dynamic
-        self._publish_location(session)
-
-    def _schedule_attachment(self, session: Session, target: str) -> None:
-        current = self._attachments.get(session.session_id)
-        if (
-            self._attachment_targets.get(session.session_id) == target
-            and current is not None
-            and not current.done()
-        ):
-            return
-        if session.analysis_id and self.store.matches_path(session.analysis_id, target):
-            return
-        self._attachment_targets[session.session_id] = target
-        task = asyncio.create_task(self._attach_analysis(session, target))
-        self._attachments[session.session_id] = task
-        task.add_done_callback(self._forget(self._attachments, session.session_id))
-
-    async def _attach_analysis(self, session: Session, target: str) -> None:
-        try:
-            record = await self.queue_analysis(target, distro=session.distro)
-        except GdbMcpError as exc:
-            session.attach_analysis(None, error=exc.message)
-            self.events.publish(
-                "analysis.updated",
-                {
-                    "session_id": session.session_id,
-                    "status": "error",
-                    "error": exc.message,
-                },
-            )
-            return
-        if self._attachment_targets.get(session.session_id) != target:
-            return  # a newer target superseded this attachment
-        session.attach_analysis(record.analysis_id)
-        if session.stop_info:
-            await self.refresh_session_location(session)
-
     # -- analysis queue -------------------------------------------------------
 
     async def queue_analysis(
@@ -265,6 +87,11 @@ class AnalysisManager:
         share a run, and a request for an already-ready binary does not
         re-analyze unless ``force`` is set.
         """
+        if self.config.analysis_dir is None:
+            raise GdbMcpError(
+                "BAD_PARAMS",
+                "analysis_dir is not configured; set GDB_MCP_ANALYSIS_DIR",
+            )
         digest, size, selected, target_path = await self.runner.fingerprint(path, distro)
         analysis_id = "a-" + digest[:16]
         existing = self.store.records.get(analysis_id)
@@ -291,7 +118,6 @@ class AnalysisManager:
         record.error = None
         record.updated_at = time.time()
         self.store.put(record)
-        self._publish_record(record)
         running = self._tasks.get(analysis_id)
         if running is None or running.done():
             task = asyncio.create_task(self._run_analysis(record, language_id))
@@ -305,7 +131,13 @@ class AnalysisManager:
         async with self._semaphore:
             record.status = "running"
             record.updated_at = time.time()
-            self._publish_record(record)
+            if self.config.analysis_dir is None:
+                record.status = "error"
+                record.error = (
+                    "analysis_dir is not configured; set GDB_MCP_ANALYSIS_DIR"
+                )
+                record.updated_at = time.time()
+                return
             root = self.config.analysis_dir.resolve()
             staging = root / (
                 ".%s.staging-%s" % (record.analysis_id, uuid.uuid4().hex[:8])
@@ -333,31 +165,8 @@ class AnalysisManager:
                 record.status = "error"
                 record.error = getattr(exc, "message", str(exc))
                 record.updated_at = time.time()
-                if getattr(exc, "code", None) == "BACKEND_UNAVAILABLE":
-                    self.backend_status.update(status="unavailable", error=record.error)
             finally:
                 await asyncio.to_thread(_discard, staging)
-                self._publish_record(record)
-                if record.status == "ready":
-                    self._reproject(record)
-
-    def _reproject(self, record: AnalysisRecord) -> None:
-        """An analysis just became ready: re-map the stops of the sessions
-        that were waiting on it."""
-        if self._registry is None:
-            return
-        for session in self._registry.list_all():
-            if session.analysis_id == record.analysis_id and session.stop_info:
-                self._spawn(self._resolve_stop(session), "reverse.resolve_stop")
-
-    def _publish_record(self, record: AnalysisRecord) -> None:
-        self.events.publish("analysis.updated", record.public())
-
-    def _publish_location(self, session: Session) -> None:
-        self.events.publish(
-            "location.updated",
-            {"session_id": session.session_id, "location": session.location},
-        )
 
     # -- static queries -------------------------------------------------------
 
@@ -620,16 +429,6 @@ class AnalysisManager:
             item["updated_at"] = time.time()
             annotations[key] = item
             self.store.save_annotations(analysis_id, annotations)
-        summary = self._function_summary(analysis_id, resolved)
-        self.events.publish(
-            "annotation.updated",
-            {
-                "analysis_id": analysis_id,
-                "address": key,
-                "annotation": item,
-                "effective_name": item.get("label") or (summary or {}).get("name"),
-            },
-        )
         return {"analysis_id": analysis_id, "address": key, "annotation": item}
 
     def remove_annotation(self, analysis_id: str, address: str | int) -> dict[str, Any]:
@@ -639,176 +438,7 @@ class AnalysisManager:
             annotations = self.store.annotations(analysis_id)
             removed = annotations.pop(key, None) is not None
             self.store.save_annotations(analysis_id, annotations)
-        summary = self._function_summary(analysis_id, resolved)
-        self.events.publish(
-            "annotation.updated",
-            {
-                "analysis_id": analysis_id,
-                "address": key,
-                "annotation": None,
-                "effective_name": (summary or {}).get("name"),
-            },
-        )
         return {"analysis_id": analysis_id, "address": key, "removed": removed}
-
-    # -- runtime -> static location mapping -----------------------------------
-
-    def analysis_for_module(self, module_path: str | None) -> str | None:
-        return self.store.newest_for_path(module_path)
-
-    def _runtime_location(
-        self, session: Session, source: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """Map one runtime frame description (pc + module + offset) to static
-        code, or None when it carries no usable pc."""
-        pc_text = source.get("pc")
-        if not pc_text:
-            return None
-        try:
-            runtime_pc = int(pc_text, 16)
-        except (TypeError, ValueError):
-            return None
-        module_offset = source.get("module_offset")
-        module_path = source.get("module_path")
-        analysis_id = None
-        if session.analysis_id and self.store.matches_path(session.analysis_id, module_path):
-            analysis_id = session.analysis_id
-        elif module_path:
-            analysis_id = self.analysis_for_module(module_path)
-        location: dict[str, Any] = {
-            "runtime_pc": "0x%x" % runtime_pc,
-            "module": module_path,
-            "module_base": source.get("module_base"),
-            "module_offset": module_offset,
-            "analysis_id": analysis_id,
-            "state": session.state,
-            "stale": session.state == RUNNING,
-            "exact": False,
-        }
-        if analysis_id and module_offset is not None:
-            with suppress(Exception):
-                location.update(self._map_module_offset(analysis_id, module_offset))
-        return location
-
-    def _map_module_offset(self, analysis_id: str, module_offset: Any) -> dict[str, Any]:
-        """Static address, function and best line for a module-relative
-        offset — the slide from a runtime address back to link time.
-
-        A line hit is preferred; failing that the closest preceding line
-        (what a debugger would show), and failing that the nearest line.
-        """
-        image_base = int(
-            (self.store.index(analysis_id).get("binary") or {}).get("image_base", "0x0"), 16
-        )
-        offset = (
-            int(module_offset, 16) if isinstance(module_offset, str) else int(module_offset)
-        )
-        static_address = image_base + offset
-        mapped: dict[str, Any] = {"static_address": "0x%x" % static_address}
-        if self._function_summary(analysis_id, static_address) is None:
-            return mapped
-        function = self.decompile(analysis_id, static_address)
-        mapped["function"] = function.get("effective_name") or function.get("name")
-        mapped["function_entry"] = function["entry"]
-        lines = [line for line in function.get("lines") or [] if line.get("min")]
-        exact = [
-            line
-            for line in lines
-            if int(line["min"], 16) <= static_address <= int(line.get("max", line["min"]), 16)
-        ]
-        chosen = (
-            min(
-                exact,
-                key=lambda line: int(line.get("max", line["min"]), 16) - int(line["min"], 16),
-            )
-            if exact
-            else None
-        )
-        if chosen is None:
-            previous = [line for line in lines if int(line["min"], 16) <= static_address]
-            chosen = (
-                max(previous, key=lambda line: int(line["min"], 16)) if previous else None
-            )
-        if chosen is None and lines:
-            chosen = min(lines, key=lambda line: abs(int(line["min"], 16) - static_address))
-        if chosen:
-            mapped["line"] = chosen["number"]
-            mapped["exact"] = bool(exact)
-        return mapped
-
-    def _location_priority(self, location: dict[str, Any]) -> int:
-        """Rank candidate frames so the reported location is the most
-        debuggable one, not merely the innermost."""
-        analysis_id = location.get("analysis_id")
-        address = location.get("static_address")
-        if not analysis_id or not address:
-            return 9
-        with suppress(Exception):
-            value = int(address, 16)
-            for section in self.store.index(analysis_id).get("sections") or []:
-                if int(section["start"], 16) <= value <= int(section["end"], 16):
-                    if section.get("name") == ".text":
-                        return 0
-                    if section.get("execute"):
-                        return 1
-                    return 2
-        return 3
-
-    def resolve_session_location(
-        self, session: Session, *, publish: bool = True
-    ) -> dict[str, Any] | None:
-        """Map the session's current stop (and its backtrace) to static code
-        and remember the result on the session.
-
-        Every frame is a candidate; the one in real, analyzed code wins, so a
-        libc return address does not hide the frame the agent cares about.
-        """
-        stop = session.stop_info or {}
-        actual = self._runtime_location(session, stop)
-        if actual is None:
-            return session.location
-        actual["actual_stop"] = True
-        actual["frame_level"] = 0
-
-        candidates: list[dict[str, Any]] = [actual]
-        debug_state = session.debug_state
-        if isinstance(debug_state, dict):
-            debug_state["stop_location"] = copy.deepcopy(actual)
-            for frame in debug_state.get("frames") or []:
-                if not isinstance(frame, dict):
-                    continue
-                frame_location = self._runtime_location(session, frame)
-                if frame_location is None:
-                    continue
-                frame_location["frame_level"] = frame.get("level")
-                frame["location"] = frame_location
-                candidates.append(frame_location)
-
-        analyzed = [item for item in candidates if item.get("analysis_id")]
-        location = min(
-            analyzed,
-            key=lambda item: (
-                self._location_priority(item),
-                int(item.get("frame_level") or 0),
-            ),
-            default=actual,
-        )
-        location = copy.deepcopy(location)
-        location["stop_runtime_pc"] = actual["runtime_pc"]
-        location["actual_stop"] = location.get("frame_level") == 0
-        session.note_location(location)
-        if publish:
-            self._publish_location(session)
-        return location
-
-    async def refresh_session_location(self, session: Session) -> dict[str, Any] | None:
-        """Resolve off the event loop: the mapping reads Ghidra artifacts
-        from disk, and a stop notification must not wait on it."""
-        location = await asyncio.to_thread(
-            self.resolve_session_location, session, publish=False
-        )
-        self._publish_location(session)
-        return location
 
 
 def _tally(record: AnalysisRecord, index: dict[str, Any]) -> None:

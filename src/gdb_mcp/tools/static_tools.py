@@ -16,7 +16,13 @@ from ._common import analysis_from
 from .registry import tool
 
 
-@tool()
+def static_tool(**kwargs):
+    """Declare a tool that belongs to the optional static-analysis family."""
+    kwargs.setdefault("extension", "static")
+    return tool(**kwargs)
+
+
+@tool(capability="host", extension="static")
 async def analyze_binary(
     path: str,
     force: bool = False,
@@ -34,27 +40,27 @@ async def analyze_binary(
     return record.public()
 
 
-@tool()
+@static_tool()
 def list_analyses(ctx: Context) -> dict:
     """List cached and in-progress binary analyses, newest first."""
     return {"analyses": analysis_from(ctx).list_analyses()}
 
 
-@tool()
+@static_tool()
 def get_analysis_status(analysis_id: str, ctx: Context) -> dict:
     """Return lifecycle, counts, partial-result state, and errors
     for an analysis."""
     return analysis_from(ctx).get_record(analysis_id).public()
 
 
-@tool()
+@static_tool()
 async def get_binary_overview(analysis_id: str, ctx: Context) -> dict:
     """Return format, architecture, image base, entry points, and
     result counts."""
     return await asyncio.to_thread(analysis_from(ctx).overview, analysis_id)
 
 
-@tool()
+@static_tool()
 async def list_sections(
     analysis_id: str,
     query: str | None = None,
@@ -73,7 +79,7 @@ async def list_sections(
     )
 
 
-@tool()
+@static_tool()
 async def list_symbols(
     analysis_id: str,
     query: str | None = None,
@@ -93,7 +99,7 @@ async def list_symbols(
     )
 
 
-@tool()
+@static_tool()
 async def list_functions(
     analysis_id: str,
     query: str | None = None,
@@ -112,7 +118,7 @@ async def list_functions(
     )
 
 
-@tool()
+@static_tool()
 async def decompile_function(
     analysis_id: str,
     function: str | int,
@@ -125,7 +131,7 @@ async def decompile_function(
     )
 
 
-@tool()
+@static_tool()
 async def get_static_disassembly(
     analysis_id: str,
     address: str | int,
@@ -139,7 +145,7 @@ async def get_static_disassembly(
     )
 
 
-@tool()
+@static_tool()
 async def list_strings(
     analysis_id: str,
     query: str | None = None,
@@ -159,7 +165,7 @@ async def list_strings(
     )
 
 
-@tool()
+@static_tool()
 async def get_xrefs(
     analysis_id: str,
     address: str | int,
@@ -173,7 +179,7 @@ async def get_xrefs(
     )
 
 
-@tool()
+@static_tool()
 async def get_call_graph(
     analysis_id: str,
     function: str | int,
@@ -187,7 +193,7 @@ async def get_call_graph(
     )
 
 
-@tool()
+@static_tool()
 async def search_decompiled_code(
     analysis_id: str,
     query: str,
@@ -202,7 +208,7 @@ async def search_decompiled_code(
     )
 
 
-@tool()
+@static_tool(capability="host")
 async def annotate_code(
     analysis_id: str,
     address: str | int,
@@ -216,7 +222,7 @@ async def annotate_code(
     )
 
 
-@tool()
+@static_tool(capability="host")
 async def remove_code_annotation(
     analysis_id: str,
     address: str | int,

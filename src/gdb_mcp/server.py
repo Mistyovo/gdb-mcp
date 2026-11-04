@@ -13,7 +13,6 @@ from gdb_mcp import __version__
 from gdb_mcp.campaign import campaign_summary
 from gdb_mcp.config import Config
 from gdb_mcp.context import ServerContext
-from gdb_mcp.events import EventBroker
 from gdb_mcp.sessions import SessionRegistry
 from gdb_mcp.tcp_listener import PluginTcpListener
 from gdb_mcp.tools import register_all
@@ -30,6 +29,15 @@ def build_app(config: Config, registry: SessionRegistry, analysis=None, audit=No
             if config.audit_log
             else disabled()
         )
+    if analysis is None and config.tool_profile == "full":
+        try:
+            from gdb_mcp.reverse.manager import AnalysisManager
+        except Exception:  # pragma: no cover - broken optional module
+            log.exception("static analysis extension unavailable")
+        else:
+            if config.analysis_dir is None:
+                config.analysis_dir = config.log_dir / "analysis"
+            analysis = AnalysisManager(config)
     server_ctx = ServerContext(
         config=config, registry=registry, analysis=analysis, audit=audit
     )
@@ -44,23 +52,25 @@ def build_app(config: Config, registry: SessionRegistry, analysis=None, audit=No
         "gdb-mcp",
         lifespan=_lifespan,
         instructions=(
-            "gdb-mcp v%s drives local Linux gdb sessions (pwndbg-aware) "
-            "for binary exploitation. One-call stop inspection: "
-            "continue_execution(wait=True, with_context=True) returns the "
-            "stop reason plus registers/backtrace/disassembly in a single "
-            "response; crash_report does deeper crash triage; triage_crash "
-            "replays a crashing payload from a checkpoint and packages the "
-            "full report as stored evidence; get_events surfaces events "
-            "between calls. Pwn workflow: heap_bins for structured glibc "
-            "bins (needs pwndbg), checkpoint(create/restore/diff) for "
-            "state snapshots, batch_commands to run several gdb commands "
-            "per round-trip, run_policy(kind=trace|heap_arm|fuzz_loop|"
-            "minimize|bp_stats|...) to delegate bounded loops to the "
-            "plugin so they run at native speed for a constant-size "
-            "summary. export_session_script compiles the session into a "
-            "replayable gdbscript. Static bridge: analyze_binary + "
-            "decompile_function etc. when a Ghidra headless installation "
-            "is available."
+            "gdb-mcp v%s drives local Linux userland gdb sessions "
+            "(pwndbg-aware). Start one with launch_gdb(program=...) or "
+            "attach to a running process with launch_gdb(attach_pid=...). "
+            "One-call stop inspection: continue_execution(wait=True, "
+            "with_context=True) returns the stop reason plus registers/"
+            "backtrace/disassembly in a single response; crash_report does "
+            "deeper crash triage; triage_crash replays a crashing payload "
+            "from a checkpoint and packages the full report as stored "
+            "evidence; get_events surfaces events between calls. Pwn "
+            "workflow: heap_bins for structured glibc bins (needs pwndbg), "
+            "checkpoint(create/restore/diff) for state snapshots, "
+            "batch_commands to run several gdb commands per round-trip, "
+            "run_policy(kind=trace|heap_arm|heap_read|heap_disarm|"
+            "fuzz_loop|crash_check|minimize|bp_stats) to delegate bounded "
+            "loops to the plugin so they run at native speed for a "
+            "constant-size summary. export_session_script compiles the "
+            "session into a replayable gdbscript. The optional full "
+            "profile adds a query-only Ghidra static extension "
+            "(analyze_binary + decompile_function etc.)."
         )
         % __version__,
     )
@@ -132,21 +142,8 @@ async def serve(config: Config) -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     config.ensure_dirs()
-    # one broker fans session lifecycle events to in-process subscribers
-    # (the static-bridge AnalysisManager tracks sessions this way)
-    broker = EventBroker()
-    registry = SessionRegistry(config, events=broker)
+    registry = SessionRegistry(config)
     registry.enable_persistence(config.log_dir / "sessions.json")
-
-    analysis = None
-    try:
-        from gdb_mcp.reverse.manager import AnalysisManager
-    except Exception:  # pragma: no cover - broken optional module
-        log.exception("static bridge unavailable")
-    else:
-        # the manager reads config.analysis_dir itself; auto-analyze is
-        # off by default so no background work starts unprompted
-        analysis = AnalysisManager(config, events=broker)
 
     # security audit log (hash-chained, separate from session journals)
     from gdb_mcp.audit import AuditLog, disabled
@@ -175,7 +172,7 @@ async def serve(config: Config) -> None:
     gc_task = asyncio.create_task(registry.gc_loop())
     try:
         if config.mcp_transport:
-            app = build_app(config, registry, analysis, audit=audit)
+            app = build_app(config, registry, audit=audit)
             if config.mcp_http:
                 await _serve_http(app, config, audit=audit)
             else:

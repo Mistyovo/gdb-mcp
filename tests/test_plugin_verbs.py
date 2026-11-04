@@ -1052,6 +1052,30 @@ class TestInferiorIo:
         assert r["torn_down"] is True and channel.closed
         assert call(plugin, "io_read", {})["error"]["code"] == "BAD_PARAMS"
 
+    def test_teardown_restores_previous_inferior_tty(
+        self, plugin, plugin_mod, monkeypatch
+    ):
+        channel = _MemoryChannel()
+        monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: channel)
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)
+        mock_gdb.state.output_map["show inferior-tty"] = (
+            "The inferior's terminal is /dev/pts/9."
+        )
+        call(plugin, "io_setup", {})
+        assert plugin._io_prev_tty == "/dev/pts/9"
+        call(plugin, "io_teardown", {})
+        assert "set inferior-tty /dev/pts/9" in mock_gdb.state.executed
+
+    def test_teardown_without_previous_tty_clears_it(
+        self, plugin, plugin_mod, monkeypatch
+    ):
+        channel = _MemoryChannel()
+        monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: channel)
+        monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)
+        call(plugin, "io_setup", {})
+        call(plugin, "io_teardown", {})
+        assert 'set inferior-tty ""' in mock_gdb.state.executed
+
     def test_setup_twice_rejected(self, plugin, plugin_mod, monkeypatch):
         monkeypatch.setattr(plugin_mod, "_make_io_channel", lambda: _MemoryChannel())
         monkeypatch.setattr(plugin_mod, "_HAS_OPENPTY", True)

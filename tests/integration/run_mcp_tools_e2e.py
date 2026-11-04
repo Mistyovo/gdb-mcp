@@ -28,8 +28,9 @@ CRASHER_SOURCE = ROOT / "examples" / "crasher.c"
 CHILD_GDB_SCRIPT = ROOT / "tests" / "integration" / "launch_child_gdb.py"
 PLUGIN = ROOT / "src" / "gdb_mcp" / "plugin" / "gdb_mcp_plugin.py"
 
-#: Everything the server must register under the default (full) profile.
-#: Experimental tools are gated behind --experimental and stay out.
+#: Everything the server must register under the full tool profile
+#: (the e2e run passes --tool-profile full). Experimental tools are gated
+#: behind --experimental and stay out.
 REGISTERED_TOOLS = frozenset(
     {
         "analyze_binary",
@@ -53,7 +54,6 @@ REGISTERED_TOOLS = frozenset(
         "get_memory_map",
         "get_process_output",
         "get_static_disassembly",
-        "get_stop_reason",
         "get_xrefs",
         "heap_bins",
         "interrupt",
@@ -70,7 +70,6 @@ REGISTERED_TOOLS = frozenset(
         "list_threads",
         "load_target",
         "manage_breakpoint",
-        "quit_gdb",
         "read_memory",
         "read_registers",
         "read_result",
@@ -94,7 +93,6 @@ WALKTHROUGH_TOOLS = frozenset(
     {
         "list_sessions",
         "session_status",
-        "quit_gdb",
         "get_process_output",
         "launch_gdb",
         "launch_script",
@@ -107,7 +105,6 @@ WALKTHROUGH_TOOLS = frozenset(
         "continue_execution",
         "interrupt",
         "wait_for_stop",
-        "get_stop_reason",
         "read_memory",
         "write_memory",
         "read_registers",
@@ -284,8 +281,8 @@ async def exercise_all(
             "wait_for_stop", {"session_id": main_session, "timeout_ms": 10000}
         )
         require(stopped["stopped"], "inferior did not stop at main")
-        reason = await runner.call("get_stop_reason", {"session_id": main_session})
-        require(reason["stop_info"], "stop reason at main is missing")
+        reason = await runner.call("session_status", {"session_id": main_session})
+        require(reason["last_stop"], "stop reason at main is missing")
 
         evaluated = await runner.call(
             "evaluate", {"session_id": main_session, "expression": "&main"}
@@ -341,11 +338,11 @@ async def exercise_all(
         )
         require(crashed["stopped"], "inferior did not stop after continue")
         crash_reason = await runner.call(
-            "get_stop_reason", {"session_id": main_session}
+            "session_status", {"session_id": main_session}
         )
         require(
-            (crash_reason.get("stop_info") or {}).get("signal") == "SIGSEGV",
-            "expected SIGSEGV, got %r" % crash_reason.get("stop_info"),
+            (crash_reason.get("last_stop") or {}).get("signal") == "SIGSEGV",
+            "expected SIGSEGV, got %r" % crash_reason.get("last_stop"),
         )
         report = await runner.call("crash_report", {"session_id": main_session})
         require(report.get("signal") == "SIGSEGV", "crash report missed SIGSEGV")
@@ -416,7 +413,7 @@ async def exercise_all(
         owned_sessions.extend([script_session, child_gdb_session])
         require(child_gdb_session, "launch_script did not attach its child GDB")
         await runner.call(
-            "quit_gdb", {"session_id": child_gdb_session, "kill_gdb": True}
+            "kill_session", {"session_id": child_gdb_session, "force": True}
         )
         await wait_for_state(
             runner, child_gdb_session, {"disconnected"}, timeout=10.0
@@ -465,7 +462,7 @@ async def async_main(args: argparse.Namespace) -> int:
             )
             server = StdioServerParameters(
                 command=sys.executable,
-                args=["-m", "gdb_mcp"],
+                args=["-m", "gdb_mcp", "--tool-profile", "full"],
                 env=env,
                 cwd=str(ROOT),
             )

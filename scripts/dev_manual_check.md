@@ -40,12 +40,12 @@ python3 pwntools_debug.py        # tmux 里打开 gdb；服务器上出现新会
 在 Claude Code 中依次验证：
 
 1. `list_sessions` → 可见会话（gdb_pid、arch=x86_64、pwndbg 标志）
-2. `continue_execution` → `wait_for_stop` → `get_stop_reason`（SIGSEGV, fault_addr=0x0）
+2. `continue_execution` → `wait_for_stop` → `session_status.last_stop`（SIGSEGV, fault_addr=0x0）
 3. `crash_report` → 一键拿到 signal/regs/backtrace/disasm/内存
 4. `execute_command("vmmap")` / `execute_command("checksec")` → pwndbg 命令透传
 5. `set_breakpoint("main+0x10")` → `continue_execution` → 命中
 6. `launch_gdb` 自启动 → 新会话；`kill_session(force=true)` 清理
-7. `quit_gdb` → gdb 进程存活、会话断开
+7. `kill_session(force=false)` → gdb 进程存活、会话断开且记录保留
 
 ## 5. 集成测试（自动化）
 

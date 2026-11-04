@@ -208,8 +208,8 @@ async def derive_truth(driver, session_id: str, task) -> dict:
             truth[name] = int.from_bytes(bytes.fromhex(hexstr[: size * 2]), "little")
         return truth
 
-    stop = await driver.call("get_stop_reason", {"session_id": session_id})
-    info = stop.get("stop_info") or {}
+    stop = await driver.call("session_status", {"session_id": session_id})
+    info = stop.get("last_stop") or {}
     if not info.get("signal"):
         raise VerifyError("no stop signal: %r" % (stop,))
     bt = await driver.call(

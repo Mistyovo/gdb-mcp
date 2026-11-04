@@ -127,8 +127,8 @@ class Verifier:
         return self._bp_cache
 
     async def _stop_info(self) -> dict:
-        result = await self.driver.call("get_stop_reason", {"session_id": self.session_id})
-        return result.get("stop_info") or {}
+        result = await self.driver.call("session_status", {"session_id": self.session_id})
+        return result.get("last_stop") or {}
 
     async def _eval_int(self, expression: str) -> int:
         result = await self.driver.call(
@@ -199,7 +199,7 @@ class Verifier:
     # -- state ops -----------------------------------------------------------
 
     async def _op_exit_code(self, code: int) -> CheckResult:
-        result = await self.driver.call("get_stop_reason", {"session_id": self.session_id})
+        result = await self.driver.call("session_status", {"session_id": self.session_id})
         actual = result.get("exited_code")
         # after the inferior exits, gdb returns to its prompt and the
         # session settles into 'ready' — the exit code is still recorded

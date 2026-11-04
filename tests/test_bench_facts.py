@@ -136,7 +136,7 @@ async def test_derive_truth_requires_stopping_in_report():
 async def test_derive_truth_crash_facts():
     task = FAMILY_MODULES[INSPECT_FAMILY].generate(1)  # crash_facts
     driver = CannedDriver({
-        "get_stop_reason": {"stop_info": {"signal": "SIGSEGV", "fault_addr": "0x10"}},
+        "session_status": {"last_stop": {"signal": "SIGSEGV", "fault_addr": "0x10"}},
         "get_backtrace": {"frames": [{"function": "deref"}, {"function": "trigger"}]},
     })
     truth = await derive_truth_for(INSPECT_FAMILY)(driver, "s1", task)
@@ -152,7 +152,7 @@ async def test_derive_truth_crash_facts():
 async def test_derive_truth_crash_requires_frames():
     task = FAMILY_MODULES[INSPECT_FAMILY].generate(1)
     driver = CannedDriver({
-        "get_stop_reason": {"stop_info": {"signal": "SIGSEGV", "fault_addr": "0x10"}},
+        "session_status": {"last_stop": {"signal": "SIGSEGV", "fault_addr": "0x10"}},
         "get_backtrace": {"frames": [{"function": "deref"}]},  # caller missing
     })
     with pytest.raises(VerifyError):

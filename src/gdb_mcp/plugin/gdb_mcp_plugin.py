@@ -606,6 +606,7 @@ class Plugin(object):
         #: can never wake later and run a ghost loop the server abandoned
         self._policy_active = None
         self._io = None
+        self._io_prev_tty = None
         self._io_buf = deque(maxlen=IO_BUFFER_CHUNKS)
         self._io_seq = 0
         self._io_dropped = 0
@@ -2161,6 +2162,30 @@ class Plugin(object):
             self._io_seq += 1
             self._io_buf.append((self._io_seq, data))
 
+    def _inferior_tty(self):
+        """The current ``set inferior-tty`` value, if gdb exposes it.
+
+        The setting is a string; ``gdb.parameter`` works on recent gdb,
+        while the ``show`` fallback covers builds where it does not. A
+        missing/empty value means "use the current terminal".
+        """
+        try:
+            value = gdb.parameter("inferior-tty")
+            if isinstance(value, str) and value:
+                return value
+        except Exception:
+            pass
+        try:
+            out = self._exec("show inferior-tty", to_string=True) or ""
+        except Exception:
+            return None
+        match = re.search(r"is\s+(\S+)", out.strip())
+        if match:
+            value = match.group(1).rstrip(".")
+            if value.startswith("/"):
+                return value
+        return None
+
     def _handle_io_setup(self, params):
         if self._io is not None:
             raise PluginError("BAD_PARAMS", "io already set up; io_teardown first")
@@ -2168,6 +2193,7 @@ class Plugin(object):
             raise PluginError(
                 "IO_UNSUPPORTED", "this platform has no pty support"
             )
+        self._io_prev_tty = self._inferior_tty()
         channel = _make_io_channel()
         self._io = channel
         with self._io_lock:
@@ -2227,6 +2253,22 @@ class Plugin(object):
     def _handle_io_teardown(self, params):
         if self._io is None:
             raise PluginError("BAD_PARAMS", "io not set up")
+        # restore the setting before closing the pty: otherwise the next
+        # run/start would still point at a dead slave path
+        try:
+            if self._io_prev_tty:
+                self._handle_eval(
+                    {
+                        "command": "set inferior-tty %s"
+                        % shlex.quote(self._io_prev_tty)
+                    }
+                )
+            else:
+                self._handle_eval({"command": 'set inferior-tty ""'})
+        except PluginError:
+            pass
+        finally:
+            self._io_prev_tty = None
         self._io.close()
         self._io = None
         with self._io_lock:

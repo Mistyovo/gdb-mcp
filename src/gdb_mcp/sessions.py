@@ -17,7 +17,6 @@ State machine::
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 import hmac
 import json
@@ -41,7 +40,6 @@ from gdb_mcp.errors import (
     NoSuchSessionError,
     RequestTimeoutError,
 )
-from gdb_mcp.events import EventBroker
 from gdb_mcp.journal import Journal
 from gdb_mcp.protocol import (
     ASYNC_VERBS,
@@ -75,8 +73,10 @@ EVENT_LOG_LIMIT = 100
 _RESERVE_DEFAULT = object()
 
 #: schema version of the sessions.json persistence file; bump + migrate
-#: explicitly in :meth:`SessionRegistry.load` when the shape changes
-_PERSIST_SCHEMA_VERSION = 1
+#: explicitly in :meth:`SessionRegistry.load` when the shape changes.
+#: v2 added the additive ``launch_info`` field; v1 files load unchanged.
+_PERSIST_SCHEMA_VERSION = 2
+_SUPPORTED_PERSIST_VERSIONS = (1, 2)
 
 
 @dataclass
@@ -100,6 +100,9 @@ class Session:
     log_file: str | None = None
     distro: str | None = None
     token: str | None = None
+    #: how this session's process was launched (program/args/cwd), used by
+    #: export_session_script to make the replay script self-contained
+    launch_info: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.monotonic)
     connected_at: float | None = None
     last_seen: float | None = None
@@ -120,27 +123,8 @@ class Session:
     event_seq: int = 0
     #: per-session JSONL journal (audit + gdbscript export), if enabled
     journal: Any = None
-    #: optional event fan-out (None => no external subscribers)
-    events: EventBroker | None = field(default=None, repr=False)
     #: structured exploit-campaign state (campaign tool / brief injection)
     campaign: dict = field(default_factory=new_campaign)
-    #: 3.5 static bridge: attached analysis + last mapped runtime location
-    analysis_id: str | None = None
-    analysis_error: str | None = None
-    location: dict[str, Any] | None = None
-    #: last known debug snapshot used by the static location mapper
-    debug_state: dict[str, Any] | None = None
-
-    def attach_analysis(self, analysis_id: str | None, error: str | None = None) -> None:
-        """Bind this session to a static analysis (or record why not)."""
-        self.analysis_id = analysis_id
-        self.analysis_error = error
-
-    def note_location(self, location: dict[str, Any]) -> None:
-        """Publish a freshly mapped runtime location and remember it as the
-        session's latest for the bridge's per-frame bookkeeping."""
-        self.location = location
-        self.update_debug_location(location)
     #: waiters registered by :meth:`wait_for_state`
     _state_waiters: set = field(default_factory=set, repr=False)
 
@@ -211,15 +195,6 @@ class Session:
             self.stop_gen += 1
             self.stop_cond.notify_all()
 
-    def update_debug_location(self, location: dict[str, Any]) -> None:
-        """3.5 static bridge: update the last mapped location while
-        preserving sibling state (e.g. the manager's stop_location)."""
-        state = self.debug_state
-        if not isinstance(state, dict):
-            state = {}
-            self.debug_state = state
-        state["last_location"] = copy.deepcopy(location)
-
     _next_id: int = field(default=1, init=False)
 
     # -- request/response ---------------------------------------------------
@@ -232,12 +207,7 @@ class Session:
         *,
         locked: bool = False,
     ) -> dict:
-        """Send a request to the plugin and await its response, publishing
-        ``session.request`` started/finished events to the event broker.
-
-        Params/results are deliberately NOT part of the events: write
-        payloads reach megabytes and the journal already holds the full
-        detail — the timeline only needs verb/duration/outcome.
+        """Send a request to the plugin and await its response.
 
         Returns the ``result`` payload on success. Raises
         :class:`GdbMcpError` on plugin-reported errors,
@@ -248,26 +218,7 @@ class Session:
         by composite tools like crash_report to keep a multi-request
         sequence atomic).
         """
-        self._publish_request("started", verb)
-        started = time.monotonic()
-        try:
-            result = await self._request_impl(verb, params, timeout, locked=locked)
-        except GdbMcpError as exc:
-            self._publish_request(
-                "finished",
-                verb,
-                ok=False,
-                error=exc.code,
-                duration_ms=round((time.monotonic() - started) * 1000, 1),
-            )
-            raise
-        self._publish_request(
-            "finished",
-            verb,
-            ok=True,
-            duration_ms=round((time.monotonic() - started) * 1000, 1),
-        )
-        return result
+        return await self._request_impl(verb, params, timeout, locked=locked)
 
     async def _request_impl(
         self,
@@ -363,43 +314,6 @@ class Session:
 
     # -- notifications ------------------------------------------------------
 
-    def publish(self, event: str, payload: dict | None = None) -> None:
-        """Fan a lifecycle transition out to broker subscribers as one
-        ``session.updated`` event carrying the refreshed ``info()`` snapshot
-        (subscribers never need a second fetch to re-render)."""
-        if self.events is not None:
-            self.events.publish(
-                "session.updated",
-                {
-                    "session_id": self.session_id,
-                    "event": event,
-                    "payload": payload or {},
-                    "session": self.info(),
-                },
-            )
-
-    def _publish_request(
-        self,
-        phase: str,
-        verb: str,
-        ok: bool = True,
-        error: str | None = None,
-        duration_ms: float | None = None,
-    ) -> None:
-        if self.events is None:
-            return
-        data: dict = {
-            "session_id": self.session_id,
-            "verb": verb,
-            "phase": phase,
-            "ok": ok,
-        }
-        if error is not None:
-            data["error"] = error
-        if duration_ms is not None:
-            data["duration_ms"] = duration_ms
-        self.events.publish("session.request", data)
-
     def record_event(self, event: str, payload: dict) -> None:
         """Append to the per-session event ring (get_events reads it)."""
         self.event_seq += 1
@@ -438,13 +352,12 @@ class Session:
             self.exited_code = payload.get("exit_code")
             await self.wake_stop_waiters()
         elif event in ("prompt", "ready"):
-            # Inferior is idle at the prompt; keep stop_info for
-            # get_stop_reason.
+            # Inferior is idle at the prompt; keep stop_info so
+            # session_status can still report the last stop.
             self.set_state(READY)
             await self.wake_stop_waiters()
         else:
             log.debug("session %s: unknown notification event %r", self.session_id, event)
-        self.publish(event, payload)
 
     async def wait_for_stop(self, timeout: float) -> bool:
         """Wait until the inferior stops (or gdb is idle/exited).
@@ -488,7 +401,6 @@ class Session:
                 )
         self.pending.clear()
         await self.wake_stop_waiters()
-        self.publish("disconnected")
 
     def info(self) -> dict:
         """Compact dict for list_sessions / session_status tools."""
@@ -518,14 +430,11 @@ class SessionRegistry:
         self,
         config: Config,
         session_id_factory: Any = None,
-        events: EventBroker | None = None,
     ):
         self.config = config
         self._factory = session_id_factory or (
             lambda: "s-" + uuid.uuid4().hex[:8]
         )
-        #: shared event fan-out; every Session gets this broker
-        self.events = events
         self._sessions: dict[str, Session] = {}
         self._by_pid: dict[int, str] = {}
         self._persist_path: Path | None = None
@@ -574,12 +483,10 @@ class SessionRegistry:
             launched=launched,
             log_file=log_file,
             token=token,
-            events=self.events,
         )
         session.set_state(RESERVED)
         self._sessions[session_id] = session
         self._attach_journal(session)
-        session.publish("reserved")
         self.save()
         return session
 
@@ -614,7 +521,6 @@ class SessionRegistry:
                 kind="gdb",
                 launched=False,
                 token=self.config.token,
-                events=self.events,
             )
             self._sessions[session.session_id] = session
         old_pid = (session.hello or {}).get("pid")
@@ -627,7 +533,6 @@ class SessionRegistry:
             # presenting it on every message; resetting to the master here
             # would make the reader loop reject them all
             session.token = self.config.token
-        session.events = self.events
         session.set_state(CONNECTING)
         session.reserved = False
         session.connected_at = time.monotonic()
@@ -651,7 +556,6 @@ class SessionRegistry:
             hello.get("arch"),
             session.session_id,
         )
-        session.publish("connected")
         return session
 
     # -- lookup -------------------------------------------------------------
@@ -719,7 +623,6 @@ class SessionRegistry:
                 if isinstance(pid, int) and self._by_pid.get(pid) == session_id:
                     self._by_pid.pop(pid, None)
             self._archive_session(session)
-            session.publish("removed")
         if self.on_session_removed is not None:
             # best-effort final cleanup (e.g. a kernel session's QEMU
             # process); never blocks registry bookkeeping
@@ -804,6 +707,7 @@ class SessionRegistry:
                     "hello": s.hello,
                     "stop_info": s.stop_info,
                     "campaign": s.campaign,
+                    "launch_info": s.launch_info,
                 }
                 for s in self._sessions.values()
                 if s.kind == "gdb"
@@ -832,14 +736,14 @@ class SessionRegistry:
             log.warning("session persistence file unreadable; starting clean")
             return 0
         version = data.get("version", 1)
-        if version != _PERSIST_SCHEMA_VERSION:
+        if version not in _SUPPORTED_PERSIST_VERSIONS:
             # refuse rather than guess: persisted session state includes
             # campaign data that gets re-injected into agent context
             log.warning(
-                "session persistence schema %r unsupported (expected %d); "
+                "session persistence schema %r unsupported (expected %s); "
                 "starting clean",
                 version,
-                _PERSIST_SCHEMA_VERSION,
+                _SUPPORTED_PERSIST_VERSIONS,
             )
             return 0
         restored = 0
@@ -855,10 +759,10 @@ class SessionRegistry:
                 distro=entry.get("distro"),
                 launched=bool(entry.get("launched")),
                 token=self.config.token,
-                events=self.events,
+                launch_info=_sanitize_launch_info(entry.get("launch_info")),
             )
             session.set_state(DISCONNECTED)
-            session.stop_info = entry.get("stop_info")
+            session.stop_info = _sanitize_stop_info(entry.get("stop_info"))
             # campaign content is re-injected into model context via the
             # stop briefs — never trust it verbatim from disk
             session.campaign = sanitize_campaign(entry.get("campaign"))
@@ -982,6 +886,42 @@ _HELLO_STR_KEYS = (
     "inferior",
     "hostname",
 )
+
+
+def _sanitize_launch_info(value: Any) -> dict:
+    """Keep replay metadata small and string-typed on reload."""
+    if not isinstance(value, dict):
+        return {}
+    clean: dict = {}
+    for key in ("program", "cwd"):
+        if isinstance(value.get(key), str):
+            clean[key] = value[key][:1024]
+    args = value.get("args")
+    if isinstance(args, list):
+        clean["args"] = [arg[:512] for arg in args[:64] if isinstance(arg, str)]
+    return clean
+
+
+_STOP_INFO_KEYS = ("reason", "signal", "pc", "fault_addr", "thread")
+
+
+def _sanitize_stop_info(stop_info: Any) -> dict | None:
+    """Bound the persisted stop snapshot before it reaches model context."""
+    if not isinstance(stop_info, dict):
+        return None
+    clean: dict = {}
+    for key in _STOP_INFO_KEYS:
+        value = stop_info.get(key)
+        if isinstance(value, str):
+            clean[key] = value[:256]
+    breakpoints = stop_info.get("breakpoints")
+    if isinstance(breakpoints, list):
+        clean["breakpoints"] = [
+            number
+            for number in breakpoints[:64]
+            if isinstance(number, int) and not isinstance(number, bool)
+        ]
+    return clean or None
 
 
 def _sanitize_hello(hello: Any) -> dict | None:

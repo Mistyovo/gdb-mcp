@@ -36,7 +36,7 @@ async def read_memory(
     )
 
 
-@tool(readonly_safe=False)
+@tool(capability="target")
 async def write_memory(
     address: str | int,
     hex: str,
@@ -80,7 +80,7 @@ async def read_registers(
     )
 
 
-@tool(readonly_safe=False)
+@tool(capability="target")
 async def write_register(
     name: str,
     value: str,
@@ -149,7 +149,7 @@ async def disassemble(
     )
 
 
-@tool(core=True)
+@tool(core=True, capability="target")
 async def evaluate(
     expression: str,
     session_id: str | None = None,
@@ -179,7 +179,7 @@ async def list_threads(
     )
 
 
-@tool()
+@tool(capability="debug")
 async def select_frame(
     level: int,
     session_id: str | None = None,
@@ -219,7 +219,7 @@ async def get_memory_map(
     }
 
 
-@tool()
+@tool(capability="debug")
 async def load_target(
     path: str,
     core: bool = False,

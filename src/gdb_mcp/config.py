@@ -32,7 +32,7 @@ DEFAULTS = {
     "gc_idle_reserved": 300.0,
     "attach_timeout_ms": 30_000,
     "launch_timeout_ms": 10_000,
-    "tool_profile": "full",
+    "tool_profile": "pwn",
     "result_inline_limit": 16_000,
     "launcher": "wsl",
     "ssh_host": None,
@@ -52,7 +52,6 @@ DEFAULTS = {
     "analysis_dir": None,
     "analysis_timeout": 900.0,
     "decompile_timeout": 120.0,
-    "auto_analyze": False,
     "archive_retention": 20,
     "archive_dir": None,
     "audit_log": True,
@@ -80,7 +79,9 @@ class Config:
     gc_idle_reserved: float = DEFAULTS["gc_idle_reserved"]
     attach_timeout_ms: int = DEFAULTS["attach_timeout_ms"]
     launch_timeout_ms: int = DEFAULTS["launch_timeout_ms"]
-    #: which MCP tools are registered: "full" or "core" (a minimal set)
+    #: which MCP tools are registered: "core" (minimal), "pwn" (default:
+    #: userland debugging + pwn workflow) or "full" (adds extension families
+    #: such as the Ghidra static bridge)
     tool_profile: str = DEFAULTS["tool_profile"]
     #: tool outputs longer than this are stored on disk and previewed
     result_inline_limit: int = DEFAULTS["result_inline_limit"]
@@ -113,15 +114,12 @@ class Config:
     mcp_tls_cert: str | None = DEFAULTS["mcp_tls_cert"]
     mcp_tls_key: str | None = DEFAULTS["mcp_tls_key"]
     mcp_tls_client_ca: str | None = DEFAULTS["mcp_tls_client_ca"]
-    #: 3.5 static bridge: Ghidra headless analyzer + analysis cache dir.
-    #: auto_analyze defaults False here (the archive auto-started analyses
-    #: for every connected target; explicit analyze_binary calls keep the
-    #: server quiet by default)
+    #: optional Ghidra static-analysis extension (full tool profile):
+    #: headless executable + SHA-256-addressed analysis cache directory
     ghidra_headless: str = DEFAULTS["ghidra_headless"]
     analysis_dir: Path | None = DEFAULTS["analysis_dir"]
     analysis_timeout: float = DEFAULTS["analysis_timeout"]
     decompile_timeout: float = DEFAULTS["decompile_timeout"]
-    auto_analyze: bool = DEFAULTS["auto_analyze"]
     #: B4: closed sessions' journals + launched-process logs are moved to
     #: archive_dir, keeping the newest ``archive_retention`` sessions
     #: (0 disables archiving; artifacts then stay where they are)
@@ -168,8 +166,8 @@ class Config:
                 raise ValueError(f"{name} must be a positive integer")
         if self.archive_retention < 0:
             raise ValueError("archive_retention must not be negative")
-        if self.tool_profile not in ("core", "full"):
-            raise ValueError("tool_profile must be 'core' or 'full'")
+        if self.tool_profile not in ("core", "pwn", "full"):
+            raise ValueError("tool_profile must be 'core', 'pwn' or 'full'")
         if self.result_inline_limit < 1:
             raise ValueError("result_inline_limit must be a positive integer")
         if self.launcher not in ("wsl", "native", "docker", "ssh"):
@@ -291,7 +289,6 @@ class Config:
             or DEFAULTS["analysis_timeout"],
             decompile_timeout=env("DECOMPILE_TIMEOUT", float)
             or DEFAULTS["decompile_timeout"],
-            auto_analyze=env_bool("AUTO_ANALYZE") or DEFAULTS["auto_analyze"],
             archive_retention=env("ARCHIVE_RETENTION", int)
             if env("ARCHIVE_RETENTION", int) is not None
             else DEFAULTS["archive_retention"],

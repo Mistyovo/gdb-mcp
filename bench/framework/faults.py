@@ -64,7 +64,7 @@ async def _settle(driver: McpDriver, session_id: str, timeout_s: float = 15.0) -
     deadline = time.monotonic() + timeout_s
     result: dict = {}
     while time.monotonic() < deadline:
-        result = await driver.call("get_stop_reason", {"session_id": session_id})
+        result = await driver.call("session_status", {"session_id": session_id})
         if result.get("state") in ("stopped", "exited"):
             return result
         await asyncio.sleep(0.25)
@@ -91,7 +91,7 @@ async def _fault_crash_inferior(driver, victim, bystander, program) -> bool:
     target = crasher if crasher.exists() else program
     sid = await _launch(driver, target, run=True)
     await _settle(driver, sid)
-    stop = await driver.call("get_stop_reason", {"session_id": sid})
+    stop = await driver.call("session_status", {"session_id": sid})
     recovered = stop.get("state") in (
         "stopped", "ready", "exited"
     ) and await _canary(driver)

@@ -451,6 +451,11 @@ class TestPersistence:
         from gdb_mcp.campaign import campaign_set
 
         campaign_set(s1.campaign, "offsets", "libc_base", "0x7ffff7d80000")
+        s1.launch_info = {
+            "program": "/tmp/vuln",
+            "args": ["A", "B C"],
+            "cwd": "/tmp/work",
+        }
         # campaign mutations are persisted by the tool layer / GC loop;
         # this test simulates both by saving explicitly
         r1.save()
@@ -463,6 +468,11 @@ class TestPersistence:
         assert old.log_file == "/logs/s-p1.log"
         assert old.hello["pid"] == 1234
         assert old.campaign["offsets"]["libc_base"]["value"] == "0x7ffff7d80000"
+        assert old.launch_info == {
+            "program": "/tmp/vuln",
+            "args": ["A", "B C"],
+            "cwd": "/tmp/work",
+        }
 
         # the plugin's re-hello revives the SAME identity
         revived = r2.register_hello(hello(session_id="s-p1", pid=999), FakeWriter())
@@ -470,6 +480,37 @@ class TestPersistence:
         assert revived.state == CONNECTING
         assert revived.log_file == "/logs/s-p1.log"
         assert revived.journal is not None
+
+    def test_persisted_stop_info_is_sanitized(self, tmp_path):
+        import json
+
+        path = tmp_path / "sessions.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sessions": [
+                        {
+                            "session_id": "s-bad",
+                            "stop_info": {
+                                "signal": "S" * 999,
+                                "pc": "0x401000",
+                                "evil": {"nested": "x" * 9999},
+                                "breakpoints": [1, "x", 2, True],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        registry = SessionRegistry(Config())
+        assert registry.enable_persistence(path) == 1
+        assert registry.get("s-bad").stop_info == {
+            "signal": "S" * 256,
+            "pc": "0x401000",
+            "breakpoints": [1, 2],
+        }
 
     def test_script_sessions_not_persisted(self, tmp_path):
         path = tmp_path / "sessions.json"
@@ -512,7 +553,12 @@ class TestPersistence:
         registry = SessionRegistry(Config())
         registry.enable_persistence(path)
         registry.reserve("s-v1")
-        assert json.loads(path.read_text(encoding="utf-8"))["version"] == 1
+        from gdb_mcp.sessions import _PERSIST_SCHEMA_VERSION
+
+        assert (
+            json.loads(path.read_text(encoding="utf-8"))["version"]
+            == _PERSIST_SCHEMA_VERSION
+        )
 
     def test_remove_updates_persistence(self, tmp_path):
         path = tmp_path / "sessions.json"

@@ -10,7 +10,7 @@ from ._common import check_stopped, config_from, registry_from, resolve_gdb
 from .registry import tool
 
 
-@tool()
+@tool(capability="debug")
 async def campaign(
     action: str = "get",
     section: str | None = None,
@@ -93,16 +93,20 @@ async def diff_sessions(
     regs_b = (await sb.request("regs", {}, timeout=cfg.request_timeout)).get(
         "regs", {}
     )
-    changed = {
-        name: {"a": regs_a[name], "b": regs_b[name]}
+    changed_names = [
+        name
         for name in sorted(set(regs_a) | set(regs_b))
         if regs_a.get(name) != regs_b.get(name)
+    ]
+    changed = {
+        name: {"a": regs_a[name], "b": regs_b[name]}
+        for name in changed_names[:64]
     }
     result = {
         "session_a": session_a,
         "session_b": session_b,
         "registers_changed": changed,
-        "registers_truncated": len(changed) > 64,
+        "registers_truncated": len(changed_names) > 64,
     }
     if memory_addr is not None:
         mem_a = await sa.request(

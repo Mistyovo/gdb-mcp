@@ -103,6 +103,25 @@ class TestCampaignState:
         assert campaign_detect(data, {"pc": "0x401000"}) is None
         assert data["primitives"] == {}
 
+    def test_detect_read_only_returns_match_without_recording(self):
+        data = new_campaign()
+        pattern = cyclic_pattern(256)
+        pc = "0x%x" % int.from_bytes(pattern[40:44].encode(), "little")
+        match = campaign_detect(data, {"pc": pc}, record=False)
+        assert match is not None and match["offset"] == 40
+        assert data["primitives"] == {}
+
+    def test_detect_uses_register_values(self):
+        data = new_campaign()
+        pattern = cyclic_pattern(256)
+        rax = "0x%x" % int.from_bytes(pattern[64:68].encode(), "little")
+        match = campaign_detect(
+            data, {"pc": "0x401000", "registers": {"rax": rax}}
+        )
+        assert match is not None
+        assert match["source"] == "reg:rax"
+        assert match["offset"] == 64
+
 
 class TestSanitizeCampaign:
     def test_malformed_is_dropped(self):

@@ -10,7 +10,7 @@ venv/
 .async_probe*
 .env
 .env.*
-!.env.example
+!bench/.env.example
 dist/
 build/
 *.egg-info/

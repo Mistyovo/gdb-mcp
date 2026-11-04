@@ -104,9 +104,13 @@ def campaign_note(data: dict, text: str) -> dict:
     return data
 
 
-def campaign_detect(data: dict, stop_info: dict) -> dict | None:
+def campaign_detect(
+    data: dict, stop_info: dict, *, record: bool = True
+) -> dict | None:
     """Run the cyclic oracle over the last stop's pc/fault/registers;
-    a pattern hit on PC is recorded as a pc-control primitive candidate."""
+    a pattern hit on PC is recorded as a pc-control primitive candidate
+    unless ``record`` is false (read-only/observer callers still get the
+    match in their response, but must not mutate session state)."""
     candidates: list[tuple[str, int]] = []
     for name in ("pc", "fault_addr"):
         raw = stop_info.get(name)
@@ -124,13 +128,14 @@ def campaign_detect(data: dict, stop_info: dict) -> dict | None:
     for source, value in candidates:
         match = match_cyclic(value)
         if match is not None:
-            primitives = data.setdefault("primitives", {})
-            primitives["pc_control"] = {
-                "value": "candidate",
-                "ts": round(time.time(), 3),
-                "evidence": "%s matches cyclic pattern at offset %d"
-                % (source, match["offset"]),
-            }
+            if record:
+                primitives = data.setdefault("primitives", {})
+                primitives["pc_control"] = {
+                    "value": "candidate",
+                    "ts": round(time.time(), 3),
+                    "evidence": "%s matches cyclic pattern at offset %d"
+                    % (source, match["offset"]),
+                }
             return {"source": source, **match}
     return None
 

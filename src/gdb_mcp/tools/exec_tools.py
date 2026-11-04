@@ -39,7 +39,7 @@ def _maybe_store_result(config, result: dict) -> dict:
     return result
 
 
-@tool(core=True)
+@tool(core=True, capability="host")
 async def execute_command(
     command: str,
     keep_ansi: bool = False,
@@ -81,7 +81,7 @@ async def execute_command(
     return _maybe_store_result(cfg, result)
 
 
-@tool()
+@tool(capability="host")
 async def batch_commands(
     commands: list[str],
     session_id: str | None = None,
@@ -148,7 +148,7 @@ def read_result(
     return load_result_slice(cfg.log_dir, path, offset, limit)
 
 
-@tool(core=True)
+@tool(core=True, capability="debug")
 async def continue_execution(
     mode: str = "continue",
     until_addr: str | None = None,
@@ -196,7 +196,7 @@ async def continue_execution(
     return response
 
 
-@tool(core=True)
+@tool(core=True, capability="debug")
 async def interrupt(session_id: str | None = None, ctx: Context = None) -> dict:
     """Interrupt the running inferior (equivalent to Ctrl-C in gdb).
     The inferior stops and a stop notification is emitted."""
@@ -235,16 +235,3 @@ async def wait_for_stop(
     if with_context and stopped:
         result["context"] = await collect_stop_context(session, cfg)
     return result
-
-
-@tool()
-def get_stop_reason(session_id: str | None = None, ctx: Context = None) -> dict:
-    """The reason the inferior last stopped (signal, fault address,
-    breakpoint info)."""
-    session = resolve_gdb(ctx, session_id)
-    return {
-        "session_id": session.session_id,
-        "state": session.state,
-        "stop_info": session.stop_info,
-        "exited_code": session.exited_code,
-    }

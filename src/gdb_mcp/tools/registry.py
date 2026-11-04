@@ -24,21 +24,28 @@ from mcp.server.fastmcp import FastMCP
 from gdb_mcp.config import Config
 from gdb_mcp.context import ServerContext
 from gdb_mcp.errors import GdbMcpError
-from gdb_mcp.roles import CURRENT_ROLE, observer_allowed
+from gdb_mcp.roles import CURRENT_ROLE
+
+#: What a tool is allowed to affect. ``observe`` is the only capability a
+#: read-only client (``--readonly`` / observer role) may use; ``host`` and
+#: ``admin`` tools can execute code or lifecycle actions outside the
+#: inferior and are controller-only.
+CAPABILITIES = frozenset({"observe", "debug", "target", "host", "admin"})
 
 
 @dataclasses.dataclass(frozen=True)
-
-
 class ToolSpec:
     fn: Callable[..., Any]
     name: str
     #: part of the GDB_MCP_TOOL_PROFILE=core subset
     core: bool = False
-    #: safe to keep registered when the server runs with --readonly
-    readonly_safe: bool = True
+    #: observe | debug | target | host | admin
+    capability: str = "observe"
     #: only registered when the server runs with --experimental
     experimental: bool = False
+    #: optional extension family ("static", ...); only registered in the
+    #: full tool profile
+    extension: str | None = None
 
 
 SPECS: list[ToolSpec] = []
@@ -47,11 +54,17 @@ SPECS: list[ToolSpec] = []
 def tool(
     *,
     core: bool = False,
-    readonly_safe: bool = True,
+    capability: str = "observe",
     experimental: bool = False,
+    extension: str | None = None,
 ) -> Callable:
     """Declare an MCP tool. Returns the function unchanged; the
     declaration (not the app) is the source of truth for visibility."""
+
+    if capability not in CAPABILITIES:
+        raise ValueError(
+            "capability must be one of %s" % ", ".join(sorted(CAPABILITIES))
+        )
 
     def deco(fn: Callable) -> Callable:
         SPECS.append(
@@ -59,8 +72,9 @@ def tool(
                 fn=fn,
                 name=fn.__name__,
                 core=core,
-                readonly_safe=readonly_safe,
+                capability=capability,
                 experimental=experimental,
+                extension=extension,
             )
         )
         return fn
@@ -72,6 +86,11 @@ def core_tool_names() -> frozenset[str]:
     return frozenset(
         spec.name for spec in SPECS if spec.core and not spec.experimental
     )
+
+
+def observe_tool_names() -> frozenset[str]:
+    """The observe-only surface shared by --readonly and observer clients."""
+    return frozenset(spec.name for spec in SPECS if spec.capability == "observe")
 
 
 def _deny_observer(name: str, audit=None) -> None:
@@ -90,8 +109,6 @@ def _observer_guard(fn: Callable, name: str, audit=None) -> Callable:
     the original: it exposes the wrapped signature (which is what FastMCP
     builds the JSON schema from) and keeps the coroutine/sync kind.
     """
-    if observer_allowed(name):
-        return fn
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
@@ -116,7 +133,10 @@ def _visible(spec: ToolSpec, config: Config) -> bool:
         return False
     if config.tool_profile == "core" and not spec.core:
         return False
-    if config.readonly and not spec.readonly_safe:
+    # extension families (static analysis) are opt-in via the full profile
+    if spec.extension and config.tool_profile != "full":
+        return False
+    if config.readonly and spec.capability != "observe":
         return False
     return True
 
@@ -127,9 +147,12 @@ def register_all(app: FastMCP, ctx: ServerContext) -> None:
     for spec in SPECS:
         if not _visible(spec, ctx.config):
             continue
-        app.add_tool(
-            _observer_guard(spec.fn, spec.name, audit), name=spec.name
+        fn = (
+            spec.fn
+            if spec.capability == "observe"
+            else _observer_guard(spec.fn, spec.name, audit)
         )
+        app.add_tool(fn, name=spec.name)
 
 
 def registered_tools(app: FastMCP) -> dict:

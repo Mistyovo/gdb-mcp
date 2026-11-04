@@ -78,7 +78,7 @@ async def _settle(driver, sid, timeout_s: float = 20.0) -> str:
     deadline = time.monotonic() + timeout_s
     state = ""
     while time.monotonic() < deadline:
-        reason = await driver.call("get_stop_reason", {"session_id": sid})
+        reason = await driver.call("session_status", {"session_id": sid})
         state = reason.get("state") or ""
         if state in ("stopped", "exited"):
             return state
@@ -119,9 +119,9 @@ async def probe_heap_bins(driver, ctx) -> tuple[bool, str]:
 
 async def probe_stop_reason_shape(driver, ctx) -> tuple[bool, str]:
     sid = ctx["malloc"]
-    reason = await driver.call("get_stop_reason", {"session_id": sid})
-    ok = reason.get("state") == "stopped" and bool(reason.get("stop_info"))
-    return ok, str(reason.get("stop_info"))[:100]
+    reason = await driver.call("session_status", {"session_id": sid})
+    ok = reason.get("state") == "stopped" and bool(reason.get("last_stop"))
+    return ok, str(reason.get("last_stop"))[:100]
 
 
 async def probe_crash_report(driver, ctx) -> tuple[bool, str]:

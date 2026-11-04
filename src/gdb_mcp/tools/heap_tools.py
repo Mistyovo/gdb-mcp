@@ -43,7 +43,7 @@ async def heap_bins(
     return parsed
 
 
-@tool()
+@tool(capability="target")
 async def run_policy(
     kind: str,
     params: dict | None = None,
@@ -73,7 +73,9 @@ async def run_policy(
       a temporary marker at stop_location; resumes until the hit
       budget (max_hits), max_passes marker hits, or the inferior's
       own stop — then reports per-location counts. The long-run
-      version of manual breakpoint hit counting."""
+      version of manual breakpoint hit counting.
+    The heap timeline is a three-call flow: heap_arm (arm probes),
+    heap_read (drain events), heap_disarm (remove probes)."""
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
     policy_params = dict(params or {})
@@ -87,7 +89,7 @@ async def run_policy(
     )
 
 
-@tool()
+@tool(capability="target")
 async def checkpoint(
     action: str = "create",
     snapshot_id: str | None = None,

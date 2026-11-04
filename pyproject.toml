@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 dependencies = [
     "mcp>=1.20,<2",
+    # identify_libc (experimental host-side helper); also a transitive
+    # dependency of mcp, declared explicitly because the tool imports it
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

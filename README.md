@@ -2,17 +2,19 @@
 
 # gdb-mcp
 
-**Give your coding agent hands on a real GDB — built for binary exploitation.**
+**Give your coding agent hands on a real GDB — Linux userland dynamic debugging.**
 
 An MCP server that lets Claude Code, Codex, or any MCP client drive live Linux
-`gdb` sessions (pwndbg-aware) for vulnerability research, CTF pwn, and exploit
-development.
+`gdb` sessions (pwndbg-aware): launch or attach, control execution, inspect
+state, triage crashes, and delegate bounded loops. The pwn workflow (heap,
+checkpoints, campaigns) is a first-class profile; static analysis and kernel
+tooling are optional extensions.
 
 [![CI](https://github.com/Mistyovo/gdb-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Mistyovo/gdb-mcp/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-lightgrey)](#launchers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-902%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-910%20passing-brightgreen)](#testing)
 
 [Quick Start](#quick-start) · [Tools](#tool-catalog) · [Architecture](#architecture) · [Experimental](#experimental-features) · [Roadmap](ROADMAP_V2.md) · [中文文档](README.zh-CN.md)
 
@@ -28,6 +30,9 @@ process** and talks to the server over a JSON-lines control channel — so pwndb
 contexts, pwntools-launched sessions, and reverse-execution all just work,
 with none of the prompt-scraping fragility.
 
+- **Sharp default surface** — the default `pwn` profile exposes 35 tools,
+  all aimed at a live userland process; static (Ghidra) and kernel (QEMU)
+  families are explicit extensions, so they do not tax tool selection.
 - **Built for pwn, not just debugging** — structured crash triage, glibc heap
   bins, checkpoint/restore, a cyclic-offset oracle, and a campaign state
   machine that remembers what your session has already proven.
@@ -39,7 +44,7 @@ with none of the prompt-scraping fragility.
   summaries, so iterating 1,000 times costs one tool call.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
-- **Verified against reality** — 902 unit tests (including seeded
+- **Verified against reality** — 910 unit tests (including seeded
   protocol-layer fuzzing against the JSON-lines control channel) plus
   end-to-end suites driving real gdb in WSL, and a versioned acceptance
   benchmark (`bench/`, 576 tasks across 8 families, reference-solved
@@ -91,6 +96,7 @@ HTTP transport via `--http` + `--mcp-port`, with a bearer token).
 
 ```text
 launch_gdb(program="/tmp/cracker", run=True)
+launch_gdb(attach_pid=4242)          # attach to a running userland process
 ```
 
 or keep your pwntools workflow untouched and just load the plugin:
@@ -114,42 +120,50 @@ One call. Full picture.
 
 ## Tool Catalog
 
-**52 tools by default** (12 under `GDB_MCP_TOOL_PROFILE=core`, 60 with
-`--experimental`), grouped by job — and by capability layer: **core**
-(sessions/execution/breakpoints/state — any debugging scenario),
-**pwn** (crash triage, heap, checkpoints, campaign, policies),
-**static** (the Ghidra bridge), and **kernel** (experimental QEMU/gdbstub
-tooling). The layers share one wire protocol; the `core` profile is the
-subset a non-exploitation backend would need.
+**35 tools by default** in the `pwn` profile, **12** under
+`GDB_MCP_TOOL_PROFILE=core`, and **50 stable tools** plus
+`--experimental` in the `full` profile. The default surface is restricted to
+tools that drive a live Linux userland process; the 15-tool Ghidra static
+family is an optional `full`-profile extension.
+
+| Profile | Purpose |
+|---|---|
+| `core` | Minimal session/execution/state/breakpoint surface for any debugging backend |
+| `pwn` (default) | Core + crash triage, heap, checkpoints, policies, campaign, differential sessions |
+| `full` | Pwn + the optional static-analysis extension (15 Ghidra query tools) |
 
 | Group | Tools |
 |---|---|
-| Sessions | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script` `diff_sessions` |
-| Execution | `execute_command` (raw gdb, pwndbg-compatible, paginated + spilled to disk) `continue_execution` (`wait`/`with_context`) `interrupt` `wait_for_stop` `get_stop_reason` `read_result` `batch_commands` |
+| Sessions | `list_sessions` `session_status` `launch_gdb` (`program` or `attach_pid`) `launch_script` `get_process_output` `kill_session` (`force`/`forget`) `get_events` `export_session_script` `diff_sessions` |
+| Execution | `execute_command` (raw gdb, pwndbg-compatible, paginated + spilled to disk) `continue_execution` (`wait`/`with_context`) `interrupt` `wait_for_stop` `read_result` `batch_commands` |
 | Crash triage | `crash_report` — signal, fault addr, registers, backtrace, disasm, memory at PC/SP/fault, structured memory map · `triage_crash` — replay a crashing payload from a checkpoint, collect the full report, optionally minimize, store evidence |
 | State | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` (structured) `load_target` |
 | Breakpoints | `set_breakpoint` (sw/hw/watch/condition/temporary + `commands`/`auto_continue` probes) `list_breakpoints` `manage_breakpoint` |
 | Pwn workflow | `heap_bins` (pwndbg bins → JSON) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize / crash_check / bp_stats — bounded loops at native speed) `campaign` (state machine + cyclic oracle) |
-| Static bridge (Ghidra) | `analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview` `list_sections` `list_symbols` `list_functions` `list_strings` `decompile_function` `get_static_disassembly` `get_xrefs` `get_call_graph` `search_decompiled_code` `annotate_code` `remove_code_annotation` — SHA-256-keyed analysis cache; runtime stops map back to static function/line |
 
-**8 experimental tools** (behind `--experimental`): inferior stdio channel
-(`io_setup` / `send_to_inferior` / `read_inferior_output` / `io_teardown`),
+The optional `full` profile adds the **15 static-analysis tools**:
+`analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview`
+`list_sections` `list_symbols` `list_functions` `list_strings`
+`decompile_function` `get_static_disassembly` `get_xrefs` `get_call_graph`
+`search_decompiled_code` `annotate_code` `remove_code_annotation`. They are
+query-only over a SHA-256-keyed Ghidra cache; analyze a binary explicitly
+before querying it.
+
+**6 experimental tools** (behind `--experimental`): `inferior_io`
+(setup/send/teardown of the inferior stdio pty) + `read_inferior_output`,
 `identify_libc`, `search_gadgets`, `kernel_launch` / `kernel_snapshot`
 (crash delta-minimization rides `run_policy(kind=...)`, not a tool).
 
-**15 static-analysis tools** when a Ghidra headless install is available:
-`analyze_binary`, `decompile_function`, `get_xrefs`, `get_call_graph`,
-`search_decompiled_code`, annotations, and more.
-
-`export_session_script` compiles everything your session did into a
-**deterministic, replayable gdbscript** — audit trail, reproducer, and the
-answer to *"why not just write a gdbscript?"* in one artifact.
+`export_session_script` compiles the session into a **deterministic,
+replayable gdbscript** — including `file`, `set args`, and `cd` prologue —
+and is the audit trail / reproducer / answer to *"why not just write a
+gdbscript?"* in one artifact.
 
 ## Architecture
 
 ```
-Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (52 tools)
-        ▲  campaign state · journals · policies · static bridge
+Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (35 tools)
+        ▲  campaign state · journals · policies · optional static extension
         │
         │ TCP JSON-lines (scoped session tokens, heartbeats)
         ▼
@@ -160,10 +174,11 @@ gdb process (WSL2 / native / Docker / SSH target)
        └─ coexists with pwndbg & pwntools (never touches prompt or I/O)
 ```
 
-Launchers: **WSL2** · **native Linux** · **Docker** (`SYS_PTRACE` image recipe
-included) · **SSH** — pick with `GDB_MCP_LAUNCHER`. Transport: stdio by
-default, or hardened **streamable HTTP** (`--http`) with Host/Origin
-validation, bearer tokens, TLS and mutual-TLS options.
+Launchers: **WSL2** (default) · **native Linux**; **Docker** (`SYS_PTRACE`
+image recipe included) and **SSH** exist behind `GDB_MCP_LAUNCHER` but are
+optional/unverified targets — WSL/native are the supported path. Transport:
+stdio by default, or hardened **streamable HTTP** (`--http`) with
+Host/Origin validation, bearer tokens, TLS and optional mutual TLS.
 
 **Concurrency semantics.** Within one session, tool calls execute strictly
 one-at-a-time: the plugin marshals every gdb API call onto gdb's main
@@ -209,36 +224,47 @@ can be `source`-deployed into any gdb with an embedded Python.
 |---|---|---|
 | `wsl` (default) | WSL2 distro | mirrored networking recommended |
 | `native` | local Linux | plain `bash -lc` |
-| `docker` | ephemeral container | `SYS_PTRACE` + relaxed seccomp; per-session containers. Build the image first (`docker build -f docker/Dockerfile -t gdb-mcp:latest .`); run the server with `--host-bind 0.0.0.0 --token ...` (a non-loopback bind requires a token) and the plugin dials back over `host.docker.internal` |
-| `ssh` | remote host | key-based auth; great for IoT/router targets |
+| `docker` | ephemeral container | **optional / not end-to-end verified**; `SYS_PTRACE` + relaxed seccomp; per-session containers. Build the image first (`docker build -f docker/Dockerfile -t gdb-mcp:latest .`); run the server with `--host-bind 0.0.0.0 --token ...` and the plugin dials back over `host.docker.internal` |
+| `ssh` | remote host | **optional / not end-to-end verified**; key-based auth for remote targets |
 
 ## Experimental Features
 
 Enable with the **`--experimental`** launch flag (deliberately no environment
 variable — a stray shell variable must never destabilize your server):
 
-- **Inferior stdio channel** — drive menu-style targets without pwntools.
-- **Crash minimizer** — delta-debugging over checkpoint restore.
-- **`identify_libc` / `search_gadgets`** — libc.rip API and ROPgadget CLI
-  integrations with honest-degradation errors.
-- **`kernel_launch` / `kernel_snapshot`** — boot a Linux kernel VM under QEMU
-  with a gdbstub and attach gdb to it; savevm/loadvm is the kernel-pwn revert
-  primitive. Requires QEMU inside the launcher backend.
+- **Inferior stdio channel** — `inferior_io` (setup/send/teardown) plus
+  `read_inferior_output`; drive menu-style targets without pwntools.
+- **Crash minimizer** — delta-debugging over checkpoint restore
+  (`run_policy(kind="minimize")`).
+- **`identify_libc` / `search_gadgets`** — optional pwn helpers (libc.rip API
+  and ROPgadget CLI); they do not touch the debugger and are not part of the
+  default surface.
+- **`kernel_launch` / `kernel_snapshot`** — kernel-mode QEMU/gdbstub tooling.
+  This is a separate target class from userland debugging and remains
+  experimental; it requires QEMU inside the launcher backend.
 
 ## Security Model
 
 - TCP listener is loopback-only by default; non-loopback binds require a
   token. Launched gdb sessions use **session-scoped tokens** (HMAC-derived) —
   the master never reaches child processes.
-- HTTP transport adds Host/Origin validation, bearer tokens (controller +
-  read-only **observer** roles), TLS and mutual TLS.
-- `--readonly` drops mutating tools; debugger-escaping commands
-  (`shell`/`python`/`source`/`dump`/`restore`/`set exec-wrapper`/…) are
-  blocked at **two layers** unless `--allow-unsafe`. The gate is
-  abbreviation-aware (`she`/`py`/`so` resolve to shell/python/source in
-  real gdb) and checks every line of a multi-command string; the
-  command-resolution premises it relies on are verified against real gdb
-  in CI (`tests/integration/run_unsafe_gate_probe.sh`).
+- HTTP transport adds Host/Origin validation, bearer tokens, and optional
+  TLS/mutual TLS. Read-only **observer** tokens are a deployment extra: they
+  reuse the same capability table as `--readonly`.
+- **Capability model:** every tool declares `observe`, `debug`, `target`,
+  `host`, or `admin`. `--readonly` (and observer clients) keep only
+  `observe`; breakpoints, checkpoint restore, payload loops, launch, kill,
+  and host-side tools are all excluded. `launch_gdb`/`launch_script`,
+  `analyze_binary`, `identify_libc`, and `search_gadgets` are **host-exec**
+  tools: launch_script runs arbitrary Python, and gdb startup
+  `-x`/`-ex` arguments pass the unsafe gate just like `execute_command`.
+- Debugger-escaping commands (`shell`/`python`/`source`/`dump`/`restore`/
+  `set exec-wrapper`/…) are blocked at **two layers** unless
+  `--allow-unsafe`. The gate is abbreviation-aware (`she`/`py`/`so` resolve
+  to shell/python/source in real gdb) and checks every line of a
+  multi-command string; the command-resolution premises it relies on are
+  verified against real gdb in CI
+  (`tests/integration/run_unsafe_gate_probe.sh`).
 - A **chained audit log** (`<log-dir>/audit.log`, on by default,
   `--no-audit-log` to disable) records security decisions — handshakes
   and rejections, HTTP 403s, observer denials, unsafe-command blocks —
@@ -248,7 +274,8 @@ variable — a stray shell variable must never destabilize your server):
   otherwise; chain heads are anchored to the server log periodically so
   tail truncation is detectable. Verify offline with
   `python -m gdb_mcp.audit <log> [--token …]`.
-- Journals, session state and results are written `0600`; persisted state is
+- Journals, session state, result files and exported scripts are written
+  `0600`; persisted state is
   re-validated on load (journals and `sessions.json` carry explicit schema
   versions; unknown newer versions are refused, not guessed at). GDB can
   execute arbitrary code on its target — run it on targets you own. Full
@@ -267,7 +294,7 @@ token — plugins re-derive automatically.
 
 ```bash
 # unit (no gdb required)
-python -m pytest tests/ -q                        # 902 tests, ~12s
+python -m pytest tests/ -q                        # 910 tests, ~12s
 
 # real-gdb suites (WSL2 or native Linux; each prints its own verdict)
 wsl bash tests/integration/run_wsl_integration.sh # plugin <-> server protocol
@@ -294,7 +321,7 @@ Development status, benchmark results, and the long-term vision live in
 
 ## Contributing
 
-Issues and PRs welcome — the test suite (902 tests, no gdb required for unit
+Issues and PRs welcome — the test suite (910 tests, no gdb required for unit
 runs) is the contract: please add tests for behavior changes and keep
 `ruff check` clean.
 

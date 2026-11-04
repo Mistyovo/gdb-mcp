@@ -110,7 +110,7 @@ async def settle(driver, session_id: str, want: set[str] | None = None,
     result: dict = {}
     want = want if want is not None else SETTLED_STATES
     while time.monotonic() < deadline:
-        result = await driver.call("get_stop_reason", {"session_id": session_id})
+        result = await driver.call("session_status", {"session_id": session_id})
         if result.get("state") in want:
             return result
         await asyncio.sleep(0.25)

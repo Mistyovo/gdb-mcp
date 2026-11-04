@@ -63,7 +63,6 @@ EXCLUDED_TOOLS = frozenset(
         "remove_code_annotation",
         "launch_script",
         "kill_session",
-        "quit_gdb",
     }
 )
 
@@ -260,7 +259,7 @@ The target program path (pass it verbatim to launch_gdb): %s
 
 How to work:
 1. Call launch_gdb(program=<target path above>) to start a session. It may return with state="connecting" while gdb starts in WSL; just proceed — the server queues your next tool call until the session is live.
-2. "continue_execution" never starts an unstarted inferior: run the program with execute_command(command="run"). "run" returns immediately while the inferior runs asynchronously — after it, call wait_for_stop(timeout_ms=15000) ONCE (it blocks server-side until the inferior stops). Never poll get_stop_reason in a loop; if wait_for_stop times out, the program is still running — interrupt it or reassess.
+2. "continue_execution" never starts an unstarted inferior: run the program with execute_command(command="run"). "run" returns immediately while the inferior runs asynchronously — after it, call wait_for_stop(timeout_ms=15000) ONCE (it blocks server-side until the inferior stops). Never poll session_status in a loop; if wait_for_stop times out, the program is still running — interrupt it or reassess.
 3. Many targets are built WITHOUT debug info: you cannot reference local variable names or set conditions on locals. Read globals through casts, e.g. break audit if *(int *)&g == 7 or watch *(int *)&probe. &symbol and raw memory reads still work.
 4. Inspect what you need (registers, memory, backtrace, breakpoints) and leave the live session in EXACTLY the state the task asks for. Do not kill or quit the session.
 5. When done — or when you cannot proceed — call the submit tool. The harness verifies the live session state itself; your summary is not evidence.

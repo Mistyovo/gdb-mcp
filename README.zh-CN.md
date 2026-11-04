@@ -137,9 +137,9 @@ gdb 在新终端（tmux 窗格）中打开、pwndbg 照常加载、插件自动�
 ### 方式 2：MCP 自启动（headless）
 
 - `launch_gdb(program="/mnt/c/.../vuln", run=True)` —— wsl.exe 后台拉起 gdb + 插件
+- `launch_gdb(attach_pid=4242)` —— attach 到运行中的用户态进程
 - `launch_script(script="C:\\...\\exploit.py")` —— 后台跑脚本，等待其 gdb 注册；纯脚本退出时立即返回状态、退出码与日志尾
-- `kill_session(force=False)` 仅断开插件、保留 gdb；`force=True` 终止 gdb
-- `quit_gdb(kill_gdb=False)` —— 断开外部启动的 gdb
+- `kill_session(force=False)` 断开插件并保留 gdb 与会话记录（之后可重新 hello 复活）；`force=True` 终止 gdb；`forget=True` 断开并删除记录
 
 ### 方式 3：手动 gdb
 
@@ -175,7 +175,12 @@ token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 
 
 ## 安全分级
 
-- `GDB_MCP_READONLY=1`（`--readonly`）：不注册 `write_memory`/`write_register`。
+- **能力模型**：每个工具声明 `observe`/`debug`/`target`/`host`/`admin` 之一。
+  `GDB_MCP_READONLY=1`（`--readonly`）与 HTTP observer 角色共用同一张表，只保留
+  `observe`：write/寄存器、断点、checkpoint restore、payload 循环、launch/kill
+  以及宿主机侧工具全部排除。`launch_gdb`/`launch_script`/`analyze_binary`/
+  `identify_libc`/`search_gadgets` 属于 **host-exec**：`launch_script` 执行任意
+  Python，`launch_gdb` 的 `-x`/`-ex` 启动参数同样经过 unsafe 门禁。
 - `shell`/`!`/`pipe`/`python`/`source`/`dump`/`restore`/`set exec-wrapper`
   类逃逸调试器的命令默认拒绝（`UNSAFE_BLOCKED`），服务端与 gdb 内插件
   双层拦截；`GDB_MCP_ALLOW_UNSAFE=1`（`--allow-unsafe`）显式放行并向下
@@ -191,8 +196,9 @@ token、Host 头校验（防 DNS rebinding）、Origin 校验、配置了 token 
   HMAC-SHA256（无 token 的整链重写过不了校验），否则为明文 SHA-256；
   链头周期性锚定到服务器日志（尾部截断可检）。离线校验：
   `python -m gdb_mcp.audit <log> [--token …]`。
-- journal 与 `sessions.json` 持久化带**显式 schema 版本**：未知的新版本
-  拒绝加载而非猜测语义（journal 历史保留在磁盘不删）。
+- journal、`sessions.json`、结果文件与导出的 gdbscript 均以 `0600` 写入；
+  持久化状态加载时重新校验（journal 与 `sessions.json` 带**显式 schema 版本**，
+  未知新版本拒绝加载而非猜测语义，journal 历史保留在磁盘不删）。
 
 **关于 token 有效期**：会话 token 是主 token 的无状态 HMAC-SHA256 派生——
 这正是插件能在服务器重启后免状态重新验证的原因，因此无法单独过期。补偿
@@ -217,23 +223,31 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（默认 52 个；`core` 档 12 个；开 `--experimental` 共 60 个）
+## 工具一览（默认 `pwn` 档 35 个；`core` 档 12 个；`full` 档 50 个稳定工具；开 `--experimental` 额外 6 个）
 
-按职责分组，也按 **capability 层**划分：**core**（会话/执行/断点/状态——
-任何调试场景都需要）、**pwn**（崩溃定位/堆/checkpoint/campaign/委托执行）、
-**static**（Ghidra 静态桥）、**kernel**（实验性 QEMU/gdbstub 工具）。各层共享
-同一套线协议；`core` 档即非漏洞利用后端所需的子集。
+默认面只保留驱动**活体 Linux 用户态进程**所需的能力：
+
+| Profile | 用途 |
+|---|---|
+| `core` | 会话/执行/状态/断点最小面，适合任意调试后端 |
+| `pwn`（默认） | core + 崩溃定位、堆、checkpoint、委托循环、campaign、跨会话差分 |
+| `full` | pwn + 可选 Ghidra 静态分析扩展（15 个查询工具） |
 
 | 类别 | 工具 |
 |---|---|
-| 会话/启动 | `list_sessions` `session_status` `launch_gdb` `launch_script` `get_process_output` `kill_session` `quit_gdb` `get_events` `export_session_script`（journal → 可重放 gdbscript）`diff_sessions`（跨会话寄存器/内存差分） |
-| 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`get_stop_reason` `read_result` `batch_commands`（多命令一次往返） |
+| 会话/启动 | `list_sessions` `session_status` `launch_gdb`（`program` 或 `attach_pid`）`launch_script` `get_process_output` `kill_session`（`force`/`forget`）`get_events` `export_session_script`（journal → 可重放 gdbscript，含 `file`/`set args`/`cd` 序言）`diff_sessions`（跨会话寄存器/内存差分） |
+| 执行控制 | `execute_command`（raw 透传，pwndbg 全兼容；分页 + 大结果落盘）`continue_execution`（可选 `wait`/`with_context`）`interrupt` `wait_for_stop`（可选 `with_context`）`read_result` `batch_commands`（多命令一次往返） |
 | 崩溃定位 | `crash_report`（信号/故障地址/寄存器/回溯/PC·SP·故障地址内存/内存映射一屏拿全）`triage_crash`（checkpoint 重放崩溃 payload → 完整报告 → 可选最小化 → 证据落盘） |
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
 | pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop / crash_check / minimize / bp_stats——循环下沉插件原生速度）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
 
-| 静态桥（Ghidra） | `analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview` `list_sections` `list_symbols` `list_functions` `list_strings` `decompile_function` `get_static_disassembly` `get_xrefs` `get_call_graph` `search_decompiled_code` `annotate_code` `remove_code_annotation`（按 SHA-256 建分析缓存；运行期停机点可回映射到静态函数/行号） |
+`full` 档额外注册 **15 个 Ghidra 静态分析工具**：`analyze_binary`
+`list_analyses` `get_analysis_status` `get_binary_overview` `list_sections`
+`list_symbols` `list_functions` `list_strings` `decompile_function`
+`get_static_disassembly` `get_xrefs` `get_call_graph` `search_decompiled_code`
+`annotate_code` `remove_code_annotation`。它们只查询 SHA-256 寻址的分析缓存，
+不耦合 gdb 会话；需显式 `analyze_binary` 后再查询。
 
 
 ## 实验性功能
@@ -253,18 +267,18 @@ shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动�
 }
 ```
 
-开启后额外注册 8 个实验工具（可能在没有弃用周期的情况下变动）：
+开启后额外注册 6 个实验工具（可能在没有弃用周期的情况下变动）：
 
-- **Inferior stdio 通道**：`io_setup` / `send_to_inferior` / `read_inferior_output` /
-  `io_teardown` — 把 inferior 的 stdio 重定向到插件管理的 pty，无需 pwntools 即可
-  交互菜单式程序，`run_policy(fuzz_loop)` 也可全自动喂输入。Unix only。
+- **Inferior stdio 通道**：`inferior_io`（setup/send/teardown）+
+  `read_inferior_output` — 把 inferior 的 stdio 重定向到插件管理的 pty，无需
+  pwntools 即可交互菜单式程序，`run_policy(fuzz_loop)` 也可全自动喂输入。Unix only。
 - **崩溃最小化**：`run_policy(kind="minimize")` 对崩溃 payload 做 delta debugging，
   只接受信号不变的删除（防漂移）；`kind="crash_check"` 单发判定。
 - **libc 识别 / ROP 搜索**：`identify_libc`（libc.rip 兼容 API，`GDB_MCP_LIBC_RIP_API`
   可配）与 `search_gadgets`（ROPgadget CLI + 正则过滤，地址规范化）。
 - **内核 VM**：`kernel_launch`（QEMU + gdbstub，`-S` 冻结启动，插件加载的 gdb 直接
-  attach）与 `kernel_snapshot`（savevm/loadvm——内核 pwn 的秒级回退原语）。需启动
-  后端内有 QEMU。
+  attach）与 `kernel_snapshot`（savevm/loadvm——内核 pwn 的秒级回退原语）。它属于
+  kernel-mode 独立目标类别，不是用户态动态调试的默认面；需启动后端内有 QEMU。
 
 ## 战役状态与委托执行
 
@@ -280,7 +294,8 @@ shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动�
   写入 + 续跑的**gdb 内快照模糊测试**，崩溃按信号+PC 去重）。
 
 `GDB_MCP_TOOL_PROFILE=core` 只注册 12 个高频工具（省每次请求的 schema
-token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
+token）；默认 `pwn` 注册 35 个；`full` 额外包含 Ghidra 静态扩展。
+`get_backtrace`/`disassemble` 响应带
 `truncated` 标记；`execute_command` 输出超过内联阈值时自动存盘并在响应中
 给出 `result_file`/`result_sha256`。
 
@@ -299,7 +314,7 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 | `GDB_MCP_DEBUG` | gdb 进程 | `1` = 插件调试输出（stderr） |
 | `GDB_MCP_WSL_DISTRO` / `GDB_MCP_LOG_DIR` | 服务器 | launch 工具配置 |
 | `GDB_MCP_REQUEST_TIMEOUT` / `GDB_MCP_HEARTBEAT_SEC` | 服务器 | 请求与心跳超时 |
-| `GDB_MCP_TOOL_PROFILE` / `GDB_MCP_RESULT_INLINE_LIMIT` | 服务器 | 工具分档（core/full）与大结果内联阈值（字符数） |
+| `GDB_MCP_TOOL_PROFILE` / `GDB_MCP_RESULT_INLINE_LIMIT` | 服务器 | 工具分档（core/pwn/full）与大结果内联阈值（字符数） |
 | `GDB_MCP_LAUNCHER` / `GDB_MCP_SSH_HOST` / `GDB_MCP_DOCKER_IMAGE` | 服务器 | 启动后端（wsl/native/docker/ssh）及其参数 |
 | `GDB_MCP_MCP_HTTP` / `GDB_MCP_MCP_HOST` / `GDB_MCP_MCP_PORT` | 服务器 | MCP streamable HTTP 传输（默认关，127.0.0.1:8001） |
 | `GDB_MCP_READONLY` / `GDB_MCP_ALLOW_UNSAFE` | 两侧 | 只读模式；放行逃逸调试器的命令（双层拦截的开关） |
@@ -320,7 +335,7 @@ token）；默认 `full` 注册全部。`get_backtrace`/`disassemble` 响应带
 
 ```bash
 # 单元测试（无需 gdb）
-python -m pytest tests/ -q                        # 902 项（含协议层种子模糊测试）
+python -m pytest tests/ -q                        # 910 项（含协议层种子模糊测试）
 
 # 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
 wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议

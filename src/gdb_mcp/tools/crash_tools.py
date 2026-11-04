@@ -16,6 +16,7 @@ from gdb_mcp.campaign import (
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.output import parse_proc_mappings
 from gdb_mcp.results import store_result
+from gdb_mcp.roles import CURRENT_ROLE
 from gdb_mcp.sessions import Session
 
 from ._common import (
@@ -37,6 +38,8 @@ async def _collect_crash_report(
     registry,
     stop_info: dict,
     max_frames: int,
+    *,
+    record_campaign: bool = True,
 ) -> dict:
     """One-call crash triage body, shared by crash_report (current stop)
     and triage_crash (a reproduced stop). Best-effort: unreadable pieces
@@ -106,12 +109,20 @@ async def _collect_crash_report(
                 "truncated": len(segments) > len(head)
                 or bool(mmap.get("truncated", False)),
             }
-        # cyclic oracle over the stop values: a pattern hit is recorded
-        # in the campaign as a pc-control candidate
-        detect = campaign_detect(session.campaign, stop_info)
+        # cyclic oracle over the stop values (registers included: the
+        # plugin's stop notification only carries pc/fault): a pattern
+        # hit is recorded as a pc-control candidate, unless the caller is
+        # read-only/observer — those clients get the match without the
+        # campaign write.
+        detect_input = dict(stop_info)
+        detect_input["registers"] = report["registers"]
+        detect = campaign_detect(
+            session.campaign, detect_input, record=record_campaign
+        )
         if detect is not None:
             report["cyclic_match"] = detect
-            registry.save()
+            if record_campaign:
+                registry.save()
         if not is_empty(session.campaign):
             report["campaign"] = campaign_summary(session.campaign)
         report["warnings"] = warnings
@@ -133,11 +144,16 @@ async def crash_report(
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
     return await _collect_crash_report(
-        session, cfg, registry_from(ctx), session.stop_info or {}, max_frames
+        session,
+        cfg,
+        registry_from(ctx),
+        session.stop_info or {},
+        max_frames,
+        record_campaign=not cfg.readonly and CURRENT_ROLE.get() != "observer",
     )
 
 
-@tool()
+@tool(capability="target")
 async def triage_crash(
     payload_hex: str = "",
     buffer_addr: str | None = None,

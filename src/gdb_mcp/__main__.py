@@ -42,6 +42,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mcp-host", default=None, help="MCP HTTP bind (default 127.0.0.1)")
     p.add_argument("--mcp-port", type=int, default=None, help="MCP HTTP port (default 8001)")
     p.add_argument(
+        "--tool-profile",
+        choices=("core", "pwn", "full"),
+        default=None,
+        help="MCP tool surface: core (minimal), pwn (default: userland "
+        "debugging + pwn workflow), full (adds optional extension families)",
+    )
+    p.add_argument(
         "--launcher",
         choices=("wsl", "native", "docker", "ssh"),
         default=None,
@@ -120,6 +127,7 @@ def _overrides(args) -> dict:
         "mcp_http": args.http,
         "mcp_host": args.mcp_host,
         "mcp_port": args.mcp_port,
+        "tool_profile": args.tool_profile,
         "launcher": args.launcher,
         "ssh_host": args.ssh_host,
         "docker_image": args.docker_image,
