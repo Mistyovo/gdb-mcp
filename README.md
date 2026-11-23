@@ -14,7 +14,7 @@ tooling are optional extensions.
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-lightgrey)](#launchers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-930%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-935%20passing-brightgreen)](#testing)
 
 [Quick Start](#quick-start) · [Tools](#tool-catalog) · [Architecture](#architecture) · [Experimental](#experimental-features) · [Roadmap](ROADMAP_V2.md) · [中文文档](README.zh-CN.md)
 
@@ -44,7 +44,7 @@ with none of the prompt-scraping fragility.
   summaries, so iterating 1,000 times costs one tool call.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
-- **Verified against reality** — 930 unit tests (including seeded
+- **Verified against reality** — 935 unit tests (including seeded
   protocol-layer fuzzing against the JSON-lines control channel) plus
   end-to-end suites driving real gdb in WSL, and a versioned acceptance
   benchmark (`bench/`, 576 tasks across 8 families, reference-solved
@@ -297,7 +297,7 @@ token — plugins re-derive automatically.
 
 ```bash
 # unit (no gdb required)
-python -m pytest tests/ -q                        # 930 tests, ~12s
+python -m pytest tests/ -q                        # 935 tests, ~12s
 
 # real-gdb suites (WSL2 or native Linux; each prints its own verdict)
 wsl bash tests/integration/run_wsl_integration.sh # plugin <-> server protocol
@@ -325,7 +325,7 @@ Development status, benchmark results, and the long-term vision live in
 
 ## Contributing
 
-Issues and PRs welcome — the test suite (930 tests, no gdb required for unit
+Issues and PRs welcome — the test suite (935 tests, no gdb required for unit
 runs) is the contract: please add tests for behavior changes and keep
 `ruff check` clean.
 

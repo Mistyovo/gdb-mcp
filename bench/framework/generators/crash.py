@@ -67,10 +67,10 @@ def generate(seed: int):
 
 
 async def reference_solve(driver, task) -> str:
-    from .common import settle
+    from .common import settle_stop
 
     sid = (await driver.call(
         "launch_gdb", {"program": program_path(task), "run": True}
     ))["session_id"]
-    await settle(driver, sid, {"stopped", "ready", "exited"})
+    await settle_stop(driver, sid)
     return sid

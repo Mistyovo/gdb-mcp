@@ -32,8 +32,10 @@ class BuildRecord:
 
 
 def run_wsl(distro: str, argv: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
-    """Run a command inside WSL; with distro=None run natively (Linux CI)."""
-    if distro is None:
+    """Run a command inside WSL; with an empty/None distro run natively
+    (Linux CI). ``--distro ""`` is the documented native selector, so an
+    empty string must not reach ``wsl.exe -d``."""
+    if not distro:
         cmd = list(argv)
     else:
         cmd = ["wsl.exe", "-d", distro, "--"] + list(argv)

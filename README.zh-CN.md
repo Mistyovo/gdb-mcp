@@ -337,7 +337,7 @@ token）；默认 `pwn` 注册 36 个；`full` 额外包含 Ghidra 静态扩展�
 
 ```bash
 # 单元测试（无需 gdb）
-python -m pytest tests/ -q                        # 930 项（含协议层种子模糊测试）
+python -m pytest tests/ -q                        # 935 项（含协议层种子模糊测试）
 
 # 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
 wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议

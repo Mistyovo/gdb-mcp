@@ -20,7 +20,14 @@ from __future__ import annotations
 
 from ..schema import Check
 from ..verifiers import VerifyError, parse_int
-from .common import opt_level, flags_for, make_task, program_path, rng_for, settle
+from .common import (
+    opt_level,
+    flags_for,
+    make_task,
+    program_path,
+    rng_for,
+    settle_stop,
+)
 
 FAMILY = "inspect"
 
@@ -154,12 +161,12 @@ async def reference_solve(driver, task) -> str:
             "set_breakpoint", {"location": "report", "session_id": sid}
         )
         await driver.call("execute_command", {"command": "run", "session_id": sid})
-        await settle(driver, sid, {"stopped", "ready", "exited"})
+        await settle_stop(driver, sid)
     else:
         sid = (await driver.call(
             "launch_gdb", {"program": program_path(task), "run": True}
         ))["session_id"]
-        await settle(driver, sid, {"stopped", "ready", "exited"})
+        await settle_stop(driver, sid)
     return sid
 
 

@@ -115,3 +115,30 @@ async def settle(driver, session_id: str, want: set[str] | None = None,
             return result
         await asyncio.sleep(0.25)
     return result
+
+
+async def settle_stop(driver, session_id: str, timeout_s: float = 15.0) -> dict:
+    """Wait until an actual stop (or exit) is recorded.
+
+    ``settle(..., SETTLED_STATES)`` cannot follow ``launch_gdb(run=True)``:
+    the plugin's pre-run READY arrives before the inferior starts, so a
+    state-only wait can return while the program is still running.
+    ``last_stop`` is only set by a stop notification; ``exited_code`` and
+    ``exited`` are terminal (the plugin's post-exit prompt flips the state
+    back to ready, so exit must also be detected by its code).
+    """
+    import asyncio
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    result: dict = {}
+    while time.monotonic() < deadline:
+        result = await driver.call("session_status", {"session_id": session_id})
+        if (
+            result.get("last_stop")
+            or result.get("exited_code") is not None
+            or result.get("state") == "exited"
+        ):
+            return result
+        await asyncio.sleep(0.25)
+    return result

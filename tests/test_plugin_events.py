@@ -312,6 +312,17 @@ class TestConnectionLoop:
             thread.join(5)
         assert not thread.is_alive()
 
+    def test_preconnect_notification_uses_first_generation(self, plugin):
+        plugin._wire_generation = 0
+        plugin._notify("exited", {"exit_code": 42})
+        generation, line = plugin.out_q.get_nowait()
+        assert generation == 1
+        msg = json.loads(line.decode("utf-8"))
+        if "msg" in msg:
+            msg = msg["msg"]
+        assert msg["event"] == "exited"
+        assert msg["payload"]["exit_code"] == 42
+
     def test_old_writer_does_not_send_new_generation(self, plugin):
         plugin._wire_generation = 2
         plugin.out_q.put((2, b'{"type":"notification"}\n'))

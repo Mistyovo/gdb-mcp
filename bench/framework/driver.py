@@ -54,22 +54,7 @@ class McpDriver:
         self.call_latencies_ms: dict[str, list[float]] = {}
 
     async def __aenter__(self) -> "McpDriver":
-        env = dict(os.environ)
-        # The gdb plugin connects back from inside WSL via the NAT gateway,
-        # so the server must bind non-loopback; that in turn requires a token
-        # (same setup as tests/integration/run_mcp_tools_e2e.py).
-        env.update(
-            {
-                "GDB_MCP_PORT": str(self.port),
-                "GDB_MCP_LOG_DIR": self.log_dir,
-                "GDB_MCP_HOST_BIND": "0.0.0.0",
-                "GDB_MCP_TOKEN": "bench-internal-token",
-                "PYTHONUTF8": "1",
-            }
-        )
-        if self.distro:
-            env["GDB_MCP_WSL_DISTRO"] = self.distro
-        env.update(self.extra_env)
+        env = self.server_env()
         args = ["-m", "gdb_mcp"]
         if self.experimental:
             args.append("--experimental")
@@ -89,6 +74,35 @@ class McpDriver:
         await session.initialize()
         self._session = session
         return self
+
+    def server_env(self) -> dict[str, str]:
+        """The env the bench server must see.
+
+        ``--distro ""`` is the native-Linux selector: without an explicit
+        launcher the server would default to ``wsl`` and fail on a Linux
+        runner. A real distro pins the wsl launcher for the same reason.
+        """
+        env = dict(os.environ)
+        # The gdb plugin connects back from inside WSL via the NAT gateway,
+        # so the server must bind non-loopback; that in turn requires a token
+        # (same setup as tests/integration/run_mcp_tools_e2e.py).
+        env.update(
+            {
+                "GDB_MCP_PORT": str(self.port),
+                "GDB_MCP_LOG_DIR": self.log_dir,
+                "GDB_MCP_HOST_BIND": "0.0.0.0",
+                "GDB_MCP_TOKEN": "bench-internal-token",
+                "PYTHONUTF8": "1",
+            }
+        )
+        if self.distro:
+            env["GDB_MCP_WSL_DISTRO"] = self.distro
+            env["GDB_MCP_LAUNCHER"] = "wsl"
+        else:
+            env.pop("GDB_MCP_WSL_DISTRO", None)
+            env["GDB_MCP_LAUNCHER"] = "native"
+        env.update(self.extra_env)
+        return env
 
     async def __aexit__(self, *exc_info) -> None:
         if self._stack is not None:

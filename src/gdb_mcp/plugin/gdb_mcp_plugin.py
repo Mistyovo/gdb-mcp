@@ -2977,7 +2977,13 @@ class Plugin(object):
 
     def _send(self, msg):
         try:
-            self.out_q.put((self._wire_generation, self._encode_msg(msg)))
+            # Before the first connection _wire_generation is 0 and the
+            # connection loop's first socket uses generation 1. Queue
+            # pre-connect events with that generation so a fast inferior
+            # that exits/stops before the plugin connects still delivers
+            # its notification (launch_gdb(run=True)).
+            generation = self._wire_generation or 1
+            self.out_q.put((generation, self._encode_msg(msg)))
         except Exception:
             pass
 

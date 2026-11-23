@@ -133,6 +133,84 @@ def test_parse_int_variants():
     assert parse_int("not a number") is None
 
 
+# -- native-Linux CI selectors ----------------------------------------------
+
+def test_run_wsl_empty_distro_runs_native(monkeypatch):
+    import bench.framework.build as build_mod
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(build_mod.subprocess, "run", fake_run)
+    build_mod.run_wsl("", ["gcc", "--version"])
+    build_mod.run_wsl(None, ["gcc", "--version"])
+    build_mod.run_wsl("kali-linux", ["gcc", "--version"])
+    assert calls[0] == ["gcc", "--version"]
+    assert calls[1] == ["gcc", "--version"]
+    assert calls[2] == [
+        "wsl.exe", "-d", "kali-linux", "--", "gcc", "--version"
+    ]
+
+
+def test_driver_env_selects_launcher(monkeypatch):
+    from bench.framework.driver import McpDriver
+
+    monkeypatch.delenv("GDB_MCP_WSL_DISTRO", raising=False)
+    native = McpDriver(port=1, distro="").server_env()
+    assert native["GDB_MCP_LAUNCHER"] == "native"
+    assert "GDB_MCP_WSL_DISTRO" not in native
+
+    wsl = McpDriver(port=1, distro="kali-linux").server_env()
+    assert wsl["GDB_MCP_LAUNCHER"] == "wsl"
+    assert wsl["GDB_MCP_WSL_DISTRO"] == "kali-linux"
+
+
+@pytest.mark.asyncio
+async def test_settle_stop_ignores_prerun_ready():
+    from bench.framework.generators.common import settle_stop
+
+    class Driver:
+        def __init__(self):
+            self.calls = 0
+
+        async def call(self, tool, arguments):
+            self.calls += 1
+            if self.calls == 1:
+                # the plugin's pre-run READY: no stop has happened yet
+                return {"state": "ready", "last_stop": None}
+            return {
+                "state": "ready",
+                "last_stop": {"signal": "SIGSEGV"},
+            }
+
+    driver = Driver()
+    result = await settle_stop(driver, "s", timeout_s=2.0)
+    assert result["last_stop"]["signal"] == "SIGSEGV"
+    assert driver.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_settle_stop_returns_on_exited_code():
+    from bench.framework.generators.common import settle_stop
+
+    class Driver:
+        async def call(self, tool, arguments):
+            # the plugin's post-exit prompt flips the state back to ready;
+            # exited_code is the only terminal signal left
+            return {"state": "ready", "last_stop": None, "exited_code": 42}
+
+    result = await settle_stop(Driver(), "s", timeout_s=2.0)
+    assert result["exited_code"] == 42
+
+
 # -- committed manifests stay valid ------------------------------------------
 
 def test_committed_task_manifests_load():
