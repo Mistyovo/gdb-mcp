@@ -688,6 +688,106 @@ class TestPolicies:
         assert r == {"disarmed": True, "total_events": 1}
         assert mock_gdb.state.breakpoints == []
 
+    def test_heap_arm_captures_allocation_return(self, plugin):
+        set_inferior()
+        mock_gdb.state.newest_frame._regs.update({"rdi": 0x40})
+        r = call(
+            plugin,
+            "policy",
+            {"kind": "heap_arm", "symbols": ["malloc"]},
+        )["result"]
+        assert r["return_capture"] == ["malloc"]
+        bp = mock_gdb.state.breakpoints[0]
+        assert bp.stop() is False
+        assert len(mock_gdb.state.finish_breakpoints) == 1
+        probe = mock_gdb.state.finish_breakpoints[0]
+        probe.return_value = mock_gdb.MockValue(0x5555555592A0)
+        assert probe.stop() is False
+        events = call(plugin, "policy", {"kind": "heap_read"})["result"]["events"]
+        event = events[0]
+        assert event["ret"] == "0x5555555592a0"
+        assert event["named"] == {"size": "0x40"}
+        assert "ret_error" not in event
+        call(plugin, "policy", {"kind": "heap_disarm"})
+        assert mock_gdb.state.finish_breakpoints == []
+
+    def test_heap_arm_free_is_not_return_captured(self, plugin):
+        set_inferior()
+        mock_gdb.state.newest_frame._regs.update({"rdi": 0xDEAD})
+        r = call(
+            plugin,
+            "policy",
+            {"kind": "heap_arm", "symbols": ["free"]},
+        )["result"]
+        assert r["return_capture"] == []
+        mock_gdb.state.breakpoints[0].stop()
+        assert mock_gdb.state.finish_breakpoints == []
+        events = call(plugin, "policy", {"kind": "heap_read"})["result"]["events"]
+        assert events[0]["named"] == {"ptr": "0xdead"}
+
+    def test_heap_arm_custom_return_symbol(self, plugin):
+        set_inferior()
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "heap_arm",
+                "symbols": ["my_alloc"],
+                "return_symbols": ["my_alloc"],
+            },
+        )["result"]
+        assert r["return_capture"] == ["my_alloc"]
+        mock_gdb.state.breakpoints[0].stop()
+        assert len(mock_gdb.state.finish_breakpoints) == 1
+
+    def test_heap_arm_can_disable_return_capture(self, plugin):
+        set_inferior()
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "heap_arm",
+                "symbols": ["malloc"],
+                "capture_returns": False,
+            },
+        )["result"]
+        assert r["return_capture"] == []
+        mock_gdb.state.breakpoints[0].stop()
+        assert mock_gdb.state.finish_breakpoints == []
+
+    def test_heap_arm_walks_inline_frames(self, plugin):
+        set_inferior()
+        normal = mock_gdb.MockFrame(
+            0x401010, "__libc_malloc", frame_type=mock_gdb.NORMAL_FRAME
+        )
+        inline = mock_gdb.MockFrame(
+            0x401000,
+            "checked_request2size",
+            frame_type=mock_gdb.INLINE_FRAME,
+            older=normal,
+        )
+        mock_gdb.state.newest_frame = inline
+        mock_gdb.state.selected_frame = inline
+        call(plugin, "policy", {"kind": "heap_arm", "symbols": ["malloc"]})
+        mock_gdb.state.breakpoints[0].stop()
+        assert len(mock_gdb.state.finish_breakpoints) == 1
+        assert mock_gdb.state.finish_breakpoints[0].frame is normal
+
+    def test_heap_arm_reports_missing_finish_support(
+        self, plugin, plugin_mod, monkeypatch
+    ):
+        set_inferior()
+        monkeypatch.setattr(plugin_mod, "_ReturnProbe", None)
+        r = call(
+            plugin,
+            "policy",
+            {"kind": "heap_arm", "symbols": ["malloc"]},
+        )["result"]
+        assert "return_capture_unavailable" in r
+        mock_gdb.state.breakpoints[0].stop()
+        events = call(plugin, "policy", {"kind": "heap_read"})["result"]["events"]
+        assert "ret_error" in events[0]
+
     def test_heap_max_events_stops_inferior(self, plugin):
         set_inferior()
         call(plugin, "policy", {"kind": "heap_arm", "symbols": ["malloc"], "max_events": 1})

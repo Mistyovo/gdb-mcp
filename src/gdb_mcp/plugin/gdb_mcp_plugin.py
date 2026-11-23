@@ -48,6 +48,15 @@ from collections import deque
 
 import gdb
 
+#: gdb's official return-value hook; None on a build without it (the
+#: timeline then degrades to entry arguments only).
+_FinishBreakpoint = getattr(gdb, "FinishBreakpoint", None)
+#: Frame.type() value for inlined frames. libc reports malloc through
+#: inline wrappers (checked_request2size on the verified gdb 18.1), and
+#: FinishBreakpoint refuses inline frames, so return probes walk older()
+#: to the containing frame.
+_INLINE_FRAME = getattr(gdb, "INLINE_FRAME", 2)
+
 PLUGIN_VERSION = "0.1.0"
 _DEBUG = os.environ.get("GDB_MCP_DEBUG") == "1"
 
@@ -241,21 +250,207 @@ def _make_io_channel():
 _HAS_OPENPTY = hasattr(os, "openpty")
 
 
+#: Allocation arguments by symbol, in x86_64 then aarch64 order. The raw
+#: ``args`` dict is always recorded; this adds a stable, named view.
+_ALLOC_ARG_REGS = {
+    "malloc": (("size", ("rdi", "x0", "w0")),),
+    "calloc": (
+        ("nmemb", ("rdi", "x0", "w0")),
+        ("size", ("rsi", "x1", "w1")),
+    ),
+    "realloc": (
+        ("ptr", ("rdi", "x0", "w0")),
+        ("size", ("rsi", "x1", "w1")),
+    ),
+    "free": (("ptr", ("rdi", "x0", "w0")),),
+    "aligned_alloc": (
+        ("alignment", ("rdi", "x0", "w0")),
+        ("size", ("rsi", "x1", "w1")),
+    ),
+    "memalign": (
+        ("alignment", ("rdi", "x0", "w0")),
+        ("size", ("rsi", "x1", "w1")),
+    ),
+    "valloc": (("size", ("rdi", "x0", "w0")),),
+    "pvalloc": (("size", ("rdi", "x0", "w0")),),
+}
+
+#: libc-internal spellings of the public allocators
+_ALLOC_SYMBOL_ALIASES = {
+    "__libc_malloc": "malloc",
+    "__libc_calloc": "calloc",
+    "__libc_realloc": "realloc",
+    "__libc_free": "free",
+    "__gi___libc_malloc": "malloc",
+    "__gi___libc_calloc": "calloc",
+    "__gi___libc_realloc": "realloc",
+    "__gi___libc_free": "free",
+    "_znwm": "operator new",
+    "_znam": "operator new[]",
+}
+
+#: allocation functions that return a pointer worth capturing by default
+_ALLOC_RETURN_SYMBOLS = frozenset(
+    (
+        "malloc",
+        "calloc",
+        "realloc",
+        "aligned_alloc",
+        "memalign",
+        "valloc",
+        "pvalloc",
+        "operator new",
+        "operator new[]",
+    )
+)
+
+#: allocation functions that return void (a return probe would be noise)
+_VOID_ALLOC_SYMBOLS = frozenset(("free", "cfree"))
+
+
+def _symbol_base(symbol):
+    """Normalize an allocation symbol: strip @plt/@version/argument list."""
+    text = str(symbol).strip()
+    if "@" in text:
+        text = text.split("@", 1)[0].strip()
+    if "(" in text:
+        text = text.split("(", 1)[0].strip()
+    return _ALLOC_SYMBOL_ALIASES.get(text.lower(), text)
+
+
+def _named_alloc_args(symbol, args):
+    """A stable {name: value} view over the raw register dict."""
+    spec = _ALLOC_ARG_REGS.get(_symbol_base(symbol))
+    if spec is None:
+        return {}
+    named = {}
+    for name, registers in spec:
+        for register in registers:
+            value = args.get(register)
+            if value is not None:
+                named[name] = value
+                break
+    return named
+
+
+def _captures_return(symbol, return_symbols):
+    """Whether a return probe should be created for this symbol."""
+    base = _symbol_base(symbol)
+    if return_symbols is not None:
+        return base in return_symbols or str(symbol) in return_symbols
+    if base.startswith("operator new"):
+        return True
+    return base in _ALLOC_RETURN_SYMBOLS and base not in _VOID_ALLOC_SYMBOLS
+
+
+def _stable_frame():
+    """The first non-inline frame at the current stop.
+
+    Breakpoints inside libc malloc hit an inline wrapper
+    (checked_request2size); the args and the caller are read from the
+    containing frame so ``caller`` is the real call site, not another
+    frame inside malloc.
+    """
+    try:
+        frame = gdb.newest_frame()
+    except Exception:
+        return None
+    depth = 0
+    while frame is not None and depth < 64:
+        try:
+            if frame.type() != _INLINE_FRAME:
+                return frame
+        except Exception:
+            return frame
+        try:
+            frame = frame.older()
+        except Exception:
+            return None
+        depth += 1
+    return frame
+
+
+if _FinishBreakpoint is not None:
+
+    class _ReturnProbe(_FinishBreakpoint):
+        """Record an allocation's return value into its timeline event.
+
+        gdb refuses ``FinishBreakpoint`` on inline frames, and libc
+        reports malloc through an inline wrapper (``checked_request2size``
+        on the verified gdb 18.1), so the probe is created on the first
+        non-inline frame enclosing the breakpoint. That frame's return
+        value is the pointer the caller receives.
+        """
+
+        def __init__(self, frame, event):
+            try:
+                _FinishBreakpoint.__init__(self, frame=frame, internal=True)
+            except TypeError:  # very old gdb: no internal kwarg
+                _FinishBreakpoint.__init__(self, frame=frame)
+            self._event = event
+
+        def stop(self):
+            try:
+                value = self.return_value
+                if value is not None:
+                    self._event["ret"] = "0x%x" % int(value)
+            except Exception:
+                pass
+            return False
+
+        def out_of_scope(self):
+            self._event["ret_error"] = (
+                "allocation frame left scope before return"
+            )
+
+else:  # pragma: no cover - every supported gdb has FinishBreakpoint
+    _ReturnProbe = None
+
+
+def _allocate_return_probe(event):
+    """Create a return probe for the current allocation call, or None."""
+    if _ReturnProbe is None:
+        event["ret_error"] = "gdb.FinishBreakpoint is unavailable"
+        return None
+    frame = _stable_frame()
+    if frame is None:
+        event["ret_error"] = "no non-inline frame for return capture"
+        return None
+    try:
+        return _ReturnProbe(frame, event)
+    except Exception as exc:
+        event["ret_error"] = "cannot create return probe: %s" % exc
+        return None
+
+
 class _TimelineBreakpoint(gdb.Breakpoint):
     """Allocation probe: records arguments on every hit and returns False
     so the inferior resumes invisibly — the timeline accumulates without
     ever stopping the run."""
 
-    def __init__(self, location, sink, max_events):
+    def __init__(
+        self,
+        location,
+        sink,
+        max_events,
+        capture_return=False,
+        return_probes=None,
+    ):
         gdb.Breakpoint.__init__(self, location, gdb.BP_BREAKPOINT)
         self._sink = sink
         self._max = max_events
+        self._capture_return = capture_return
+        self._return_probes = (
+            return_probes if return_probes is not None else []
+        )
 
     def stop(self):
         if len(self._sink) >= self._max:
             return True  # budget exhausted: let the inferior stop
         try:
-            frame = gdb.selected_frame()
+            frame = _stable_frame()
+            if frame is None:
+                frame = gdb.selected_frame()
             entry = {"symbol": str(self.location), "pc": "0x%x" % int(frame.pc())}
             older = frame.older()
             if older is not None:
@@ -269,7 +464,20 @@ class _TimelineBreakpoint(gdb.Breakpoint):
                 except Exception:
                     pass
             entry["args"] = args
+            named = _named_alloc_args(self.location, args)
+            if named:
+                entry["named"] = named
             self._sink.append(entry)
+            if self._capture_return:
+                probe = _allocate_return_probe(entry)
+                if probe is not None:
+                    self._return_probes.append(probe)
+            if len(self._return_probes) > 64:
+                self._return_probes[:] = [
+                    probe
+                    for probe in self._return_probes
+                    if getattr(probe, "is_valid", lambda: True)()
+                ]
         except Exception:
             pass
         return False
@@ -601,6 +809,9 @@ class Plugin(object):
         self._timeline_bps = []
         self._timeline_events = []
         self._timeline_max = POLICY_MAX_EVENTS
+        #: pending FinishBreakpoint probes (shared with every timeline bp);
+        #: each one fills in the ``ret`` of its own event
+        self._timeline_returns = []
         #: in-flight deferred policy drive ({abort: fail}, if any); a
         #: second policy request or shutdown aborts it so its event chain
         #: can never wake later and run a ghost loop the server abandoned
@@ -2006,33 +2217,82 @@ class Plugin(object):
         symbols = params.get("symbols") or [
             "malloc", "free", "realloc", "calloc",
         ]
+        if not isinstance(symbols, list) or not symbols:
+            raise PluginError(
+                "BAD_PARAMS", "symbols must be a non-empty list"
+            )
+        capture_returns = bool(params.get("capture_returns", True))
+        return_symbols = params.get("return_symbols")
+        return_set = None
+        if return_symbols is not None:
+            if not isinstance(return_symbols, list) or any(
+                not isinstance(sym, str) for sym in return_symbols
+            ):
+                raise PluginError(
+                    "BAD_PARAMS", "return_symbols must be a list of strings"
+                )
+            return_set = set()
+            for sym in return_symbols:
+                return_set.add(str(sym).strip())
+                return_set.add(_symbol_base(sym))
         self._timeline_events = []
         self._timeline_max = max_events
+        self._timeline_returns = []
         armed = []
         skipped = []
+        return_capture = []
         for sym in symbols:
+            capture = capture_returns and _captures_return(sym, return_set)
             try:
                 self._timeline_bps.append(
-                    _TimelineBreakpoint(str(sym), self._timeline_events, max_events)
+                    _TimelineBreakpoint(
+                        str(sym),
+                        self._timeline_events,
+                        max_events,
+                        capture_return=capture,
+                        return_probes=self._timeline_returns,
+                    )
                 )
                 armed.append(str(sym))
+                if capture:
+                    return_capture.append(str(sym))
             except gdb.error as exc:
                 skipped.append({"symbol": str(sym), "reason": str(exc)})
         if not armed:
             raise PluginError(
                 "PLUGIN_ERROR", "no allocation symbol could be armed"
             )
-        return {"armed": armed, "skipped": skipped, "max_events": max_events}
+        result = {
+            "armed": armed,
+            "skipped": skipped,
+            "max_events": max_events,
+            "return_capture": return_capture,
+        }
+        if capture_returns and _ReturnProbe is None:
+            result["return_capture_unavailable"] = (
+                "gdb.FinishBreakpoint is unavailable; entry args only"
+            )
+        return result
+
+    def _prune_return_probes(self):
+        # in-place: the breakpoints hold a reference to this same list
+        self._timeline_returns[:] = [
+            probe
+            for probe in self._timeline_returns
+            if getattr(probe, "is_valid", lambda: True)()
+        ]
 
     def _policy_heap_read(self, params, req_id=None):
         if not self._timeline_bps:
             raise PluginError("BAD_PARAMS", "timeline not armed")
+        self._prune_return_probes()
         events = self._timeline_events
         return {
             "armed": [str(bp.location) for bp in self._timeline_bps],
             "total": len(events),
             "events": events[-POLICY_TIMELINE_READ:],
             "truncated": len(events) > POLICY_TIMELINE_READ,
+            "pending_returns": len(self._timeline_returns),
         }
 
     def _policy_heap_disarm(self, params, req_id=None):
@@ -2044,8 +2304,14 @@ class Plugin(object):
                 bp.delete()
             except Exception:
                 pass
+        for probe in self._timeline_returns:
+            try:
+                probe.delete()
+            except Exception:
+                pass
         self._timeline_bps = []
         self._timeline_events = []
+        self._timeline_returns[:] = []
         return {"disarmed": True, "total_events": total}
 
     def _policy_fuzz_loop(self, params, req_id):

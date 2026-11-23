@@ -121,6 +121,24 @@ class TestCampaignState:
         assert match is not None
         assert match["source"] == "reg:rax"
         assert match["offset"] == 64
+        # a register holding pattern data is not pc control
+        assert "pc_control" not in data["primitives"]
+        assert data["primitives"]["cyclic_match"]["value"] == "reg:rax"
+        assert "offset 64" in data["primitives"]["cyclic_match"]["evidence"]
+
+    def test_detect_records_fault_addr_control(self):
+        data = new_campaign()
+        pattern = cyclic_pattern(256)
+        fault = "0x%x" % int.from_bytes(pattern[32:36].encode(), "little")
+        match = campaign_detect(
+            data, {"pc": "0x401000", "fault_addr": fault}
+        )
+        assert match is not None
+        assert match["source"] == "fault_addr"
+        assert match["offset"] == 32
+        assert "pc_control" not in data["primitives"]
+        assert data["primitives"]["fault_addr_controlled"]["value"] == "candidate"
+        assert "offset 32" in data["primitives"]["fault_addr_controlled"]["evidence"]
 
 
 class TestSanitizeCampaign:

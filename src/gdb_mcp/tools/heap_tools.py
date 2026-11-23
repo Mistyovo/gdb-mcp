@@ -1,16 +1,33 @@
-"""Pwn-workflow tools: structured heap bins and checkpoints."""
+"""Pwn-workflow tools: structured heap bins, chunk decoding, checkpoints
+and delegated policies."""
 
 from __future__ import annotations
 
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.heap import parse_heap_chunk
 from gdb_mcp.output import parse_pwndbg_bins
 
 from ._common import check_stopped, config_from, resolve_gdb
 from .registry import tool
 
 _SNAPSHOT_ACTIONS = ("create", "list", "restore", "diff")
+
+
+def _read_bytes(result: dict) -> bytes:
+    """The bytes a read_mem response actually covers from its start."""
+    hex_data = result.get("hex")
+    if hex_data:
+        return bytes.fromhex(hex_data)
+    start = int(result.get("addr") or 0)
+    for segment in result.get("segments") or []:
+        try:
+            if int(segment.get("addr")) == start and segment.get("hex"):
+                return bytes.fromhex(segment["hex"])
+        except (TypeError, ValueError):
+            continue
+    return b""
 
 
 @tool()
@@ -43,6 +60,94 @@ async def heap_bins(
     return parsed
 
 
+@tool()
+async def heap_chunk(
+    address: str | int,
+    user_ptr: bool = False,
+    data_length: int = 32,
+    session_id: str | None = None,
+    ctx: Context = None,
+) -> dict:
+    """Decode one glibc malloc chunk (x86_64 layout), read-only and
+    pwndbg-independent. `address` is the chunk header address (the form
+    heap_bins returns); set `user_ptr=True` when it is a malloc/calloc/
+    realloc return pointer (16 bytes before the header). Returns
+    size/flags/prev_size, the next chunk's PREV_INUSE bit (this chunk's
+    in-use state), fd/bk when the chunk looks free, tcache next/key plus
+    the safe-linked next decoded (glibc >= 2.32), and a user-data
+    preview. Unreadable or implausible fields are reported in warnings,
+    never guessed."""
+    if (
+        isinstance(data_length, bool)
+        or not isinstance(data_length, int)
+        or not (0 <= data_length <= 256)
+    ):
+        raise GdbMcpError(
+            "BAD_PARAMS", "data_length must be between 0 and 256"
+        )
+    cfg = config_from(ctx)
+    session = resolve_gdb(ctx, session_id)
+    check_stopped(session)
+    expr = str(address)
+    if user_ptr:
+        expr = "(char*)(%s) - 16" % expr
+    header_resp = await session.request(
+        "read_mem", {"addr": expr, "length": 32}, timeout=cfg.request_timeout
+    )
+    header = _read_bytes(header_resp)
+    if len(header) < 16:
+        raise GdbMcpError(
+            "MEMORY_ERROR",
+            "cannot read a 16-byte chunk header at %s" % address,
+        )
+    chunk_addr = int(header_resp.get("addr") or 0)
+    size_field = int.from_bytes(header[8:16], "little")
+    chunk_size = size_field & ~0x7
+
+    next_size = None
+    if chunk_size >= 0x20:
+        next_resp = None
+        try:
+            next_resp = await session.request(
+                "read_mem",
+                {"addr": "0x%x" % (chunk_addr + chunk_size), "length": 8},
+                timeout=cfg.request_timeout,
+            )
+        except GdbMcpError:
+            next_resp = None
+        if next_resp is not None:
+            raw_next = _read_bytes(next_resp)
+            if len(raw_next) >= 8:
+                next_size = raw_next[:8]
+
+    data = None
+    if data_length:
+        try:
+            data_resp = await session.request(
+                "read_mem",
+                {"addr": "0x%x" % (chunk_addr + 16), "length": data_length},
+                timeout=cfg.request_timeout,
+            )
+        except GdbMcpError:
+            data = None
+        else:
+            data = _read_bytes(data_resp)
+
+    parsed = parse_heap_chunk(
+        header[:32],
+        chunk_addr=chunk_addr,
+        next_size=next_size,
+        data=data,
+        data_length=data_length,
+    )
+    parsed["user_ptr"] = bool(user_ptr)
+    if len(header) < 32:
+        parsed["warnings"].append(
+            "only %d header bytes readable; fd/bk unavailable" % len(header)
+        )
+    return parsed
+
+
 @tool(capability="target")
 async def run_policy(
     kind: str,
@@ -54,9 +159,12 @@ async def run_policy(
     speed; the response is a constant-size summary regardless of
     iterations. Kinds (all need a stopped inferior):
     - trace: {max_steps} single-steps, returns unique PCs in order.
-    - heap_arm: arm allocation-symbol probes {symbols, max_events}
-      that record args per hit and auto-continue invisibly;
+    - heap_arm: arm allocation-symbol probes {symbols, max_events,
+      capture_returns, return_symbols} that record args (raw plus a
+      named size/ptr/nmemb view) and, for allocation functions, the
+      pointer they return; every hit auto-continues invisibly.
       heap_read accumulates the timeline; heap_disarm removes them.
+      Use heap_chunk to decode a chunk header on its own.
     - fuzz_loop: per payload — restore checkpoint, write payload at
       buffer_addr, resume; stops at stop_location (a guaranteed-stop
       marker, e.g. the caller of the function under test) count as

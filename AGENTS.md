@@ -30,5 +30,9 @@ Single-context layout (`GLOSSARY.md` + `docs/adr/`, created lazily);
   the policy family's resume/stop semantics are pinned by
   `run_policy_smoke.sh` (see `src/gdb_mcp/plugin/gdb_mcp_plugin.py`,
   `_policy_drive` docstring, for the three verified gdb facts).
+  The heap timeline's allocation return capture is pinned by
+  `run_heap_smoke.sh`: gdb reports libc malloc through inline frames
+  (`checked_request2size` on gdb 18.1), so the probe walks `older()` to
+  the containing frame before creating `gdb.FinishBreakpoint`.
 - Experimental features are CLI-gated only (`--experimental`); never add
   environment-variable paths for them.

@@ -17,6 +17,14 @@ _SECTION_CAP = 64
 _NOTES_CAP = 32
 _MAX_PATTERN = 65536
 
+#: primitive key established by a cyclic hit on this stop field. Anything
+#: else (register hits) is a generic ``cyclic_match``: pattern data in a
+#: register is evidence, not proof of pc control.
+_CYCLIC_PRIMITIVE_KEYS = {
+    "pc": "pc_control",
+    "fault_addr": "fault_addr_controlled",
+}
+
 # --- cyclic pattern (de Bruijn, pwntools-compatible lowercase alphabet) -----
 
 _CYCLE_CACHE: dict[int, bytes] = {}
@@ -107,10 +115,15 @@ def campaign_note(data: dict, text: str) -> dict:
 def campaign_detect(
     data: dict, stop_info: dict, *, record: bool = True
 ) -> dict | None:
-    """Run the cyclic oracle over the last stop's pc/fault/registers;
-    a pattern hit on PC is recorded as a pc-control primitive candidate
-    unless ``record`` is false (read-only/observer callers still get the
-    match in their response, but must not mutate session state)."""
+    """Run the cyclic oracle over the last stop's pc/fault/registers.
+
+    A hit is attributed by its source: PC -> ``pc_control``, fault
+    address -> ``fault_addr_controlled``, any other register -> a
+    generic ``cyclic_match``. A register holding pattern data is not
+    proof of pc control, so it must never be recorded as such.
+    ``record=False`` (read-only/observer callers) still returns the
+    match in the response, but must not mutate session state.
+    """
     candidates: list[tuple[str, int]] = []
     for name in ("pc", "fault_addr"):
         raw = stop_info.get(name)
@@ -130,8 +143,11 @@ def campaign_detect(
         if match is not None:
             if record:
                 primitives = data.setdefault("primitives", {})
-                primitives["pc_control"] = {
-                    "value": "candidate",
+                key = _CYCLIC_PRIMITIVE_KEYS.get(source, "cyclic_match")
+                primitives[key] = {
+                    # the generic key keeps the source visible; the
+                    # attributed keys speak for themselves
+                    "value": source if key == "cyclic_match" else "candidate",
                     "ts": round(time.time(), 3),
                     "evidence": "%s matches cyclic pattern at offset %d"
                     % (source, match["offset"]),

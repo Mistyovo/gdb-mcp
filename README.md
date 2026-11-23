@@ -14,7 +14,7 @@ tooling are optional extensions.
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-lightgrey)](#launchers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-910%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-930%20passing-brightgreen)](#testing)
 
 [Quick Start](#quick-start) · [Tools](#tool-catalog) · [Architecture](#architecture) · [Experimental](#experimental-features) · [Roadmap](ROADMAP_V2.md) · [中文文档](README.zh-CN.md)
 
@@ -30,7 +30,7 @@ process** and talks to the server over a JSON-lines control channel — so pwndb
 contexts, pwntools-launched sessions, and reverse-execution all just work,
 with none of the prompt-scraping fragility.
 
-- **Sharp default surface** — the default `pwn` profile exposes 35 tools,
+- **Sharp default surface** — the default `pwn` profile exposes 36 tools,
   all aimed at a live userland process; static (Ghidra) and kernel (QEMU)
   families are explicit extensions, so they do not tax tool selection.
 - **Built for pwn, not just debugging** — structured crash triage, glibc heap
@@ -44,7 +44,7 @@ with none of the prompt-scraping fragility.
   summaries, so iterating 1,000 times costs one tool call.
 - **pwntools stays in charge** — `gdb.debug()` / `gdb.attach()` sessions
   register automatically; the server never fights your scripts for I/O.
-- **Verified against reality** — 910 unit tests (including seeded
+- **Verified against reality** — 930 unit tests (including seeded
   protocol-layer fuzzing against the JSON-lines control channel) plus
   end-to-end suites driving real gdb in WSL, and a versioned acceptance
   benchmark (`bench/`, 576 tasks across 8 families, reference-solved
@@ -120,8 +120,8 @@ One call. Full picture.
 
 ## Tool Catalog
 
-**35 tools by default** in the `pwn` profile, **12** under
-`GDB_MCP_TOOL_PROFILE=core`, and **50 stable tools** plus
+**36 tools by default** in the `pwn` profile, **12** under
+`GDB_MCP_TOOL_PROFILE=core`, and **51 stable tools** plus
 `--experimental` in the `full` profile. The default surface is restricted to
 tools that drive a live Linux userland process; the 15-tool Ghidra static
 family is an optional `full`-profile extension.
@@ -139,7 +139,7 @@ family is an optional `full`-profile extension.
 | Crash triage | `crash_report` — signal, fault addr, registers, backtrace, disasm, memory at PC/SP/fault, structured memory map · `triage_crash` — replay a crashing payload from a checkpoint, collect the full report, optionally minimize, store evidence |
 | State | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map` (structured) `load_target` |
 | Breakpoints | `set_breakpoint` (sw/hw/watch/condition/temporary + `commands`/`auto_continue` probes) `list_breakpoints` `manage_breakpoint` |
-| Pwn workflow | `heap_bins` (pwndbg bins → JSON) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize / crash_check / bp_stats — bounded loops at native speed) `campaign` (state machine + cyclic oracle) |
+| Pwn workflow | `heap_bins` (pwndbg bins → JSON) `heap_chunk` (glibc chunk header → size/flags/fd/bk/tcache, no pwndbg) `checkpoint` (create/restore/diff) `run_policy` (trace / heap probes / fuzz_loop / minimize / crash_check / bp_stats — bounded loops at native speed) `campaign` (state machine + cyclic oracle) |
 
 The optional `full` profile adds the **15 static-analysis tools**:
 `analyze_binary` `list_analyses` `get_analysis_status` `get_binary_overview`
@@ -162,7 +162,7 @@ gdbscript?"* in one artifact.
 ## Architecture
 
 ```
-Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (35 tools)
+Claude Code / any MCP client ──stdio or HTTPS──► gdb-mcp server (36 tools)
         ▲  campaign state · journals · policies · optional static extension
         │
         │ TCP JSON-lines (scoped session tokens, heartbeats)
@@ -209,10 +209,13 @@ can be `source`-deployed into any gdb with an embedded Python.
 - **Bounded everything.** Pagination, result spilling with SHA-256 handles,
   explicit `truncated` flags, ring-buffered events — no silent truncation, no
   unbounded dumps.
-- **Campaign state machine.** Cyclic-offset oracle, libc leak bookkeeping, and
-  pc-control detection are injected into every stop — the agent never
+- **Campaign state machine.** Cyclic-offset oracle with source-aware
+  attribution (PC hits are pc-control candidates, fault-address hits are
+  fault-control candidates, register hits stay generic matches), libc leak
+  bookkeeping, and a compact brief injected into every stop — the agent never
   re-derives what the session already proved.
-- **Delegated policies.** `run_policy` runs tracing, heap timelines, snapshot
+- **Delegated policies.** `run_policy` runs tracing, heap timelines with
+  allocation return pointers, snapshot
   fuzzing and delta-minimization inside gdb at native speed; the model only
   sees constant-size summaries.
 - **Session = asset.** Journals persist across restarts; sessions re-attach
@@ -294,13 +297,14 @@ token — plugins re-derive automatically.
 
 ```bash
 # unit (no gdb required)
-python -m pytest tests/ -q                        # 910 tests, ~12s
+python -m pytest tests/ -q                        # 930 tests, ~12s
 
 # real-gdb suites (WSL2 or native Linux; each prints its own verdict)
 wsl bash tests/integration/run_wsl_integration.sh # plugin <-> server protocol
 python tests/integration/run_mcp_tools_e2e.py --distro kali-linux
                                                   # every registered tool, end to end
 wsl bash tests/integration/run_policy_smoke.sh   # policy loops (trace/bp_stats)
+wsl bash tests/integration/run_heap_smoke.sh     # heap timeline (allocation returns)
 wsl bash tests/integration/run_io_smoke.sh        # inferior stdio over a pty
 bash tests/integration/run_tls_smoke.sh           # HTTP / TLS / mTLS / bearer tokens
 python tests/integration/run_observer_smoke.py    # observer role over live HTTP
@@ -321,7 +325,7 @@ Development status, benchmark results, and the long-term vision live in
 
 ## Contributing
 
-Issues and PRs welcome — the test suite (910 tests, no gdb required for unit
+Issues and PRs welcome — the test suite (930 tests, no gdb required for unit
 runs) is the contract: please add tests for behavior changes and keep
 `ruff check` clean.
 

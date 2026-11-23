@@ -198,9 +198,10 @@ async def kill_session(
 ) -> dict:
     """End a session. For gdb, the default detaches the plugin and keeps
     gdb (and the session record) alive, so a later re-hello revives the
-    same session id. force=True terminates the gdb process tree;
-    forget=True drops the record even when detaching. Script sessions are
-    terminated and removed."""
+    same session id. force=True terminates the gdb process tree but keeps
+    the session record (state disconnected, reaped by GC); forget=True
+    drops the record as well. Script sessions are terminated and
+    removed."""
     registry = registry_from(ctx)
     session = resolve_any(ctx, session_id)
     if session.kind == "gdb":
@@ -228,7 +229,10 @@ async def kill_session(
             await launcher_from(ctx).pkill_marker(
                 session.session_id, True, distro=session.distro
             )
-        keep_record = not force and not forget
+        # force kills the process; only forget drops the record. A
+        # force-killed session stays as a DISCONNECTED history entry
+        # until GC, matching the docstring and the restore/audit flow.
+        keep_record = not forget
         if not keep_record:
             registry.remove(session.session_id)
         return {

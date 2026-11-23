@@ -189,7 +189,7 @@ class TestDocumentedCounts:
 
     def test_declared_tool_counts(self):
         # (total, experimental, core, pwn-default, full-stable, static)
-        assert self._counts() == (56, 6, 12, 35, 50, 15)
+        assert self._counts() == (57, 6, 12, 36, 51, 15)
 
     def test_readmes_state_the_declared_counts(self):
         root = SRC.parent.parent

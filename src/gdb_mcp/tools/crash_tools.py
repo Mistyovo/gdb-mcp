@@ -110,10 +110,12 @@ async def _collect_crash_report(
                 or bool(mmap.get("truncated", False)),
             }
         # cyclic oracle over the stop values (registers included: the
-        # plugin's stop notification only carries pc/fault): a pattern
-        # hit is recorded as a pc-control candidate, unless the caller is
-        # read-only/observer — those clients get the match without the
-        # campaign write.
+        # plugin's stop notification only carries pc/fault): PC hits are
+        # recorded as pc_control, fault-address hits as
+        # fault_addr_controlled, and other register hits as a generic
+        # cyclic_match — a register holding pattern data is not proof of
+        # pc control. Read-only/observer callers get the match without
+        # the campaign write.
         detect_input = dict(stop_info)
         detect_input["registers"] = report["registers"]
         detect = campaign_detect(

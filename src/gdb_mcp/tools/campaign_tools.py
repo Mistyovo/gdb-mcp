@@ -25,10 +25,11 @@ async def campaign(
     notes). Actions: get (full state), set (section/key/value:
     sections protections|libc|offsets|primitives), note (text),
     detect (run the cyclic oracle over the last stop's pc/fault/
-    registers; a hit is recorded as a pc-control candidate), pattern
-    (value = requested length; returns a pwntools-compatible cyclic
-    string for payload building). A compact summary is auto-injected
-    into stop responses."""
+    registers: a PC hit is recorded as pc_control, a fault-address hit
+    as fault_addr_controlled, and any other register hit as a generic
+    cyclic_match — never as pc control), pattern (value = requested
+    length; returns a pwntools-compatible cyclic string for payload
+    building). A compact summary is auto-injected into stop responses."""
     if action not in ("get", "set", "note", "detect", "pattern"):
         raise ValueError(
             "action must be one of get, set, note, detect, pattern"

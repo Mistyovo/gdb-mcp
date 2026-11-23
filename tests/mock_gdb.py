@@ -36,6 +36,9 @@ BP_HARDWARE_WATCHPOINT = 4
 BP_READ_WATCHPOINT = 5
 BP_ACCESS_WATCHPOINT = 6
 
+NORMAL_FRAME = 0
+INLINE_FRAME = 2
+
 COMMAND_USER = 1
 
 prompt_hook = None
@@ -76,14 +79,27 @@ class MockSymtab:
 
 
 class MockFrame:
-    def __init__(self, pc, name="func", regs=None, filename="a.c", line=10):
+    def __init__(
+        self,
+        pc,
+        name="func",
+        regs=None,
+        filename="a.c",
+        line=10,
+        frame_type=NORMAL_FRAME,
+        older=None,
+    ):
         self._pc = pc
         self._name = name
         self._regs = dict(regs or {})
         self._regs.setdefault("rip", pc)
-        self._older = None
+        self._older = older
         self._filename = filename
         self._line = line
+        self._frame_type = frame_type
+
+    def type(self):
+        return self._frame_type
 
     def pc(self):
         return self._pc
@@ -219,6 +235,36 @@ class MockSymbol:
         return MockValue(self._value)
 
 
+class MockFinishBreakpoint:
+    """Stand-in for gdb.FinishBreakpoint: the test sets ``return_value``
+    and calls ``stop()`` to simulate the allocation returning."""
+
+    _next = 1
+
+    def __init__(self, frame=None, internal=False):
+        self.number = MockFinishBreakpoint._next
+        MockFinishBreakpoint._next += 1
+        self.frame = frame
+        self.internal = internal
+        self.return_value = None
+        self.deleted = False
+        state.finish_breakpoints.append(self)
+
+    def stop(self):
+        return False
+
+    def delete(self):
+        self.deleted = True
+        if self in state.finish_breakpoints:
+            state.finish_breakpoints.remove(self)
+
+    def is_valid(self):
+        return not self.deleted
+
+
+FinishBreakpoint = MockFinishBreakpoint
+
+
 class MockEventRegistry:
     def __init__(self):
         self.handlers = []
@@ -299,6 +345,7 @@ class _State:
         self.selected_frame = None
         self.selected_thread = self.threads[0] if self.threads else None
         self.breakpoints = []
+        self.finish_breakpoints = []
         self.interrupt_calls = 0
         self.continue_script = []  # simulated stops for execute("continue")
         self.stepi_stride = 4  # pc advance per execute("stepi")
@@ -324,6 +371,7 @@ class _State:
         self._in_stop_event = 0  # depth: running inside a stop event fire
         self.writes = []  # gdb.write captures: (text, stream)
         MockBreakpoint._next = 1
+        MockFinishBreakpoint._next = 1
 
 
 state = _State()

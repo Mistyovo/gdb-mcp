@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import struct
 
 import pytest
 
@@ -11,7 +12,7 @@ from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.context import ServerContext
 from gdb_mcp.server import build_app
 from gdb_mcp.tools import registered_tools
-from gdb_mcp.sessions import EXITED, RUNNING, SessionRegistry
+from gdb_mcp.sessions import DISCONNECTED, EXITED, RUNNING, SessionRegistry
 from gdb_mcp.tools import CORE_TOOLS
 
 from test_sessions import FakeWriter, hello
@@ -133,6 +134,46 @@ class TestSessionTools:
         assert result["killed"] is False
         assert result["record_kept"] is True
         assert registry.has_session(s.session_id)
+
+    @pytest.mark.asyncio
+    async def test_kill_session_force_keeps_record(self, env):
+        registry, _, _ = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                env[2]["kill_session"],
+                {"session_id": s.session_id, "force": True},
+                ctx_for(env),
+            )
+        )
+        line = await next_request(s, s.writer)
+        assert line["type"] == "quit"
+        assert line["kill_gdb"] is True
+        await s.on_disconnect()
+        result = await task
+        assert result["killed"] is True
+        assert result["record_kept"] is True
+        assert registry.has_session(s.session_id)
+        assert s.state == DISCONNECTED
+
+    @pytest.mark.asyncio
+    async def test_kill_session_forget_drops_record(self, env):
+        registry, _, _ = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                env[2]["kill_session"],
+                {"session_id": s.session_id, "forget": True},
+                ctx_for(env),
+            )
+        )
+        line = await next_request(s, s.writer)
+        assert line["type"] == "quit"
+        assert line["kill_gdb"] is False
+        await s.on_disconnect()
+        result = await task
+        assert result["record_kept"] is False
+        assert not registry.has_session(s.session_id)
 
     @pytest.mark.asyncio
     async def test_get_process_output(self, env, tmp_path):
@@ -1300,6 +1341,150 @@ class TestHeapBins:
                 tools["heap_bins"], {"session_id": s.session_id}, ctx_for(env)
             )
         assert ei.value.code == "NO_PWNDBG"
+
+
+CHUNK_ADDR = 0x555555559290
+CHUNK_HEADER = struct.pack(
+    "<QQQQ", 0, 0x31, 0x5555555592C0, 0x5555AAAA1234
+)
+CHUNK_DATA = b"ABCD" * 8
+
+
+class TestHeapChunk:
+    @pytest.mark.asyncio
+    async def test_decodes_free_tcache_chunk(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["heap_chunk"],
+                {"address": "0x%x" % CHUNK_ADDR, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR,
+                "length": 32,
+                "hex": CHUNK_HEADER.hex(),
+                "segments": [],
+                "unreadable": [],
+                "partial": False,
+            },
+        )
+        assert req["verb"] == "read_mem"
+        assert req["params"] == {"addr": "0x%x" % CHUNK_ADDR, "length": 32}
+        req = await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR + 0x30,
+                "length": 8,
+                "hex": struct.pack("<Q", 0x20).hex(),
+            },
+        )
+        assert req["params"]["addr"] == "0x%x" % (CHUNK_ADDR + 0x30)
+        req = await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR + 16,
+                "length": 32,
+                "hex": CHUNK_DATA.hex(),
+            },
+        )
+        assert req["params"]["addr"] == "0x%x" % (CHUNK_ADDR + 16)
+        result = await task
+        assert result["chunk"] == "0x%x" % CHUNK_ADDR
+        assert result["in_use"] is False
+        assert result["fd"] == "0x5555555592c0"
+        assert result["tcache"]["suspected"] is True
+        assert result["data_hex"] == CHUNK_DATA.hex()
+        assert result["user_ptr"] is False
+
+    @pytest.mark.asyncio
+    async def test_user_ptr_subtracts_header(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["heap_chunk"],
+                {
+                    "address": "0x%x" % (CHUNK_ADDR + 16),
+                    "user_ptr": True,
+                    "data_length": 0,
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        )
+        req = await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR,
+                "length": 32,
+                "hex": CHUNK_HEADER.hex(),
+            },
+        )
+        assert req["params"]["addr"] == "(char*)(0x%x) - 16" % (
+            CHUNK_ADDR + 16
+        )
+        await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR + 0x30,
+                "length": 8,
+                "hex": struct.pack("<Q", 0x20).hex(),
+            },
+        )
+        result = await task
+        assert result["chunk"] == "0x%x" % CHUNK_ADDR
+        assert result["user_ptr"] is True
+
+    @pytest.mark.asyncio
+    async def test_unreadable_header_errors(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        task = asyncio.create_task(
+            run_tool(
+                tools["heap_chunk"],
+                {"address": "0x%x" % CHUNK_ADDR, "session_id": s.session_id},
+                ctx_for(env),
+            )
+        )
+        await respond_to(
+            s,
+            s.writer,
+            result={
+                "addr": CHUNK_ADDR,
+                "length": 32,
+                "hex": None,
+                "segments": [],
+            },
+        )
+        with pytest.raises(GdbMcpError) as ei:
+            await task
+        assert ei.value.code == "MEMORY_ERROR"
+
+    @pytest.mark.asyncio
+    async def test_bad_data_length(self, env):
+        registry, _, tools = env
+        s = add_gdb_session(registry)
+        with pytest.raises(GdbMcpError) as ei:
+            await run_tool(
+                tools["heap_chunk"],
+                {
+                    "address": "0x1000",
+                    "data_length": 999,
+                    "session_id": s.session_id,
+                },
+                ctx_for(env),
+            )
+        assert ei.value.code == "BAD_PARAMS"
 
 
 class TestCheckpoint:

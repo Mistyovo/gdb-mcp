@@ -139,7 +139,7 @@ gdb 在新终端（tmux 窗格）中打开、pwndbg 照常加载、插件自动�
 - `launch_gdb(program="/mnt/c/.../vuln", run=True)` —— wsl.exe 后台拉起 gdb + 插件
 - `launch_gdb(attach_pid=4242)` —— attach 到运行中的用户态进程
 - `launch_script(script="C:\\...\\exploit.py")` —— 后台跑脚本，等待其 gdb 注册；纯脚本退出时立即返回状态、退出码与日志尾
-- `kill_session(force=False)` 断开插件并保留 gdb 与会话记录（之后可重新 hello 复活）；`force=True` 终止 gdb；`forget=True` 断开并删除记录
+- `kill_session(force=False)` 断开插件并保留 gdb 与会话记录（之后可重新 hello 复活）；`force=True` 终止 gdb 但保留 disconnected 记录（由 GC 回收）；`forget=True` 断开并删除记录
 
 ### 方式 3：手动 gdb
 
@@ -223,7 +223,7 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 两次调用之间错过的事件用 get_events 兜底。
 ```
 
-## 工具一览（默认 `pwn` 档 35 个；`core` 档 12 个；`full` 档 50 个稳定工具；开 `--experimental` 额外 6 个）
+## 工具一览（默认 `pwn` 档 36 个；`core` 档 12 个；`full` 档 51 个稳定工具；开 `--experimental` 额外 6 个）
 
 默认面只保留驱动**活体 Linux 用户态进程**所需的能力：
 
@@ -240,7 +240,7 @@ crash_report（一次调用返回：signal / fault_addr / pc / thread / register
 | 崩溃定位 | `crash_report`（信号/故障地址/寄存器/回溯/PC·SP·故障地址内存/内存映射一屏拿全）`triage_crash`（checkpoint 重放崩溃 payload → 完整报告 → 可选最小化 → 证据落盘） |
 | 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_frame` `get_memory_map`（结构化 segments）`load_target` |
 | 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
-| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop / crash_check / minimize / bp_stats——循环下沉插件原生速度）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
+| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON，含 `parsed` 诚实降级）`heap_chunk`（glibc chunk 头 → size/flags/prev_size/fd/bk/tcache，支持 safe-linking 解码，无需 pwndbg）`checkpoint`（寄存器+可写内存快照 create/list/restore/diff，预算受控）`run_policy`（委托执行：trace / heap_arm·read·disarm / fuzz_loop / crash_check / minimize / bp_stats——循环下沉插件原生速度；分配探针记录参数、命名视图与返回指针）`campaign`（战役状态 + cyclic 偏移 oracle + 模式生成） |
 
 `full` 档额外注册 **15 个 Ghidra 静态分析工具**：`analyze_binary`
 `list_analyses` `get_analysis_status` `get_binary_overview` `list_sections`
@@ -284,17 +284,18 @@ shell profile 或 MCP 配置里残留的变量把实验工具带进每次启动�
 
 - **campaign**：服务器为每个会话维护结构化漏洞利用进度（protections/libc 泄漏/
   偏移/primitives/notes）。`campaign(action="detect")` 对最近一次停机的 PC/fault/
-  寄存器跑 **cyclic 偏移 oracle**（pwntools 兼容 de Bruijn 序列），命中即记录
-  pc_control 候选；`action="pattern"` 直接生成模式串。停机响应自动注入 3–6 行
-  战役摘要——agent 不再每轮重推上下文。状态只读视图经 MCP Resource
-  `gdb://campaign/{session_id}` 暴露。
+  寄存器跑 **cyclic 偏移 oracle**（pwntools 兼容 de Bruijn 序列），命中按来源归因：
+  PC 命中记 `pc_control`、fault_addr 命中记 `fault_addr_controlled`、其余寄存器
+  命中只记通用 `cyclic_match`（寄存器里有模式数据不等于控制了 PC）；`action="pattern"`
+  直接生成模式串。停机响应自动注入 3–6 行战役摘要——agent 不再每轮重推上下文。
+  状态只读视图经 MCP Resource `gdb://campaign/{session_id}` 暴露。
 - **run_policy（委托执行）**：有界循环下沉到 gdb 进程内原生速度执行，响应大小
-  与迭代次数无关——`trace`（有界单步轨迹）、`heap_arm/read/disarm`（分配函数
-  探针记录参数、自动续跑不打断执行流）、`fuzz_loop`（checkpoint 恢复 + payload
-  写入 + 续跑的**gdb 内快照模糊测试**，崩溃按信号+PC 去重）。
+  与迭代次数无关——`trace`（有界单步轨迹）、`heap_arm/read/disarm`（分配探针
+  记录原始/命名参数与返回指针，自动续跑不打断执行流）、`fuzz_loop`（checkpoint
+  恢复 + payload 写入 + 续跑的**gdb 内快照模糊测试**，崩溃按信号+PC 去重）。
 
 `GDB_MCP_TOOL_PROFILE=core` 只注册 12 个高频工具（省每次请求的 schema
-token）；默认 `pwn` 注册 35 个；`full` 额外包含 Ghidra 静态扩展。
+token）；默认 `pwn` 注册 36 个；`full` 额外包含 Ghidra 静态扩展。
 `get_backtrace`/`disassemble` 响应带
 `truncated` 标记；`execute_command` 输出超过内联阈值时自动存盘并在响应中
 给出 `result_file`/`result_sha256`。
@@ -330,16 +331,18 @@ token）；默认 `pwn` 注册 35 个；`full` 额外包含 Ghidra 静态扩展�
 - 插件只 `connect` 自己的 `gdb.events` 处理器，绝不接管 `gdb.prompt_hook`、不抓 prompt；在 pwndbg 前后加载均可。
 - 对 pwntools 的 gdbscript（含 `target remote`）完全惰性，inferior 如何被接管与插件无关。
 - 已知事实（gdb 17.2 实测）：`gdb.execute("continue")` 从 post_event 回调中执行时**异步返回**；`gdb.events.stop` 在 execute 返回之后触发；`StopEvent.details` 不含 fault addr（插件用 `$_siginfo._sifields._sigfault.si_addr` 兜底）；`gdb.interrupt()` 无法中断异步运行的 inferior（插件用 `post_event(execute("interrupt"))`）。
+- 已知事实（gdb 18.1 实测）：libc `malloc` 的断点会落在 inline frame（`checked_request2size`）；`gdb.FinishBreakpoint` 拒绝 inline frame，堆时间线会沿 `older()` 找到外层普通帧再建返回探针——这正是不用“返回地址临时断点”的原因（后者在 gdb 18.1 上触发过内部段错误）。
 
 ## 测试
 
 ```bash
 # 单元测试（无需 gdb）
-python -m pytest tests/ -q                        # 910 项（含协议层种子模糊测试）
+python -m pytest tests/ -q                        # 930 项（含协议层种子模糊测试）
 
 # 真实 gdb 套件（WSL2 或原生 Linux；各自打印结论）
 wsl bash tests/integration/run_wsl_integration.sh # 插件 <-> 服务端协议
 wsl bash tests/integration/run_policy_smoke.sh   # policy 循环原语（trace/bp_stats）
+wsl bash tests/integration/run_heap_smoke.sh     # heap 时间线（分配返回指针）
 python tests/integration/run_mcp_tools_e2e.py --distro kali-linux
                                                   # 逐个工具端到端走查
 wsl bash tests/integration/run_io_smoke.sh        # inferior stdio（pty）

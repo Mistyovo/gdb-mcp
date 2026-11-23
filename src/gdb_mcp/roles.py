@@ -37,6 +37,7 @@ OBSERVER_ALLOWED_TOOLS = frozenset(
         "get_memory_map",
         "list_breakpoints",
         "heap_bins",
+        "heap_chunk",
         "crash_report",
         "read_result",
         "diff_sessions",

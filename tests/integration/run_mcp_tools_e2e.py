@@ -56,6 +56,7 @@ REGISTERED_TOOLS = frozenset(
         "get_static_disassembly",
         "get_xrefs",
         "heap_bins",
+        "heap_chunk",
         "interrupt",
         "kill_session",
         "launch_gdb",
@@ -115,6 +116,7 @@ WALKTHROUGH_TOOLS = frozenset(
         "list_threads",
         "select_frame",
         "get_memory_map",
+        "heap_chunk",
         "load_target",
         "set_breakpoint",
         "list_breakpoints",
@@ -323,6 +325,15 @@ async def exercise_all(
             {"session_id": main_session, "address": "$rsp", "length": 8},
         )
         require(memory.get("hex"), "stack memory is unreadable")
+        chunk = await runner.call(
+            "heap_chunk",
+            {
+                "session_id": main_session,
+                "address": "$rsp",
+                "data_length": 0,
+            },
+        )
+        require(chunk.get("chunk"), "heap_chunk returned no chunk address")
         await runner.call(
             "write_memory",
             {
