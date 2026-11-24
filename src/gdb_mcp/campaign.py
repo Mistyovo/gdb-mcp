@@ -13,6 +13,8 @@ import re
 import string
 import time
 
+from gdb_mcp.output import strip_ansi
+
 _SECTIONS = ("protections", "libc", "offsets", "primitives", "notes")
 _SECTION_CAP = 64
 _NOTES_CAP = 32
@@ -157,9 +159,11 @@ def campaign_detect(
     return None
 
 
+# pwndbg prints the canary status on a ``Stack:`` line ("No canary found",
+# "Canary found"), not a ``Canary:`` line; accept both spellings.
 _CHECKSEC_FIELDS = (
     ("relro", re.compile(r"RELRO\s*:\s*(.+)", re.IGNORECASE)),
-    ("canary", re.compile(r"Canary\s*:\s*(.+)", re.IGNORECASE)),
+    ("canary", re.compile(r"(?:Canary|Stack)\s*:\s*(.+)", re.IGNORECASE)),
     ("nx", re.compile(r"NX\s*:\s*(.+)", re.IGNORECASE)),
     ("pie", re.compile(r"PIE\s*:\s*(.+)", re.IGNORECASE)),
     ("fortify", re.compile(r"FORTIFY\s*:\s*(.+)", re.IGNORECASE)),
@@ -173,7 +177,7 @@ def parse_checksec(text: str) -> dict[str, dict[str, str]]:
     (callers must report detected=False instead of guessing).
     """
     found: dict[str, dict[str, str]] = {}
-    for raw in (text or "").splitlines():
+    for raw in strip_ansi(text or "").splitlines():
         line = raw.strip()
         if not line:
             continue

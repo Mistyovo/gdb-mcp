@@ -40,6 +40,10 @@ jobs:
       # heap timeline: allocation return capture through libc's inline
       # malloc frame (the probe walks older() to the containing frame)
       - run: bash tests/integration/run_heap_smoke.sh
+      # verify_pc_control: replay a canary at a known offset and pin the
+      # verdict on both a controllable and a non-controllable build; also
+      # pins the canonical-address premise behind the default canary
+      - run: bash tests/integration/run_pc_control_smoke.sh
       # keeps the unsafe gate's command-resolution premises true on every
       # gdb major in the matrix (abbreviations, s/r/p/d, newline injection)
       - run: bash tests/integration/run_unsafe_gate_probe.sh

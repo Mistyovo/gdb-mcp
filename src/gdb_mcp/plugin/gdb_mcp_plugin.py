@@ -2906,7 +2906,10 @@ class Plugin(object):
         target_field = str(params.get("target", "pc"))
         if target_field not in ("pc", "fault_addr"):
             raise PluginError("BAD_PARAMS", "target must be 'pc' or 'fault_addr'")
-        canary_raw = params.get("canary", "0x4142434445464748")
+        # x86-64 canonical addresses sign-extend bit 47; 0x4142... faults
+        # at the call site, before PC can equal the canary (verified on
+        # gdb 18.1 / kali). Default to a canonical 6-byte pattern.
+        canary_raw = params.get("canary", "0x0000414243444546")
         try:
             canary_int = (
                 canary_raw
