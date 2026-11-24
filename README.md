@@ -29,8 +29,8 @@ Most "debugger MCP" projects parse GDB/MI output or scrape terminal screens.
 channel — so pwndbg contexts, pwntools-launched sessions, and reverse-execution
 all just work, with none of the prompt-scraping fragility.
 
-- **Sharp userland surface** — the default `pwn` profile exposes **36 tools**,
-  all aimed at a live Linux userland process (and kept under a CI-enforced
+- **Sharp userland surface** — the default `pwn` profile exposes **17 focused tools**
+  (consolidated from 36, ~5.2k tokens total and bounded by a CI-enforced
   schema byte budget). Static analysis, kernel VMs, and enterprise HTTP stacks
   are deliberately out of scope ([ADR-0001](docs/adr/0001-userland-dynamic-debugging-scope.md)).
 - **Built for pwn, not just debugging** — one-call crash triage & replay,
@@ -105,23 +105,21 @@ io = gdb.debug("./vuln", gdb_args=["-x", "src/gdb_mcp/plugin/gdb_mcp_plugin.py"]
 
 ## Tool Catalog
 
-**36 tools by default** in the `pwn` profile, **12** under
-`GDB_MCP_TOOL_PROFILE=core`, plus **1 experimental tool** (`diff_sessions`,
-behind `--experimental`).
+**17 tools by default** in the `pwn` profile (~5.2k tokens), **10** under
+`GDB_MCP_TOOL_PROFILE=core` (~3.3k tokens), plus **1 experimental tool**
+(`diff_sessions`, behind `--experimental`).
 
 | Profile | Purpose |
 |---|---|
-| `core` | Minimal 12-tool session/execution/state/breakpoint surface |
-| `pwn` (default) | Core + crash triage/replay, heap bins & chunks, checkpoints, policies, campaign, inferior stdio |
+| `core` | Minimal 10-tool session/execution/state/breakpoint/crash surface |
+| `pwn` (default) | Core + heap, checkpoints, policies, campaign, inferior stdio, threads/frames, target loading |
 
 | Group | Tools |
 |---|---|
-| Sessions | `list_sessions` `session_status` `launch_gdb` (`program` or `attach_pid`, optional `stdio="pty"`) `launch_script` `get_process_output` `kill_session` (`force`/`forget`) `get_events` `export_session_script` |
-| Execution & I/O | `execute_command` (raw gdb/pwndbg, multi-line, paginated + spilled to disk) `continue_execution` (`wait`/`with_context`, forward & reverse) `interrupt` (also cancels active policies) `wait_for_stop` `read_result` `send_input` `read_output` |
-| Crash triage | `crash_report` — signal, fault addr, registers, backtrace, disasm, memory at PC/SP/fault, structured memory map (with core-file fallback), plus optional checkpoint replay, minimize, and evidence storage |
-| State | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_thread` `select_frame` `get_memory_map` (live & core-file) `load_target` |
-| Breakpoints | `set_breakpoint` (sw/hw/watch/condition/temporary + `commands`/`auto_continue` probes) `list_breakpoints` `manage_breakpoint` |
-| Pwn workflow | `heap_bins` (pwndbg bins → JSON) `heap_chunk` (glibc chunk header → size/flags/fd/bk/tcache + safe-linking decode, no pwndbg) `checkpoint` (create/list/restore/diff) `run_policy` (`trace` / `heap_arm`·`read`·`disarm` with return pointers / `fuzz_loop` / `crash_check` / `minimize` / `bp_stats` / `verify_pc_control`) `campaign` (state + source-aware cyclic oracle + `protections` checksec parser) |
+| Sessions | `launch_gdb` (`program`, `attach_pid`, or `script` for pwntools; optional `stdio="pty"`) `kill_session` (`force`/`forget`) `session_info` (`list`/`status`/`events`/`output`/`export`) |
+| Execution & I/O | `control_execution` (`continue`/`step`/`next`/`stepi`/`nexti`/`finish`/`until`/`reverse_*`/`wait`/`interrupt`, `with_context=True`) `execute_command` (raw gdb/pwndbg, multi-line, paginated + `result_file` slicing) `inferior_io` (`send`/`read` over pty) |
+| State & Breakpoints | `memory` (`read`/`write`/`map` with core fallback) `registers` (`read`/`write`) `inspect_code` (`disassemble`/`backtrace`/`evaluate`) `thread_frame` (`list_threads`/`select_thread`/`select_frame`) `load_target` (`file`/`core`) `breakpoint` (`set`/`list`/`delete`/`enable`/`disable`) |
+| Crash & Pwn | `crash_report` (triage + optional checkpoint replay/minimize/evidence) `heap` (`bins` via pwndbg / `chunk` standalone with safe-linking decode) `checkpoint` (`create`/`list`/`restore`/`diff`) `run_policy` (`trace`/`heap_arm`·`read`·`disarm`/`fuzz_loop`/`crash_check`/`minimize`/`bp_stats`/`verify_pc_control`) `campaign` (`get`/`set`/`note`/`detect`/`protections`/`pattern`) |
 
 ## Architecture
 

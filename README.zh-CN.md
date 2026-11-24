@@ -7,9 +7,9 @@ MCP 服务器，让大模型（Claude Code / Codex / Cursor 等）驱动 Linux �
 - **gdb 进程内插件**：stdlib-only 单文件插件在 gdb 进程内运行，经 JSON-lines
   TCP 通道回连服务器——pwndbg 上下文、pwntools 会话、反向执行天然可用，
   不解析 GDB/MI，不抓终端 prompt。
-- **聚焦用户态动态调试**：默认 `pwn` 档暴露 **36 个工具**（受 CI schema
-  token 预算约束），只保留驱动活体 Linux 用户态进程所需的能力。静态反编译、
-  内核 VM、宿主侧网络助手、企业级 HTTP/TLS 栈均已按范围守则
+- **聚焦用户态动态调试**：默认 `pwn` 档精简为 **17 个高内聚工具**（从 36 个合并而来，
+  总 schema 仅 ~5.2k tokens，受 CI 字节预算约束），只保留驱动活体 Linux 用户态进程
+  所需的能力。静态反编译、内核 VM、宿主侧网络助手、企业级 HTTP/TLS 栈均已按范围守则
   （[ADR-0001](docs/adr/0001-userland-dynamic-debugging-scope.md)）排除。
 - **原生支持 pwntools**：`gdb.debug()` / `gdb.attach()` 拉起的 gdb 自动回连
   注册，无需改造 pwntools 脚本。
@@ -45,21 +45,19 @@ sudo apt install gdb python3 python3-pip gcc   # pwndbg 可选但推荐
 }
 ```
 
-## 工具一览（默认 `pwn` 档 36 个；`core` 档 12 个；`--experimental` 额外 1 个）
+## 工具一览（默认 `pwn` 档 17 个；`core` 档 10 个；`--experimental` 额外 1 个）
 
 | Profile | 用途 |
 |---|---|
-| `core` | 会话/执行/状态/断点最小面（12 个工具） |
-| `pwn`（默认） | core + 崩溃定位/回放、堆 bins & chunk、checkpoint、委托循环、campaign、inferior stdio |
+| `core` | 最小 10 工具面（会话/执行/状态/断点/崩溃定位） |
+| `pwn`（默认） | core + 堆、checkpoint、委托循环、campaign、inferior stdio、线程/栈帧、目标加载 |
 
 | 类别 | 工具 |
 |---|---|
-| 会话/启动 | `list_sessions` `session_status` `launch_gdb`（`program` 或 `attach_pid`，可选 `stdio="pty"`）`launch_script` `get_process_output` `kill_session`（`force` 杀进程保留记录 / `forget` 删记录）`get_events` `export_session_script` |
-| 执行与 I/O | `execute_command`（raw 透传，支持多行命令、分页与大结果落盘）`continue_execution`（可选 `wait`/`with_context`，支持 reverse）`interrupt`（同时干净取消活动 policy）`wait_for_stop` `read_result` `send_input` `read_output` |
-| 崩溃定位 | `crash_report`（信号/故障地址/寄存器/回溯/反汇编/PC·SP·故障地址内存/内存映射含 core 回退，支持可选 checkpoint 回放、minimize 与证据落盘） |
-| 状态检查 | `read_memory` `write_memory` `read_registers` `write_register` `get_backtrace` `disassemble` `evaluate` `list_threads` `select_thread` `select_frame` `get_memory_map`（活进程 + core）`load_target` |
-| 断点 | `set_breakpoint`（软件/硬件/watch/条件/临时/线程；`commands`+`auto_continue` 可做无人值守探针）`list_breakpoints` `manage_breakpoint` |
-| pwn 工作流 | `heap_bins`（pwndbg `bins` → 结构化 JSON）`heap_chunk`（glibc chunk 头 → size/flags/prev_size/fd/bk/tcache + safe-linking 解码，无需 pwndbg）`checkpoint`（create/list/restore/diff）`run_policy`（`trace` / `heap_arm`·`read`·`disarm` 含返回指针 / `fuzz_loop` / `crash_check` / `minimize` / `bp_stats` / `verify_pc_control`）`campaign`（战役状态 + 按来源归因的 cyclic oracle + `protections` checksec 自动识别 + pattern 生成） |
+| 会话 | `launch_gdb`（`program` / `attach_pid` / `script` pwntools，可选 `stdio="pty"`）`kill_session`（`force`/`forget`）`session_info`（`list`/`status`/`events`/`output`/`export`） |
+| 执行与 I/O | `control_execution`（`continue`/`step`/`next`/`stepi`/`nexti`/`finish`/`until`/`reverse_*`/`wait`/`interrupt`，支持 `with_context`）`execute_command`（raw gdb/pwndbg、多行、分页 + `result_file` 读取）`inferior_io`（`send`/`read`） |
+| 状态与断点 | `memory`（`read`/`write`/`map` 含 core 回退）`registers`（`read`/`write`）`inspect_code`（`disassemble`/`backtrace`/`evaluate`）`thread_frame`（`list_threads`/`select_thread`/`select_frame`）`load_target`（`file`/`core`）`breakpoint`（`set`/`list`/`delete`/`enable`/`disable`） |
+| 崩溃与 Pwn | `crash_report`（一键定位 + 可选 checkpoint 回放/最小化/证据落盘）`heap`（`bins` pwndbg / `chunk` 独立解码含 safe-linking）`checkpoint`（`create`/`list`/`restore`/`diff`）`run_policy`（`trace`/`heap_arm`·`read`·`disarm`/`fuzz_loop`/`crash_check`/`minimize`/`bp_stats`/`verify_pc_control`）`campaign`（`get`/`set`/`note`/`detect`/`protections`/`pattern`） |
 
 实验工具（仅 CLI `--experimental` 开启）：`diff_sessions`。
 

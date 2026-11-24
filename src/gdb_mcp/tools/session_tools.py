@@ -1,4 +1,4 @@
-"""Session management / inspection tools."""
+"""Session lifecycle and inspection tools."""
 
 from __future__ import annotations
 
@@ -18,120 +18,96 @@ from .registry import tool
 
 
 @tool(core=True)
-def list_sessions(ctx: Context) -> dict:
-    """List all known sessions (gdb plugin connections and launched
-    processes) with their state."""
-    sessions = []
-    for session in registry_from(ctx).list_all():
-        sessions.append(session.info())
-    return {"sessions": sessions}
-
-
-@tool()
-def session_status(session_id: str | None = None, ctx: Context = None) -> dict:
-    """Detailed status of one gdb session: state, inferior info,
-    last stop reason."""
-    session = resolve_gdb(ctx, session_id)
-    info = session.info()
-    info["uptime_sec"] = round(
-        time.monotonic() - (session.connected_at or session.created_at), 1
-    )
-    info["exited_code"] = session.exited_code
-    return info
-
-
-@tool(core=True)
-def get_events(
+async def session_info(
+    action: str = "list",
+    tail_lines: int = 200,
     last: int = 20,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Recent session events (connected / stop / running / exited /
-    prompt / disconnected), oldest first, each with a monotonic seq.
-    Use this to catch events that happened between other tool calls
-    instead of re-polling state."""
-    if isinstance(last, bool) or not isinstance(last, int) or not (1 <= last <= 100):
-        raise ValueError("last must be an int between 1 and 100")
-    session = resolve_any(ctx, session_id)
-    return {
-        "session_id": session.session_id,
-        "state": session.state,
-        "events": session.recent_events(last),
-        "total_recorded": session.event_seq,
-        "stored": len(session.event_log),
-    }
-
-
-@tool(capability="host")
-def export_session_script(
-    session_id: str | None = None, ctx: Context = None
-) -> dict:
-    """Compile the session's journal into a deterministic, replayable
-    gdbscript (state-mutating and control-flow operations only; pure
-    reads and plugin-specific checkpoint ops are skipped, with
-    counters). This is the audit artifact: run it under plain gdb to
-    reproduce what was done — no gdb-mcp required."""
-    session = resolve_gdb(ctx, session_id)
-    if session.journal is None or len(session.journal) == 0:
-        raise GdbMcpError(
-            "NO_JOURNAL", "session has no journal entries yet"
+    """Inspect gdb-mcp sessions. Actions:
+    - list: all sessions with state/arch/inferior/last_stop.
+    - status: detailed status + uptime + exited_code for one session.
+    - events: recent events (connected/stop/running/exited/prompt, last=1..100).
+    - output: tail stdout/stderr log of a launched session (tail_lines).
+    - export: compile the session journal into a replayable gdbscript."""
+    if action == "list":
+        return {"sessions": [s.info() for s in registry_from(ctx).list_all()]}
+    if action == "status":
+        session = resolve_gdb(ctx, session_id)
+        info = session.info()
+        info["uptime_sec"] = round(
+            time.monotonic() - (session.connected_at or session.created_at), 1
         )
-    launch = session.launch_info or {}
-    meta = {
-        "session_id": session.session_id,
-        "inferior": (session.hello or {}).get("inferior"),
-        "program": launch.get("program"),
-        "args": launch.get("args"),
-        "cwd": launch.get("cwd"),
-    }
-    script, stats = compile_gdbscript(meta, session.journal.entries())
-    cfg = config_from(ctx)
-    out_dir = cfg.log_dir / "scripts"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / ("%s.gdb" % session.session_id)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(script)
-    return {
-        "session_id": session.session_id,
-        "path": str(path),
-        "total_lines": script.count("\n"),
-        "journal_entries": len(session.journal),
-        **stats,
-        "script": script,
-    }
-
-
-@tool()
-async def get_process_output(
-    tail_lines: int = 200,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Tail the stdout/stderr log of a launched session (gdb or
-    script). Requires the session to have been started by launch_gdb /
-    launch_script."""
-    session = resolve_any(ctx, session_id)
-    if not session.log_file:
-        raise GdbMcpError(
-            "NO_LOG",
-            "session %r has no log file (it was not launched by this server)"
-            % session.session_id,
-        )
-    try:
-        output, truncated = await asyncio.to_thread(
-            tail_text_file, session.log_file, tail_lines
-        )
-    except OSError as exc:
-        raise GdbMcpError("NO_LOG", "cannot read log: %s" % exc)
-    return {
-        "session_id": session.session_id,
-        "log_file": session.log_file,
-        "output": output,
-        "truncated": truncated,
-        "running": (
-            getattr(session.proc, "returncode", None) is None
-            if session.proc is not None
-            else session.state not in (DISCONNECTED, RESERVED)
-        ),
-    }
+        info["exited_code"] = session.exited_code
+        return info
+    if action == "events":
+        if isinstance(last, bool) or not isinstance(last, int) or not (1 <= last <= 100):
+            raise ValueError("last must be an int between 1 and 100")
+        session = resolve_any(ctx, session_id)
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "events": session.recent_events(last),
+            "total_recorded": session.event_seq,
+            "stored": len(session.event_log),
+        }
+    if action == "output":
+        session = resolve_any(ctx, session_id)
+        if not session.log_file:
+            raise GdbMcpError(
+                "NO_LOG",
+                "session %r has no log file (not launched by this server)"
+                % session.session_id,
+            )
+        try:
+            output, truncated = await asyncio.to_thread(
+                tail_text_file, session.log_file, tail_lines
+            )
+        except OSError as exc:
+            raise GdbMcpError("NO_LOG", "cannot read log: %s" % exc)
+        return {
+            "session_id": session.session_id,
+            "log_file": session.log_file,
+            "output": output,
+            "truncated": truncated,
+            "running": (
+                getattr(session.proc, "returncode", None) is None
+                if session.proc is not None
+                else session.state not in (DISCONNECTED, RESERVED)
+            ),
+        }
+    if action == "export":
+        cfg = config_from(ctx)
+        if cfg.readonly:
+            raise GdbMcpError("READONLY", "export is disabled in --readonly mode")
+        session = resolve_gdb(ctx, session_id)
+        if session.journal is None or len(session.journal) == 0:
+            raise GdbMcpError("NO_JOURNAL", "session has no journal entries yet")
+        launch = session.launch_info or {}
+        meta = {
+            "session_id": session.session_id,
+            "inferior": (session.hello or {}).get("inferior"),
+            "program": launch.get("program"),
+            "args": launch.get("args"),
+            "cwd": launch.get("cwd"),
+        }
+        script, stats = compile_gdbscript(meta, session.journal.entries())
+        out_dir = cfg.log_dir / "scripts"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / ("%s.gdb" % session.session_id)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        return {
+            "session_id": session.session_id,
+            "path": str(path),
+            "total_lines": script.count("\n"),
+            "journal_entries": len(session.journal),
+            **stats,
+            "script": script,
+        }
+    raise GdbMcpError(
+        "BAD_PARAMS",
+        "action must be one of list, status, events, output, export",
+    )

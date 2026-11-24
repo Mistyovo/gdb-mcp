@@ -121,8 +121,8 @@ class TestDocumentedCounts:
     into BOTH READMEs, and enforce the default-profile schema token
     budget so tool definitions never silently bloat."""
 
-    #: default pwn-profile schema byte budget (~6.5k tokens at ~3.5 chars/tok)
-    PWN_SCHEMA_BYTE_BUDGET = 24_000
+    #: default pwn-profile schema byte budget (~5.5k tokens)
+    PWN_SCHEMA_BYTE_BUDGET = 17_000
 
     @staticmethod
     def _counts():
@@ -139,7 +139,7 @@ class TestDocumentedCounts:
 
     def test_declared_tool_counts(self):
         # (total, experimental, core, pwn-default)
-        assert self._counts() == (37, 1, 12, 36)
+        assert self._counts() == (18, 1, 10, 17)
 
     def test_pwn_schema_within_token_budget(self, tmp_path):
         import json

@@ -32,16 +32,16 @@ def build_app(config: Config, registry: SessionRegistry) -> FastMCP:
         lifespan=_lifespan,
         instructions=(
             "gdb-mcp v%s drives local Linux userland gdb sessions "
-            "(pwndbg-aware). Start with launch_gdb(program=...) or "
-            "launch_gdb(attach_pid=...), or launch_script for pwntools. "
-            "One-call stop inspection: continue_execution(wait=True, "
-            "with_context=True); deeper triage/replay: crash_report; "
-            "missed events: get_events. Pwn workflow: heap_bins (pwndbg), "
-            "heap_chunk (no pwndbg), checkpoint(create/restore/diff), "
-            "run_policy(trace|heap_arm|heap_read|heap_disarm|fuzz_loop|"
-            "crash_check|minimize|bp_stats|verify_pc_control), campaign "
-            "(state + cyclic oracle + protections), send_input/read_output "
-            "for inferior stdio, and export_session_script."
+            "(pwndbg-aware). 17 focused tools: launch_gdb (program/attach_pid/"
+            "script), kill_session, session_info (list/status/events/output/"
+            "export), control_execution (continue/step/next/finish/until/"
+            "reverse_*/wait/interrupt, with_context=True), execute_command "
+            "(raw gdb/pwndbg + result_file slicing), inferior_io (send/read), "
+            "memory (read/write/map), registers (read/write), inspect_code "
+            "(disassemble/backtrace/evaluate), thread_frame, load_target, "
+            "breakpoint (set/list/delete/enable/disable), crash_report "
+            "(triage + optional replay/minimize), heap (bins/chunk), "
+            "checkpoint, run_policy, and campaign."
         )
         % __version__,
     )

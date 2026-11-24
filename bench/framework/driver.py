@@ -33,6 +33,55 @@ class ToolFailure(DriverError):
         self.tool = tool
 
 
+_TOOL_ALIASES: dict[str, tuple[str, dict[str, Any]]] = {
+    "list_sessions": ("session_info", {"action": "list"}),
+    "session_status": ("session_info", {"action": "status"}),
+    "get_events": ("session_info", {"action": "events"}),
+    "get_process_output": ("session_info", {"action": "output"}),
+    "export_session_script": ("session_info", {"action": "export"}),
+    "launch_script": ("launch_gdb", {}),
+    "continue_execution": ("control_execution", {}),
+    "wait_for_stop": ("control_execution", {"action": "wait"}),
+    "interrupt": ("control_execution", {"action": "interrupt"}),
+    "read_memory": ("memory", {"action": "read"}),
+    "write_memory": ("memory", {"action": "write"}),
+    "get_memory_map": ("memory", {"action": "map"}),
+    "read_registers": ("registers", {"action": "read"}),
+    "write_register": ("registers", {"action": "write"}),
+    "disassemble": ("inspect_code", {"action": "disassemble"}),
+    "get_backtrace": ("inspect_code", {"action": "backtrace"}),
+    "evaluate": ("inspect_code", {"action": "evaluate"}),
+    "list_threads": ("thread_frame", {"action": "list_threads"}),
+    "select_thread": ("thread_frame", {"action": "select_thread"}),
+    "select_frame": ("thread_frame", {"action": "select_frame"}),
+    "set_breakpoint": ("breakpoint", {"action": "set"}),
+    "list_breakpoints": ("breakpoint", {"action": "list"}),
+    "manage_breakpoint": ("breakpoint", {}),
+    "heap_bins": ("heap", {"action": "bins"}),
+    "heap_chunk": ("heap", {"action": "chunk"}),
+    "send_input": ("inferior_io", {"action": "send"}),
+    "read_output": ("inferior_io", {"action": "read"}),
+}
+
+
+def _normalize_tool_call(
+    tool: str, arguments: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Map legacy fine-grained tool names used by bench generators onto
+    the consolidated 17-tool surface."""
+    alias = _TOOL_ALIASES.get(tool)
+    if alias is None:
+        return tool, dict(arguments)
+    target, defaults = alias
+    merged = dict(defaults)
+    merged.update(arguments)
+    if tool == "continue_execution" and "mode" in merged:
+        merged["action"] = merged.pop("mode")
+    if tool == "continue_execution" and "wait" not in merged:
+        merged["wait"] = False
+    return target, merged
+
+
 class McpDriver:
     """Spawns `python -m gdb_mcp` over stdio and exposes typed tool calls."""
 
@@ -134,8 +183,9 @@ class McpDriver:
     async def call(self, tool: str, arguments: dict[str, Any] | None = None) -> dict:
         if self._session is None:
             raise DriverError("driver not started (use async with)")
+        tool, arguments = _normalize_tool_call(tool, arguments or {})
         started = time.perf_counter()
-        result = await self._session.call_tool(tool, arguments or {})
+        result = await self._session.call_tool(tool, arguments)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.call_latencies_ms.setdefault(tool, []).append(elapsed_ms)
         if result.isError:

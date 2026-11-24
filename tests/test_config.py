@@ -210,5 +210,6 @@ class TestCliOverridesDoNotEraseEnv:
 
         cfg = self._config([], tmp_path)
         names = set(registered_tools(build_app(cfg, SessionRegistry(cfg))))
-        assert not names & {"write_memory", "write_register"}
-        assert "read_memory" in names
+        assert not names & {"memory", "registers", "execute_command", "launch_gdb"}
+        assert "session_info" in names
+        assert "inspect_code" in names

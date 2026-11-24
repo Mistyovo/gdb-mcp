@@ -1,4 +1,4 @@
-"""Launch tools: run gdb / pwntools scripts inside WSL2."""
+"""Launch and session-termination tools."""
 
 from __future__ import annotations
 
@@ -11,9 +11,6 @@ from gdb_mcp.sessions import DISCONNECTED, EXITED, RESERVED, Session
 from ._common import config_from, launcher_from, registry_from, resolve_any
 from .registry import tool
 
-#: gdb argv options that run a command / source a file before the inferior
-#: starts. They reach the same debugger-escape surface as execute_command,
-#: so they pass the same gate.
 _EVAL_FLAGS = frozenset(
     {"-ex", "-e", "--eval-command", "-iex", "--init-eval-command"}
 )
@@ -21,13 +18,7 @@ _FILE_FLAGS = frozenset({"-x", "--command", "-ix", "--init-command"})
 
 
 def _unsafe_launch_arg(gdb_args: list[str] | None) -> str | None:
-    """The first startup argument that escapes the debugger, if any.
-
-    ``-x/--command`` sources an arbitrary file (equivalent to gdb's
-    ``source``) and cannot be inspected here, so it is gated as a whole;
-    inline eval flags are checked with the same abbreviation-aware rules
-    as execute_command.
-    """
+    """The first startup argument that escapes the debugger, if any."""
     args = list(gdb_args or [])
     index = 0
     while index < len(args):
@@ -53,7 +44,6 @@ def _disconnected(session: Session) -> bool:
 
 
 def _with_attach(gdb_args: list[str] | None, attach_pid: int | None) -> list[str] | None:
-    """Prepend ``-p PID`` so gdb attaches before the plugin loads."""
     if attach_pid is None:
         return gdb_args
     return ["-p", str(attach_pid)] + list(gdb_args or [])
@@ -63,6 +53,8 @@ def _with_attach(gdb_args: list[str] | None, attach_pid: int | None) -> list[str
 async def launch_gdb(
     program: str | None = None,
     attach_pid: int | None = None,
+    script: str | None = None,
+    python: str = "python3",
     args: list[str] | None = None,
     gdb_args: list[str] | None = None,
     cwd: str | None = None,
@@ -73,10 +65,56 @@ async def launch_gdb(
     attach_timeout_ms: int | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Launch gdb with the MCP plugin loaded (WSL2 or native Linux).
-    Pass `program` (or `attach_pid` to attach to a running process).
-    With `run=True`, starts immediately. Pass `stdio="pty"` to bind a
-    pty for `send_input`/`read_output` before running."""
+    """Launch gdb (with MCP plugin), attach to a PID, or run a pwntools
+    Python script. Pass one of:
+    - `program`: binary path (`run=True` to start immediately,
+      `stdio="pty"` to bind a pty for `inferior_io`).
+    - `attach_pid`: attach to a running userland PID.
+    - `script`: absolute path to a pwntools script (returns
+      `script_session_id` + `gdb_session_id`)."""
+    if script is not None:
+        if program is not None or attach_pid is not None:
+            raise GdbMcpError(
+                "BAD_PARAMS", "pass only one of program, attach_pid, or script"
+            )
+        cfg = config_from(ctx)
+        launcher = launcher_from(ctx)
+        script_session, gdb_session = await launcher.launch_script(
+            script=script,
+            python=python,
+            args=args,
+            cwd=cwd,
+            env=env,
+            timeout_ms=(
+                cfg.attach_timeout_ms
+                if attach_timeout_ms is None
+                else attach_timeout_ms
+            ),
+            distro=distro,
+        )
+        result = {
+            "script_session_id": script_session.session_id,
+            "script_state": script_session.state,
+            "script_returncode": script_session.proc_returncode,
+            "gdb_session_id": gdb_session.session_id if gdb_session else None,
+            "log_file": script_session.log_file,
+        }
+        if gdb_session is None:
+            if script_session.state == EXITED:
+                status = "script exited (code %s) without starting gdb" % (
+                    script_session.proc_returncode,
+                )
+            else:
+                status = (
+                    "no gdb session appeared before the attach timeout; "
+                    "script is still running"
+                )
+            result["note"] = "%s; script log tail: %s" % (
+                status,
+                launcher.log_tail(script_session.log_file),
+            )
+        return result
+
     if stdio not in (None, "pty"):
         raise GdbMcpError("BAD_PARAMS", "stdio must be None or 'pty'")
     if attach_pid is not None:
@@ -143,75 +181,16 @@ async def launch_gdb(
     return result
 
 
-@tool(core=True, capability="host")
-async def launch_script(
-    script: str,
-    python: str = "python3",
-    args: list[str] | None = None,
-    cwd: str | None = None,
-    env: dict[str, str] | None = None,
-    distro: str | None = None,
-    attach_timeout_ms: int | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Launch a Python (typically pwntools) script inside WSL2. `script`
-    must be an absolute Windows or WSL file path; inline code is not
-    supported. If the script starts gdb with the MCP plugin loaded (via
-    gdb_args/gdbscript), the new gdb session id is returned once it
-    registers. A script that exits without gdb returns immediately with
-    its state, return code, and log tail."""
-    cfg = config_from(ctx)
-    launcher = launcher_from(ctx)
-    script_session, gdb_session = await launcher.launch_script(
-        script=script,
-        python=python,
-        args=args,
-        cwd=cwd,
-        env=env,
-        timeout_ms=(
-            cfg.attach_timeout_ms
-            if attach_timeout_ms is None
-            else attach_timeout_ms
-        ),
-        distro=distro,
-    )
-    result = {
-        "script_session_id": script_session.session_id,
-        "script_state": script_session.state,
-        "script_returncode": script_session.proc_returncode,
-        "gdb_session_id": gdb_session.session_id if gdb_session else None,
-        "log_file": script_session.log_file,
-    }
-    if gdb_session is None:
-        if script_session.state == EXITED:
-            status = "script exited (code %s) without starting gdb" % (
-                script_session.proc_returncode,
-            )
-        else:
-            status = (
-                "no gdb session appeared before the attach timeout; "
-                "script is still running"
-            )
-        result["note"] = (
-            "%s; script log tail: %s"
-            % (status, launcher.log_tail(script_session.log_file))
-        )
-    return result
-
-
-@tool(capability="admin")
+@tool(core=True, capability="admin")
 async def kill_session(
     force: bool = False,
     forget: bool = False,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """End a session. For gdb, the default detaches the plugin and keeps
-    gdb (and the session record) alive, so a later re-hello revives the
-    same session id. force=True terminates the gdb process tree but keeps
-    the session record (state disconnected, reaped by GC); forget=True
-    drops the record as well. Script sessions are terminated and
-    removed."""
+    """End a session. Default detaches plugin and keeps gdb/record alive;
+    `force=True` terminates the gdb process tree (keeping a disconnected
+    record until GC); `forget=True` also drops the record."""
     registry = registry_from(ctx)
     session = resolve_any(ctx, session_id)
     if session.kind == "gdb":
@@ -232,16 +211,11 @@ async def kill_session(
             }
         if session.writer is not None:
             await session.send_quit(kill_gdb=force)
-            # the plugin closes the socket on shutdown: wait for that
-            # transition rather than sampling for it
             await session.wait_for_state(_disconnected, 2.0)
         if force and session.launched:
             await launcher_from(ctx).pkill_marker(
                 session.session_id, True, distro=session.distro
             )
-        # force kills the process; only forget drops the record. A
-        # force-killed session stays as a DISCONNECTED history entry
-        # until GC, matching the docstring and the restore/audit flow.
         keep_record = not forget
         if not keep_record:
             registry.remove(session.session_id)

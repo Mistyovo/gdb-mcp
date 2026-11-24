@@ -1,4 +1,5 @@
-"""Inferior-state inspection tools (memory, registers, code, threads)."""
+"""Inferior state inspection and mutation tools (memory, registers, code,
+threads/frames, mappings, target loading)."""
 
 from __future__ import annotations
 
@@ -14,228 +15,160 @@ _MAX_FRAMES = 4096
 _MAX_DISASM = 4096
 
 
-@tool(core=True)
-async def read_memory(
-    address: str | int,
+@tool(core=True, capability="target")
+async def memory(
+    action: str = "read",
+    address: str | int | None = None,
     length: int = 64,
+    hex: str | None = None,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Read raw memory from the inferior. `address` may be an int, a
-    hex string ('0x401000'), or a gdb expression ('main+0x10',
-    '&puts@got'). Returns hex, printable-ascii, and unreadable ranges."""
+    """Inspect or patch inferior memory. Actions:
+    - read: read `length` bytes at `address` (int, hex, or gdb expr).
+    - write: write raw `hex` bytes at `address`.
+    - map: structured memory mappings (live `info proc mappings` with
+      core-file section fallback)."""
     cfg = config_from(ctx)
-    if not isinstance(length, int) or length < 1 or length > cfg.max_mem_read:
-        raise ValueError("length must be between 1 and %d" % cfg.max_mem_read)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    return await session.request(
-        "read_mem",
-        {"addr": address, "length": length},
-        timeout=cfg.request_timeout,
-    )
-
-
-@tool(capability="target")
-async def write_memory(
-    address: str | int,
-    hex: str,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Write raw bytes (given as a hex string, e.g. '9090c3' or
-    '90 90 c3') to the inferior's memory."""
-    try:
-        data = hex_to_bytes(hex)  # validate early for a clean error
-    except ValueError as exc:
-        raise GdbMcpError("BAD_PARAMS", str(exc)) from None
-    cfg = config_from(ctx)
-    if not data or len(data) > cfg.max_mem_read:
-        raise GdbMcpError(
-            "BAD_PARAMS",
-            "write length must be between 1 and %d bytes" % cfg.max_mem_read,
+    if action == "map":
+        result = await session.request("mem_map", {}, timeout=cfg.request_timeout)
+        segments = parse_proc_mappings(result.get("output", ""))
+        return {
+            "segments": segments,
+            "count": len(segments),
+            "total_lines": result.get("total_lines"),
+            "truncated": bool(result.get("truncated", False)),
+        }
+    if address is None:
+        raise GdbMcpError("BAD_PARAMS", "address is required for %s" % action)
+    if action == "read":
+        if isinstance(length, bool) or not isinstance(length, int) or not (1 <= length <= cfg.max_mem_read):
+            raise ValueError("length must be between 1 and %d" % cfg.max_mem_read)
+        return await session.request(
+            "read_mem", {"addr": address, "length": length}, timeout=cfg.request_timeout
         )
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    return await session.request(
-        "write_mem",
-        {"addr": address, "hex": hex},
-        timeout=cfg.request_timeout,
-    )
-
-
-@tool()
-async def read_registers(
-    names: list[str] | None = None,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Read register values (all general-purpose registers by
-    default, or the named subset)."""
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    params = {"names": names} if names else {}
-    return await session.request(
-        "regs", params, timeout=config_from(ctx).request_timeout
-    )
-
-
-@tool(capability="target")
-async def write_register(
-    name: str,
-    value: str,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Write a register. `value` is a gdb expression
-    (e.g. '0x401000', '$rax+8', 'main')."""
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    return await session.request(
-        "set_reg",
-        {"name": name, "value": value},
-        timeout=config_from(ctx).request_timeout,
-    )
-
-
-@tool()
-async def get_backtrace(
-    max_frames: int = 64,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Stack backtrace: pc, function name, source file/line per frame."""
-    if (
-        not isinstance(max_frames, int)
-        or isinstance(max_frames, bool)
-        or not (1 <= max_frames <= _MAX_FRAMES)
-    ):
-        raise GdbMcpError(
-            "BAD_PARAMS", "max_frames must be between 1 and %d" % _MAX_FRAMES
+    if action == "write":
+        if cfg.readonly:
+            raise GdbMcpError("READONLY", "memory write is disabled in --readonly mode")
+        try:
+            data = hex_to_bytes(hex or "")
+        except ValueError as exc:
+            raise GdbMcpError("BAD_PARAMS", str(exc)) from None
+        if not data or len(data) > cfg.max_mem_read:
+            raise GdbMcpError(
+                "BAD_PARAMS",
+                "write length must be between 1 and %d bytes" % cfg.max_mem_read,
+            )
+        return await session.request(
+            "write_mem", {"addr": address, "hex": hex}, timeout=cfg.request_timeout
         )
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    return await session.request(
-        "backtrace",
-        {"max_frames": max_frames},
-        timeout=config_from(ctx).request_timeout,
-    )
-
-
-@tool()
-async def disassemble(
-    start: str | int | None = None,
-    count: int = 16,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Disassemble `count` instructions at `start` (address, gdb
-    expression, function name — or the current PC when omitted)."""
-    if (
-        not isinstance(count, int)
-        or isinstance(count, bool)
-        or not (1 <= count <= _MAX_DISASM)
-    ):
-        raise GdbMcpError(
-            "BAD_PARAMS", "count must be between 1 and %d" % _MAX_DISASM
-        )
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    params = {"count": count}
-    if start is not None:
-        params["start"] = start
-    return await session.request(
-        "disasm", params, timeout=config_from(ctx).request_timeout
-    )
+    raise GdbMcpError("BAD_PARAMS", "action must be read, write, or map")
 
 
 @tool(core=True, capability="target")
-async def evaluate(
-    expression: str,
+async def registers(
+    action: str = "read",
+    names: list[str] | None = None,
+    name: str | None = None,
+    value: str | None = None,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Evaluate a gdb expression against the live inferior (PIE-aware):
-    'main', '&puts@got', '$rax+8', '*(char**)0x404000'."""
+    """Read or write inferior registers.
+    - read: all GP registers (or `names` subset).
+    - write: set register `name` to gdb expression `value`."""
+    cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    return await session.request(
-        "evaluate",
-        {"expression": expression},
-        timeout=config_from(ctx).request_timeout,
-    )
+    if action == "read":
+        params = {"names": names} if names else {}
+        return await session.request("regs", params, timeout=cfg.request_timeout)
+    if action == "write":
+        if cfg.readonly:
+            raise GdbMcpError("READONLY", "register write is disabled in --readonly mode")
+        if not name or value is None:
+            raise GdbMcpError("BAD_PARAMS", "write requires name and value")
+        return await session.request(
+            "set_reg", {"name": name, "value": value}, timeout=cfg.request_timeout
+        )
+    raise GdbMcpError("BAD_PARAMS", "action must be read or write")
 
 
-@tool()
-async def list_threads(
+@tool(core=True)
+async def inspect_code(
+    action: str = "disassemble",
+    start: str | int | None = None,
+    count: int = 16,
+    max_frames: int = 64,
+    expression: str | None = None,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """List inferior threads and which one is selected."""
+    """Inspect code, stack, or expressions against the stopped inferior.
+    - disassemble: `count` instructions at `start` (default: current PC).
+    - backtrace: stack frames up to `max_frames`.
+    - evaluate: PIE-aware gdb expression (`expression`)."""
+    cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    return await session.request(
-        "threads", {}, timeout=config_from(ctx).request_timeout
-    )
+    if action == "disassemble":
+        if isinstance(count, bool) or not isinstance(count, int) or not (1 <= count <= _MAX_DISASM):
+            raise GdbMcpError("BAD_PARAMS", "count must be between 1 and %d" % _MAX_DISASM)
+        params: dict = {"count": count}
+        if start is not None:
+            params["start"] = start
+        return await session.request("disasm", params, timeout=cfg.request_timeout)
+    if action == "backtrace":
+        if isinstance(max_frames, bool) or not isinstance(max_frames, int) or not (1 <= max_frames <= _MAX_FRAMES):
+            raise GdbMcpError("BAD_PARAMS", "max_frames must be between 1 and %d" % _MAX_FRAMES)
+        return await session.request(
+            "backtrace", {"max_frames": max_frames}, timeout=cfg.request_timeout
+        )
+    if action == "evaluate":
+        if cfg.readonly:
+            raise GdbMcpError("READONLY", "evaluate is disabled in --readonly mode")
+        if not expression:
+            raise GdbMcpError("BAD_PARAMS", "expression is required")
+        return await session.request(
+            "evaluate", {"expression": expression}, timeout=cfg.request_timeout
+        )
+    raise GdbMcpError("BAD_PARAMS", "action must be disassemble, backtrace, or evaluate")
 
 
 @tool(capability="debug")
-async def select_thread(
-    number: int,
+async def thread_frame(
+    action: str = "list_threads",
+    number: int | None = None,
+    level: int | None = None,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Select an inferior thread by gdb thread number (see list_threads)
-    for subsequent register/backtrace/frame inspection."""
-    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
-        raise GdbMcpError("BAD_PARAMS", "number must be a positive int")
+    """Inspect or switch threads and stack frames.
+    - list_threads: list inferior threads and the selected one.
+    - select_thread: switch to thread `number`.
+    - select_frame: switch to stack frame `level` (0 = innermost)."""
+    cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    return await session.request(
-        "thread_select",
-        {"number": number},
-        timeout=config_from(ctx).request_timeout,
+    if action == "list_threads":
+        return await session.request("threads", {}, timeout=cfg.request_timeout)
+    if action == "select_thread":
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise GdbMcpError("BAD_PARAMS", "number must be a positive int")
+        return await session.request(
+            "thread_select", {"number": number}, timeout=cfg.request_timeout
+        )
+    if action == "select_frame":
+        if isinstance(level, bool) or not isinstance(level, int) or level < 0:
+            raise GdbMcpError("BAD_PARAMS", "level must be a non-negative int")
+        return await session.request(
+            "frame_select", {"level": level}, timeout=cfg.request_timeout
+        )
+    raise GdbMcpError(
+        "BAD_PARAMS", "action must be list_threads, select_thread, or select_frame"
     )
-
-
-@tool(capability="debug")
-async def select_frame(
-    level: int,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Select a stack frame by level (0 = innermost) for subsequent
-    register/memory/local inspection."""
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    return await session.request(
-        "frame_select",
-        {"level": level},
-        timeout=config_from(ctx).request_timeout,
-    )
-
-
-@tool()
-async def get_memory_map(
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Memory mappings of the inferior as structured segments
-    (start/end hex, size bytes, offset, perms, objfile), parsed from
-    `info proc mappings` — works without pwndbg. For the raw text use
-    execute_command('info proc mappings')."""
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    result = await session.request(
-        "mem_map", {}, timeout=config_from(ctx).request_timeout
-    )
-    segments = parse_proc_mappings(result.get("output", ""))
-    return {
-        "segments": segments,
-        "count": len(segments),
-        "total_lines": result.get("total_lines"),
-        "truncated": bool(result.get("truncated", False)),
-    }
 
 
 @tool(capability="debug")
@@ -245,9 +178,8 @@ async def load_target(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Load a program (`file <path>`) or core dump (`core-file
-    <path>`) into the gdb session. For gdb sessions started without
-    an inferior."""
+    """Load an executable (`file <path>`) or core dump (`core=True`,
+    `core-file <path>`) into the gdb session."""
     session = resolve_gdb(ctx, session_id)
     verb = "core" if core else "file"
     return await session.request(

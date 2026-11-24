@@ -1,5 +1,5 @@
-"""Pwn-workflow tools: structured heap bins, chunk decoding, checkpoints
-and delegated policies."""
+"""Pwn-workflow tools: glibc heap inspection, checkpoints, and delegated
+native-speed policies."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ _SNAPSHOT_ACTIONS = ("create", "list", "restore", "diff")
 
 
 def _read_bytes(result: dict) -> bytes:
-    """The bytes a read_mem response actually covers from its start."""
     hex_data = result.get("hex")
     if hex_data:
         return bytes.fromhex(hex_data)
@@ -32,117 +31,98 @@ def _read_bytes(result: dict) -> bytes:
 
 
 @tool()
-async def heap_bins(
+async def heap(
+    action: str = "bins",
+    address: str | int | None = None,
+    user_ptr: bool = False,
+    data_length: int = 32,
     include_raw: bool = False,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Structured glibc heap bins (tcachebins/fastbins/unsorted/small/
-    large, each a size -> chunk-addresses map) parsed from pwndbg's
-    `bins` command. Requires pwndbg in this gdb session. When the
-    output shape is not recognized, parsed=False and the raw text is
-    returned for manual reading."""
+    """Inspect glibc heap state. Actions:
+    - bins: structured tcache/fast/unsorted/small/large bins (requires pwndbg).
+    - chunk: decode one 64-bit malloc_chunk at `address` (no pwndbg; set
+      `user_ptr=True` for a malloc return pointer; safe-linking aware)."""
     cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    if not (session.hello or {}).get("pwndbg"):
-        raise GdbMcpError(
-            "NO_PWNDBG",
-            "heap_bins requires pwndbg; start gdb with pwndbg loaded "
-            "or use execute_command('bins')",
-        )
-    result = await session.request(
-        "eval", {"command": "bins"}, timeout=cfg.request_timeout
-    )
-    parsed = parse_pwndbg_bins(result.get("output", ""))
-    parsed["truncated"] = bool(result.get("truncated", False))
-    if not parsed["parsed"] or include_raw:
-        parsed["output"] = result.get("output", "")
-    return parsed
-
-
-@tool()
-async def heap_chunk(
-    address: str | int,
-    user_ptr: bool = False,
-    data_length: int = 32,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Decode one glibc malloc chunk (x86_64 layout, no pwndbg).
-    Pass chunk header address (or `user_ptr=True` for a malloc return
-    pointer). Returns size/flags/prev_size, next-chunk PREV_INUSE
-    (`in_use`), fd/bk and safe-linking decoded tcache next when free,
-    plus user-data preview."""
-    if (
-        isinstance(data_length, bool)
-        or not isinstance(data_length, int)
-        or not (0 <= data_length <= 256)
-    ):
-        raise GdbMcpError(
-            "BAD_PARAMS", "data_length must be between 0 and 256"
-        )
-    cfg = config_from(ctx)
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    expr = str(address)
-    if user_ptr:
-        expr = "(char*)(%s) - 16" % expr
-    header_resp = await session.request(
-        "read_mem", {"addr": expr, "length": 32}, timeout=cfg.request_timeout
-    )
-    header = _read_bytes(header_resp)
-    if len(header) < 16:
-        raise GdbMcpError(
-            "MEMORY_ERROR",
-            "cannot read a 16-byte chunk header at %s" % address,
-        )
-    chunk_addr = int(header_resp.get("addr") or 0)
-    size_field = int.from_bytes(header[8:16], "little")
-    chunk_size = size_field & ~0x7
-
-    next_size = None
-    if chunk_size >= 0x20:
-        next_resp = None
-        try:
-            next_resp = await session.request(
-                "read_mem",
-                {"addr": "0x%x" % (chunk_addr + chunk_size), "length": 8},
-                timeout=cfg.request_timeout,
+    if action == "bins":
+        if not (session.hello or {}).get("pwndbg"):
+            raise GdbMcpError(
+                "NO_PWNDBG",
+                "heap(action='bins') requires pwndbg; start gdb with pwndbg "
+                "or use execute_command('bins')",
             )
-        except GdbMcpError:
-            next_resp = None
-        if next_resp is not None:
-            raw_next = _read_bytes(next_resp)
-            if len(raw_next) >= 8:
-                next_size = raw_next[:8]
-
-    data = None
-    if data_length:
-        try:
-            data_resp = await session.request(
-                "read_mem",
-                {"addr": "0x%x" % (chunk_addr + 16), "length": data_length},
-                timeout=cfg.request_timeout,
-            )
-        except GdbMcpError:
-            data = None
-        else:
-            data = _read_bytes(data_resp)
-
-    parsed = parse_heap_chunk(
-        header[:32],
-        chunk_addr=chunk_addr,
-        next_size=next_size,
-        data=data,
-        data_length=data_length,
-    )
-    parsed["user_ptr"] = bool(user_ptr)
-    if len(header) < 32:
-        parsed["warnings"].append(
-            "only %d header bytes readable; fd/bk unavailable" % len(header)
+        result = await session.request(
+            "eval", {"command": "bins"}, timeout=cfg.request_timeout
         )
-    return parsed
+        parsed = parse_pwndbg_bins(result.get("output", ""))
+        parsed["truncated"] = bool(result.get("truncated", False))
+        if not parsed["parsed"] or include_raw:
+            parsed["output"] = result.get("output", "")
+        return parsed
+    if action == "chunk":
+        if address is None:
+            raise GdbMcpError("BAD_PARAMS", "address is required for action='chunk'")
+        if (
+            isinstance(data_length, bool)
+            or not isinstance(data_length, int)
+            or not (0 <= data_length <= 256)
+        ):
+            raise GdbMcpError("BAD_PARAMS", "data_length must be between 0 and 256")
+        expr = "(char*)(%s) - 16" % address if user_ptr else str(address)
+        header_resp = await session.request(
+            "read_mem", {"addr": expr, "length": 32}, timeout=cfg.request_timeout
+        )
+        header = _read_bytes(header_resp)
+        if len(header) < 16:
+            raise GdbMcpError(
+                "MEMORY_ERROR",
+                "cannot read a 16-byte chunk header at %s" % address,
+            )
+        chunk_addr = int(header_resp.get("addr") or 0)
+        chunk_size = int.from_bytes(header[8:16], "little") & ~0x7
+        next_size = None
+        if chunk_size >= 0x20:
+            try:
+                next_resp = await session.request(
+                    "read_mem",
+                    {"addr": "0x%x" % (chunk_addr + chunk_size), "length": 8},
+                    timeout=cfg.request_timeout,
+                )
+            except GdbMcpError:
+                next_resp = None
+            if next_resp is not None:
+                raw_next = _read_bytes(next_resp)
+                if len(raw_next) >= 8:
+                    next_size = raw_next[:8]
+        data = None
+        if data_length:
+            try:
+                data_resp = await session.request(
+                    "read_mem",
+                    {"addr": "0x%x" % (chunk_addr + 16), "length": data_length},
+                    timeout=cfg.request_timeout,
+                )
+            except GdbMcpError:
+                data = None
+            else:
+                data = _read_bytes(data_resp)
+        parsed = parse_heap_chunk(
+            header[:32],
+            chunk_addr=chunk_addr,
+            next_size=next_size,
+            data=data,
+            data_length=data_length,
+        )
+        parsed["user_ptr"] = bool(user_ptr)
+        if len(header) < 32:
+            parsed["warnings"].append(
+                "only %d header bytes readable; fd/bk unavailable" % len(header)
+            )
+        return parsed
+    raise GdbMcpError("BAD_PARAMS", "action must be bins or chunk")
 
 
 @tool(capability="target")
@@ -168,8 +148,6 @@ async def run_policy(
     check_stopped(session)
     policy_params = dict(params or {})
     policy_params["kind"] = kind
-    # policies loop plugin-side; a large fuzz sweep can legitimately
-    # run for minutes, so the default request timeout does not apply
     result = await session.request(
         "policy",
         policy_params,
@@ -199,13 +177,8 @@ async def checkpoint(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Registers + writable-memory snapshots for hypothesis testing:
-    create a checkpoint, mutate state (payloads, patched metadata),
-    then diff against it or restore it. Actions: create (returns
-    snapshot_id), list, restore (needs snapshot_id), diff (needs
-    snapshot_id; reports changed registers and 16-byte memory rows).
-    Budgets (bytes, defaults 4MiB/segment and 8MiB total) bound the
-    snapshot size."""
+    """Registers + writable-memory snapshots for hypothesis testing.
+    Actions: create, list, restore (snapshot_id), diff (snapshot_id)."""
     if action not in _SNAPSHOT_ACTIONS:
         raise GdbMcpError(
             "BAD_PARAMS",
@@ -234,6 +207,4 @@ async def checkpoint(
         if action == "restore"
         else "snapshot_diff"
     )
-    return await session.request(
-        verb, params, timeout=cfg.request_timeout
-    )
+    return await session.request(verb, params, timeout=cfg.request_timeout)
