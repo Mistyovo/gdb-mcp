@@ -7,7 +7,7 @@ from mcp.server.fastmcp import Context
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.security import is_unsafe_gdb_command
 
-from ._common import audit_from, check_stopped, config_from, resolve_gdb
+from ._common import check_stopped, config_from, resolve_gdb
 from .registry import tool
 
 _BP_TYPES = ("breakpoint", "hw", "watch", "hw_watch")
@@ -50,7 +50,6 @@ async def set_breakpoint(
         if not cfg.allow_unsafe:
             for c in commands:
                 if is_unsafe_gdb_command(c):
-                    audit_from(ctx).record("unsafe_command_blocked", command=c)
                     raise GdbMcpError(
                         "UNSAFE_BLOCKED",
                         "breakpoint command %r can execute code outside the "

@@ -20,19 +20,14 @@ async def campaign(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """The session's exploit-campaign state — what has been
-    established so far (protections, libc leaks, offsets, primitives,
-    notes). Actions: get (full state), set (section/key/value:
-    sections protections|libc|offsets|primitives), note (text),
-    detect (run the cyclic oracle over the last stop's pc/fault/
-    registers: a PC hit is recorded as pc_control, a fault-address hit
-    as fault_addr_controlled, and any other register hit as a generic
-    cyclic_match — never as pc control), pattern (value = requested
-    length; returns a pwntools-compatible cyclic string for payload
-    building). A compact summary is auto-injected into stop responses."""
-    if action not in ("get", "set", "note", "detect", "pattern"):
+    """Session exploit-campaign state (protections, libc, offsets,
+    primitives, notes). Actions: get, set (section/key/value), note
+    (text), detect (cyclic oracle over last stop: PC->pc_control,
+    fault_addr->fault_addr_controlled, reg->cyclic_match), protections
+    (parse pwndbg checksec into protections), pattern (value=length)."""
+    if action not in ("get", "set", "note", "detect", "protections", "pattern"):
         raise ValueError(
-            "action must be one of get, set, note, detect, pattern"
+            "action must be one of get, set, note, detect, protections, pattern"
         )
     session = resolve_gdb(ctx, session_id)
     data = session.campaign
@@ -58,6 +53,37 @@ async def campaign(
             "match": match,
             "primitives": data.get("primitives", {}),
         }
+    if action == "protections":
+        if not (session.hello or {}).get("pwndbg"):
+            return {
+                "session_id": session.session_id,
+                "detected": False,
+                "reason": "pwndbg is not loaded in this session",
+                "protections": data.get("protections", {}),
+            }
+        check_stopped(session)
+        cfg = config_from(ctx)
+        res = await session.request(
+            "eval", {"command": "checksec"}, timeout=cfg.request_timeout
+        )
+        parsed = camp.parse_checksec(res.get("output", ""))
+        if not parsed:
+            return {
+                "session_id": session.session_id,
+                "detected": False,
+                "reason": "checksec output had no recognized protection fields",
+                "protections": data.get("protections", {}),
+            }
+        for pkey, info in parsed.items():
+            camp.campaign_set(
+                data, "protections", pkey, info["value"], evidence=info["evidence"]
+            )
+        registry_from(ctx).save()
+        return {
+            "session_id": session.session_id,
+            "detected": True,
+            "protections": data.get("protections", {}),
+        }
     # pattern
     try:
         count = int(value or 4096)
@@ -70,7 +96,7 @@ async def campaign(
     }
 
 
-@tool()
+@tool(experimental=True)
 async def diff_sessions(
     session_a: str,
     session_b: str,

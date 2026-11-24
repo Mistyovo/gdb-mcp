@@ -1,0 +1,79 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "breakpoint_hit",
+      "spec": {
+        "symbol": "inspect_point"
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "pwn_workflow",
+  "id": "pwn_workflow-0005",
+  "kind": "state",
+  "max_steps": 8,
+  "params": {
+    "alloc_size": 64,
+    "shape": "heap_chunk"
+  },
+  "prompt": "Break at inspect_point and inspect the heap chunk for the allocated pointer g_ptr using heap_chunk.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "pwn",
+    "heap_chunk",
+    "-O3"
+  ],
+  "target": {
+    "binary_sha256": "16365462c05d5cd929a86fe3bb4592decd0f72aaf49d2b1070fe9cedb1e468c2",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O3"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "pwn_workflow_0005",
+    "source": "#include <stdlib.h>\n#include <string.h>\n\nvoid * volatile g_ptr = NULL;\n\n__attribute__((noinline)) void inspect_point(void *p) {\n    g_ptr = p;\n}\n\nint main(void) {\n    void *p = malloc(64);\n    if (!p) return 1;\n    memset(p, 0x41, 64);\n    inspect_point(p);\n    free(p);\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x20f0",
+      "__GNU_EH_FRAME_HDR": "0x2004",
+      "__TMC_END__": "0x4020",
+      "__abi_tag": "0x2118",
+      "__abi_tag$end": "0x2138",
+      "__bss_start": "0x4020",
+      "__data_start": "0x4010",
+      "__do_global_dtors_aux": "0x1130",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4018",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x4020",
+      "_end": "0x4030",
+      "_fini": "0x1188",
+      "_init": "0x1000",
+      "_start": "0x1090",
+      "_start$end": "0x10b2",
+      "completed.0": "0x4020",
+      "completed.0$end": "0x4021",
+      "data_start": "0x4010",
+      "deregister_tm_clones": "0x10c0",
+      "frame_dummy": "0x1170",
+      "g_ptr": "0x4028",
+      "g_ptr$end": "0x4030",
+      "inspect_point": "0x1180",
+      "inspect_point$end": "0x1188",
+      "main": "0x1060",
+      "main$end": "0x108e",
+      "register_tm_clones": "0x10f0"
+    }
+  }
+}

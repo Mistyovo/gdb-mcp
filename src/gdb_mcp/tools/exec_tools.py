@@ -5,11 +5,12 @@ from __future__ import annotations
 from mcp.server.fastmcp import Context
 
 from gdb_mcp.errors import GdbMcpError
+from gdb_mcp.output import hex_to_bytes
 from gdb_mcp.results import load_result_slice, store_result
 from gdb_mcp.security import is_unsafe_gdb_command
 from gdb_mcp.sessions import RUNNING
 
-from ._common import audit_from, check_stopped, config_from, resolve_gdb, validate_page
+from ._common import check_stopped, config_from, resolve_gdb, validate_page
 from .registry import tool
 from .stop_context import collect_stop_context
 
@@ -19,8 +20,6 @@ from .stop_context import collect_stop_context
 from gdb_mcp.protocol import ASYNC_VERBS  # noqa: E402
 
 _MODES = tuple(sorted(ASYNC_VERBS))
-
-_BATCH_LIMIT = 32
 
 
 def _maybe_store_result(config, result: dict) -> dict:
@@ -48,19 +47,14 @@ async def execute_command(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Execute a raw gdb command and return its output. Use for
-    pwndbg-specific commands (vmmap, heap, got, checksec, ropgadget,
-    search, ...) or any other gdb CLI command. Works while the
-    inferior is running (queued until the next stop). Large output
-    should be read in line ranges: pass offset (0-based) and limit to
-    page through; responses carry total_lines and truncated. Outputs
-    exceeding the inline limit are stored on disk — the response then
-    carries result_file/result_sha256 and read_result serves the
-    rest."""
+    """Execute a raw gdb command (or newline-separated commands) and
+    return its output. Supports pwndbg commands (vmmap, heap, got,
+    checksec, ...). Every line passes the unsafe gate unless
+    --allow-unsafe. Page large output with offset/limit; oversized output
+    spills to result_file (read via read_result)."""
     validate_page(offset, limit)
     cfg = config_from(ctx)
     if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
-        audit_from(ctx).record("unsafe_command_blocked", command=command)
         raise GdbMcpError(
             "UNSAFE_BLOCKED",
             "command can execute code outside the debugger "
@@ -79,57 +73,6 @@ async def execute_command(
         timeout=cfg.request_timeout,
     )
     return _maybe_store_result(cfg, result)
-
-
-@tool(capability="host")
-async def batch_commands(
-    commands: list[str],
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """Execute multiple raw gdb commands in one round-trip. Returns
-    per-command results ({ok, output, ...} or {ok, error}) in order;
-    execution stops at the first failing command. For composed state
-    reads prefer wait_for_stop(with_context=True) or crash_report."""
-    if (
-        not isinstance(commands, list)
-        or not commands
-        or len(commands) > _BATCH_LIMIT
-    ):
-        raise ValueError(
-            "commands must be a list of 1..%d strings" % _BATCH_LIMIT
-        )
-    # validate everything up front so no command is executed for an
-    # otherwise-invalid batch
-    if any(not isinstance(c, str) or not c.strip() for c in commands):
-        raise ValueError("each command must be a non-empty string")
-    cfg = config_from(ctx)
-    session = resolve_gdb(ctx, session_id)
-    results = []
-    for command in commands:
-        if not cfg.allow_unsafe and is_unsafe_gdb_command(command):
-            audit_from(ctx).record("unsafe_command_blocked", command=command)
-            results.append(
-                {
-                    "ok": False,
-                    "error": "UNSAFE_BLOCKED: command can execute code "
-                    "outside the debugger",
-                }
-            )
-            break
-        try:
-            r = await session.request(
-                "eval", {"command": command}, timeout=cfg.request_timeout
-            )
-            results.append({"ok": True, **_maybe_store_result(cfg, r)})
-        except GdbMcpError as exc:
-            results.append({"ok": False, "error": str(exc)})
-            break
-    return {
-        "results": results,
-        "executed": len(results),
-        "completed": bool(results) and results[-1].get("ok") is True,
-    }
 
 
 @tool()
@@ -235,3 +178,61 @@ async def wait_for_stop(
     if with_context and stopped:
         result["context"] = await collect_stop_context(session, cfg)
     return result
+
+
+@tool(capability="target")
+async def send_input(
+    text: str | None = None,
+    hex: str | None = None,
+    session_id: str | None = None,
+    ctx: Context = None,
+) -> dict:
+    """Send input to the inferior's stdio pty (pass either UTF-8 `text`
+    or raw `hex`). If the pty channel is not yet set up, sets it up
+    automatically (effective on the next run/start). Works while the
+    inferior is running."""
+    if (text is None) == (hex is None):
+        raise GdbMcpError("BAD_PARAMS", "pass either text or hex, not both")
+    if text is not None:
+        payload_hex = text.encode("utf-8").hex()
+    else:
+        try:
+            data = hex_to_bytes(hex or "")
+        except ValueError as exc:
+            raise GdbMcpError("BAD_PARAMS", str(exc)) from None
+        if not data:
+            raise GdbMcpError("BAD_PARAMS", "hex payload must not be empty")
+        payload_hex = data.hex()
+    cfg = config_from(ctx)
+    session = resolve_gdb(ctx, session_id)
+    try:
+        return await session.request(
+            "io_send", {"hex": payload_hex}, timeout=cfg.request_timeout
+        )
+    except GdbMcpError as exc:
+        if "io not set up" not in exc.message:
+            raise
+    setup = await session.request("io_setup", {}, timeout=cfg.request_timeout)
+    sent = await session.request(
+        "io_send", {"hex": payload_hex}, timeout=cfg.request_timeout
+    )
+    return {**sent, "io_setup": setup}
+
+
+@tool()
+async def read_output(
+    since_seq: int = 0,
+    session_id: str | None = None,
+    ctx: Context = None,
+) -> dict:
+    """Read the inferior's accumulated stdout/stderr chunks recorded on
+    its pty since `since_seq` (0 = everything buffered). Each chunk
+    carries seq, length, hex, and decoded text."""
+    if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
+        raise ValueError("since_seq must be a non-negative int")
+    session = resolve_gdb(ctx, session_id)
+    return await session.request(
+        "io_read",
+        {"since_seq": since_seq},
+        timeout=config_from(ctx).request_timeout,
+    )

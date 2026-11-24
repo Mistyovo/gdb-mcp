@@ -29,8 +29,6 @@ _TOOL_MODULES = (
     "breakpoint_tools",
     "heap_tools",
     "campaign_tools",
-    "static_tools",
-    "experimental",
     "crash_tools",
 )
 
@@ -48,8 +46,6 @@ def register_all(app, ctx) -> None:
 
 
 def __getattr__(attr_name: str):
-    # CORE_TOOLS is derived from the declarations, so it must be computed
-    # after the tool modules have been imported.
     if attr_name == "CORE_TOOLS":
         _load_tool_modules()
         return core_tool_names()

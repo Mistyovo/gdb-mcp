@@ -45,24 +45,12 @@ def _source(name: str) -> str:
 
 class TestLayering:
     def test_wsl_helpers_depend_on_nothing_internal(self):
-        """launcher and the static bridge both sit above this module, so it
-        must not learn about either."""
+        """launcher sits above this module, so it must not learn about it."""
         assert {n for n in _imports(SRC / "wsl.py") if n.startswith("gdb_mcp")} == set()
-
-    def test_store_does_not_reach_upward(self):
-        forbidden = {"gdb_mcp.reverse.manager", "gdb_mcp.sessions", "gdb_mcp.tools"}
-        imported = _imports(SRC / "reverse" / "store.py")
-        assert not (imported & forbidden)
-
-    def test_reverse_does_not_import_the_launcher(self):
-        """Path/distro helpers live in gdb_mcp.wsl precisely so the static
-        bridge does not depend on process launching."""
-        for path in (SRC / "reverse").glob("*.py"):
-            assert "gdb_mcp.launcher" not in _imports(path), path.name
 
     def test_sessions_does_not_import_its_consumers(self):
         imported = _imports(SRC / "sessions.py")
-        for forbidden in ("gdb_mcp.reverse", "gdb_mcp.launcher", "gdb_mcp.tools", "gdb_mcp.server"):
+        for forbidden in ("gdb_mcp.launcher", "gdb_mcp.tools", "gdb_mcp.server"):
             assert not any(name.startswith(forbidden) for name in imported)
 
     def test_tool_modules_do_not_import_the_server(self):
@@ -127,47 +115,14 @@ class TestMcpBoundary:
         assert "ServerContext" in _source("server.py")
 
 
-class TestPackagingInputs:
-    """Files referenced by build/deploy recipes must exist.
-
-    The docker launcher's image recipe once pointed `COPY` at a plugin path
-    that had moved, so the documented build command failed with a cache-key
-    error that nothing in the test suite could see.
-    """
-
-    def test_dockerfile_copy_sources_exist(self):
-        root = SRC.parent.parent
-        dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
-        missing = []
-        for line in dockerfile.splitlines():
-            if not line.startswith("COPY"):
-                continue
-            # COPY [--flag ...] <src>... <dest>: everything but the flags and
-            # the final destination is a path in the build context
-            tokens = [t for t in line.split()[1:] if not t.startswith("--")]
-            for src in tokens[:-1]:
-                if not (root / src).exists():
-                    missing.append(src)
-        assert not missing, "docker/Dockerfile COPYs absent paths: %s" % missing
-
-    def test_plugin_is_shipped_where_the_launcher_looks(self):
-        """The container path the launcher mounts must be the path the image
-        actually copies."""
-        root = SRC.parent.parent
-        dockerfile = (root / "docker" / "Dockerfile").read_text(encoding="utf-8")
-        destination = "/opt/gdb-mcp/" + (SRC / "plugin" / "gdb_mcp_plugin.py").name
-        lines = [line for line in dockerfile.splitlines() if line.startswith("COPY")]
-        matches = [line for line in lines if line.rstrip().endswith(destination)]
-        assert matches, "nothing COPYs the plugin to %s" % destination
-        assert (root / matches[0].split()[1]).is_file()
-
-
 class TestDocumentedCounts:
-    """README numbers are load-bearing claims, and every one of them had
-    drifted by 2026-10-07 (tests, experimental tools, static tools). The
-    declarations are the source of truth; these checks fail when a tool
-    change is not carried into BOTH READMEs, so the docs cannot lag the
-    code again. Adding a tool means updating these numbers on purpose."""
+    """README numbers are load-bearing claims. The declarations are the
+    source of truth; these checks fail when a tool change is not carried
+    into BOTH READMEs, and enforce the default-profile schema token
+    budget so tool definitions never silently bloat."""
+
+    #: default pwn-profile schema byte budget (~6.5k tokens at ~3.5 chars/tok)
+    PWN_SCHEMA_BYTE_BUDGET = 24_000
 
     @staticmethod
     def _counts():
@@ -179,39 +134,46 @@ class TestDocumentedCounts:
         total = len(SPECS)
         experimental = sum(1 for spec in SPECS if spec.experimental)
         core = sum(1 for spec in SPECS if spec.core)
-        static = sum(1 for spec in SPECS if spec.extension == "static")
-        pwn = sum(
-            1
-            for spec in SPECS
-            if not spec.experimental and spec.extension is None
-        )
-        return total, experimental, core, pwn, total - experimental, static
+        pwn = sum(1 for spec in SPECS if not spec.experimental)
+        return total, experimental, core, pwn
 
     def test_declared_tool_counts(self):
-        # (total, experimental, core, pwn-default, full-stable, static)
-        assert self._counts() == (57, 6, 12, 36, 51, 15)
+        # (total, experimental, core, pwn-default)
+        assert self._counts() == (37, 1, 12, 36)
+
+    def test_pwn_schema_within_token_budget(self, tmp_path):
+        import json
+
+        from gdb_mcp.config import Config
+        from gdb_mcp.server import build_app
+        from gdb_mcp.sessions import SessionRegistry
+        from gdb_mcp.tools import registered_tools
+
+        cfg = Config(tool_profile="pwn", log_dir=tmp_path / "l")
+        tools = registered_tools(build_app(cfg, SessionRegistry(cfg)))
+        total_bytes = sum(
+            len(t.description or "")
+            + len(json.dumps({"name": t.name, "parameters": t.parameters}, ensure_ascii=False))
+            for t in tools.values()
+        )
+        assert total_bytes <= self.PWN_SCHEMA_BYTE_BUDGET, (
+            "pwn schema is %d bytes (budget %d)" % (total_bytes, self.PWN_SCHEMA_BYTE_BUDGET)
+        )
 
     def test_readmes_state_the_declared_counts(self):
         root = SRC.parent.parent
-        _, experimental, core, pwn, full, static = self._counts()
+        _, experimental, core, pwn = self._counts()
         claims = {
             "README.md": [
                 "**%d tools by default**" % pwn,
                 "**%d** under `GDB_MCP_TOOL_PROFILE=core`" % core,
-                "**%d stable tools**" % full,
-                "**%d experimental tools**" % experimental,
-                "**%d static-analysis tools**" % static,
             ],
             "README.zh-CN.md": [
                 "`pwn` 档 %d 个" % pwn,
                 "`core` 档 %d 个" % core,
-                "`full` 档 %d 个稳定工具" % full,
-                "额外 %d 个" % experimental,
             ],
         }
         for name, needles in claims.items():
-            # README wrapping is prose, not a contract; compare on a
-            # whitespace-normalized view so a reflow cannot fail the guard
             text = " ".join(
                 (root / name).read_text(encoding="utf-8").split()
             )

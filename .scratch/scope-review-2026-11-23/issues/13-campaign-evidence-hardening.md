@@ -1,6 +1,6 @@
 # 13 — campaign 证据硬化：verify_pc_control + checksec 自动识别
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: campaign / run_policy

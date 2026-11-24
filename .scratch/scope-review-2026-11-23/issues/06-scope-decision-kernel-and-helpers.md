@@ -1,6 +1,6 @@
 # 06 — 范围决策：内核 QEMU 与宿主侧 pwn 助手
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P1
 Area: scope / kernel / experimental

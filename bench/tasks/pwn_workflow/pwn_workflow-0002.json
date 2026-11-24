@@ -1,0 +1,80 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "variable_value",
+      "spec": {
+        "expr": "*(unsigned int *)&target_word",
+        "value": 287454020
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "pwn_workflow",
+  "id": "pwn_workflow-0002",
+  "kind": "state",
+  "max_steps": 8,
+  "params": {
+    "expected": 287454020,
+    "shape": "checkpoint"
+  },
+  "prompt": "Break at gate, create a checkpoint, mutate target_word, then restore the checkpoint so target_word returns to its original value.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "pwn",
+    "checkpoint",
+    "-O1"
+  ],
+  "target": {
+    "binary_sha256": "e46c167a8b8b5878507163d0aefd730f522ac0e081cd95d82b0c9b464376b7b7",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O1"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "pwn_workflow_0002",
+    "source": "#include <stdint.h>\n#include <stdio.h>\n\nvolatile uint32_t target_word = 0x11223344;\n\n__attribute__((noinline)) void gate(void) {\n    target_word ^= 0x55aa55aa;\n}\n\nint main(void) {\n    gate();\n    printf(\"%u\\n\", target_word);\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x3de0",
+      "_GLOBAL_OFFSET_TABLE_": "0x3fe8",
+      "_IO_stdin_used": "0x2000",
+      "_IO_stdin_used$end": "0x2004",
+      "__FRAME_END__": "0x20f4",
+      "__GNU_EH_FRAME_HDR": "0x2008",
+      "__TMC_END__": "0x4020",
+      "__abi_tag": "0x2118",
+      "__abi_tag$end": "0x2138",
+      "__bss_start": "0x401c",
+      "__data_start": "0x4008",
+      "__do_global_dtors_aux": "0x10f0",
+      "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
+      "__dso_handle": "0x4010",
+      "__frame_dummy_init_array_entry": "0x3dd0",
+      "_edata": "0x401c",
+      "_end": "0x4020",
+      "_fini": "0x1170",
+      "_init": "0x1000",
+      "_start": "0x1050",
+      "_start$end": "0x1072",
+      "completed.0": "0x401c",
+      "completed.0$end": "0x401d",
+      "data_start": "0x4008",
+      "deregister_tm_clones": "0x1080",
+      "frame_dummy": "0x1130",
+      "gate": "0x1139",
+      "gate$end": "0x1144",
+      "main": "0x1144",
+      "main$end": "0x116e",
+      "register_tm_clones": "0x10b0",
+      "target_word": "0x4018",
+      "target_word$end": "0x401c"
+    }
+  }
+}

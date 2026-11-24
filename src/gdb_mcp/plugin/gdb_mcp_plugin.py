@@ -520,6 +520,7 @@ GATED_VERBS = frozenset(
         "disasm",
         "evaluate",
         "threads",
+        "thread_select",
         "frame_select",
         "breakpoints",
         "break",
@@ -1156,12 +1157,6 @@ class Plugin(object):
             self._send_response(req_id, True, result={"pong": True})
         elif verb == "interrupt":
             try:
-                # Verified empirically (gdb 17.2): gdb.interrupt() does NOT
-                # stop an inferior resumed asynchronously from a posted
-                # event, and a process-directed SIGINT is swallowed. The
-                # mechanism that works is posting the `interrupt` command
-                # onto gdb's event loop (which stays live while the
-                # inferior runs).
                 gdb.post_event(self._do_interrupt)
                 self._send_response(
                     req_id, True, result={"state": "interrupt_requested"}
@@ -1179,11 +1174,14 @@ class Plugin(object):
             self._send_error(req_id, "UNKNOWN_VERB", "unknown verb %r" % verb)
 
     def _do_interrupt(self):
-        """Runs on gdb's main thread; interrupts the running inferior."""
+        """Runs on gdb's main thread; interrupts the running inferior
+        and cleanly cancels any active deferred policy."""
+        active = self._policy_active
+        if active is not None:
+            active["cancel"]()
         try:
             self._exec("interrupt", to_string=False)
         except Exception:
-            # last resort (gdb >= 15): thread-safe interrupt API
             if "gdb_interrupt" in self.features:
                 try:
                     gdb.interrupt()
@@ -1674,6 +1672,31 @@ class Plugin(object):
             )
         return {"threads": threads, "selected": selected}
 
+    def _handle_thread_select(self, params):
+        number = params.get("number")
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise PluginError("BAD_PARAMS", "number must be a positive int")
+        inf = self._require_inferior()
+        target = None
+        for thr in inf.threads():
+            if thr.num == number:
+                target = thr
+                break
+        if target is None:
+            raise PluginError("BAD_PARAMS", "no thread %d" % number)
+        if hasattr(target, "switch"):
+            target.switch()
+        else:
+            self._exec("thread %d" % number)
+        frame = None
+        try:
+            cur = gdb.selected_frame()
+            if cur is not None:
+                frame = self._frame_entry(cur, 0)
+        except Exception:
+            pass
+        return {"number": target.num, "selected": True, "frame": frame}
+
     def _handle_frame_select(self, params):
         level = params.get("level")
         if not isinstance(level, int) or level < 0:
@@ -1828,7 +1851,20 @@ class Plugin(object):
         return {"number": number, "enabled": False}
 
     def _handle_mem_map(self, params):
-        out = self._exec("info proc mappings") or ""
+        out = ""
+        try:
+            out = self._exec("info proc mappings") or ""
+        except gdb.error:
+            out = ""
+        if not out.strip() or "0x" not in out:
+            for fallback in ("maintenance info sections", "info files"):
+                try:
+                    alt = self._exec(fallback) or ""
+                except gdb.error:
+                    continue
+                if "0x" in alt:
+                    out = alt
+                    break
         return _limited_output(out)
 
     def _handle_file(self, params):
@@ -2026,6 +2062,7 @@ class Plugin(object):
             "crash_check": self._policy_crash_check,
             "minimize": self._policy_minimize,
             "bp_stats": self._policy_bp_stats,
+            "verify_pc_control": self._policy_verify_pc_control,
         }
         handler = handlers.get(kind)
         if handler is None:
@@ -2047,7 +2084,7 @@ class Plugin(object):
             )
         return handler(params, req_id)
 
-    def _policy_drive(self, req_id, stepper):
+    def _policy_drive(self, req_id, stepper, partial=None):
         """Run a resume-loop policy as a posted-hop state machine.
 
         Three facts, all verified against real gdb 17.2 (2026-10-08
@@ -2066,9 +2103,10 @@ class Plugin(object):
         same-pc breakpoint and run away); it consumes one instruction,
         which steppers account for. ``stepper()`` returns None to keep
         the machine hopping (it resumed) or a result dict to finish;
-        PluginError fails the policy. The wire response is sent when the
-        machine finishes (or fails); _DEFERRED tells _handle_request not
-        to answer itself."""
+        ``partial()`` (optional) produces a partial summary on user
+        cancellation (``interrupt``). PluginError fails the policy. The
+        wire response is sent when the machine finishes (or fails);
+        _DEFERRED tells _handle_request not to answer itself."""
         self._require_inferior()
         done = [False]
         pending = [False]
@@ -2105,6 +2143,20 @@ class Plugin(object):
                 req_id, False, error={"code": code, "message": message}
             )
 
+        def cancel():
+            if done[0]:
+                return
+            if partial is not None:
+                try:
+                    summary = dict(partial())
+                except Exception:
+                    fail("POLICY_CANCELLED", "policy cancelled by interrupt")
+                    return
+                summary["cancelled"] = True
+                finish(summary)
+                return
+            fail("POLICY_CANCELLED", "policy cancelled by interrupt")
+
         def process():
             # posted context: the ONLY place a policy may resume (fact 1)
             pending[0] = False
@@ -2133,7 +2185,7 @@ class Plugin(object):
         def on_exit(event):
             hop()
 
-        active = {"abort": fail}
+        active = {"abort": fail, "cancel": cancel}
         self._policy_active = active
         gdb.events.stop.connect(chain)
         gdb.events.exited.connect(on_exit)
@@ -2204,7 +2256,7 @@ class Plugin(object):
                 return result()
             return None
 
-        return self._policy_drive(req_id, stepper)
+        return self._policy_drive(req_id, stepper, partial=result)
 
     def _policy_heap_arm(self, params, req_id=None):
         if self._timeline_bps:
@@ -2416,7 +2468,7 @@ class Plugin(object):
                 return None  # round in flight; judged on the next hop
             return result()
 
-        return self._policy_drive(req_id, stepper)
+        return self._policy_drive(req_id, stepper, partial=result)
 
     # -- experimental: inferior stdio over a pty -----------------------------
 
@@ -2712,7 +2764,7 @@ class Plugin(object):
                 return None
             return result()
 
-        return self._policy_drive(req_id, stepper)
+        return self._policy_drive(req_id, stepper, partial=result)
 
     def _policy_bp_stats(self, params, req_id):
         """Hit-count probes at ``locations`` plus a temporary marker at
@@ -2834,6 +2886,71 @@ class Plugin(object):
                 raise
             st["marker"] = marker["number"]
             return None  # pass in flight; judged on the next hop
+
+        return self._policy_drive(req_id, stepper, partial=result)
+
+    def _policy_verify_pc_control(self, params, req_id):
+        """Replay a payload with a known canary at ``offset`` from a
+        checkpoint and verify that PC (or fault_addr) lands on the canary."""
+        sid, _snap = self._find_snapshot(params)
+        if "buffer_addr" not in params or "stop_location" not in params:
+            raise PluginError(
+                "BAD_PARAMS",
+                "verify_pc_control requires buffer_addr and stop_location",
+            )
+        offset = params.get("offset")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise PluginError("BAD_PARAMS", "offset must be a non-negative int")
+        buffer_addr = self._resolve_addr(params.get("buffer_addr"))
+        stop_location = str(params.get("stop_location"))
+        target_field = str(params.get("target", "pc"))
+        if target_field not in ("pc", "fault_addr"):
+            raise PluginError("BAD_PARAMS", "target must be 'pc' or 'fault_addr'")
+        canary_raw = params.get("canary", "0x4142434445464748")
+        try:
+            canary_int = (
+                canary_raw
+                if isinstance(canary_raw, int) and not isinstance(canary_raw, bool)
+                else int(str(canary_raw), 0)
+            )
+        except ValueError:
+            raise PluginError("BAD_PARAMS", "invalid canary %r" % (canary_raw,))
+        width = _bounded_int(params.get("width"), 8, 4, 8)
+        canary_bytes = canary_int.to_bytes(width, "little", signed=False)
+        base_hex = params.get("payload") or ""
+        base_payload = bytearray(_hex_to_bytes(base_hex)) if base_hex else bytearray()
+        if len(base_payload) < offset + width:
+            base_payload.extend(b"A" * (offset + width - len(base_payload)))
+        base_payload[offset : offset + width] = canary_bytes
+        marker = [None]
+        expected_hex = "0x%x" % canary_int
+
+        def stepper():
+            if marker[0] is not None:
+                verdict = self._fuzz_judge(marker[0])
+                stop = verdict["stop"] or {}
+                observed = stop.get(target_field)
+                verified = False
+                if isinstance(observed, str) and observed.startswith("0x"):
+                    try:
+                        verified = int(observed, 16) == canary_int
+                    except ValueError:
+                        verified = False
+                return {
+                    "verified": verified,
+                    "target": target_field,
+                    "expected": expected_hex,
+                    "observed": observed,
+                    "offset": offset,
+                    "survived": verdict["survived"],
+                    "stop": stop,
+                    "error": verdict["error"],
+                    "rounds": 1,
+                }
+            marker[0] = self._fuzz_launch(
+                sid, buffer_addr, bytes(base_payload), stop_location
+            )
+            return None
 
         return self._policy_drive(req_id, stepper)
 
@@ -3024,6 +3141,7 @@ VERB_HANDLERS = {
     "disasm": Plugin._handle_disasm,
     "evaluate": Plugin._handle_evaluate,
     "threads": Plugin._handle_threads,
+    "thread_select": Plugin._handle_thread_select,
     "frame_select": Plugin._handle_frame_select,
     "breakpoints": Plugin._handle_breakpoints,
     "break": Plugin._handle_break,

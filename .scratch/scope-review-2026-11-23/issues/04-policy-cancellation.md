@@ -1,6 +1,6 @@
 # 04 — 长 policy 的取消语义
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: run_policy / plugin

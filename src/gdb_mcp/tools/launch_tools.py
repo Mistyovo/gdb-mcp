@@ -8,7 +8,7 @@ from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.security import is_unsafe_gdb_command
 from gdb_mcp.sessions import DISCONNECTED, EXITED, RESERVED, Session
 
-from ._common import audit_from, config_from, launcher_from, registry_from, resolve_any
+from ._common import config_from, launcher_from, registry_from, resolve_any
 from .registry import tool
 
 #: gdb argv options that run a command / source a file before the inferior
@@ -68,16 +68,17 @@ async def launch_gdb(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     run: bool = False,
+    stdio: str | None = None,
     distro: str | None = None,
     attach_timeout_ms: int | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Launch gdb with the MCP plugin loaded inside WSL2 (background
-    process, log captured to a file). `program` may be a Windows or WSL
-    path; the session registers itself when the plugin connects. With
-    `run=True`, the inferior is started immediately (equivalent to
-    `gdb -ex run`). Use `attach_pid` instead of `program` to attach to a
-    running Linux userland process (the plugin loads after the attach)."""
+    """Launch gdb with the MCP plugin loaded (WSL2 or native Linux).
+    Pass `program` (or `attach_pid` to attach to a running process).
+    With `run=True`, starts immediately. Pass `stdio="pty"` to bind a
+    pty for `send_input`/`read_output` before running."""
+    if stdio not in (None, "pty"):
+        raise GdbMcpError("BAD_PARAMS", "stdio must be None or 'pty'")
     if attach_pid is not None:
         if isinstance(attach_pid, bool) or not isinstance(attach_pid, int) or attach_pid < 1:
             raise GdbMcpError("BAD_PARAMS", "attach_pid must be a positive int")
@@ -100,7 +101,6 @@ async def launch_gdb(
     if not cfg.allow_unsafe:
         unsafe = _unsafe_launch_arg(gdb_args)
         if unsafe is not None:
-            audit_from(ctx).record("unsafe_command_blocked", command=unsafe)
             raise GdbMcpError(
                 "UNSAFE_BLOCKED",
                 "gdb startup argument %r can source/execute code outside "
@@ -113,7 +113,7 @@ async def launch_gdb(
         gdb_args=gdb_args,
         cwd=cwd,
         env=env,
-        run=run,
+        run=run and stdio != "pty",
         timeout_ms=(
             cfg.attach_timeout_ms
             if attach_timeout_ms is None
@@ -121,7 +121,14 @@ async def launch_gdb(
         ),
         distro=distro,
     )
-    return {
+    io_info = None
+    if stdio == "pty" and session.state != RESERVED:
+        io_info = await session.request("io_setup", {}, timeout=cfg.request_timeout)
+        if run:
+            await session.request(
+                "eval", {"command": "run"}, timeout=cfg.request_timeout
+            )
+    result = {
         "session_id": session.session_id,
         "state": session.state,
         "log_file": session.log_file,
@@ -131,6 +138,9 @@ async def launch_gdb(
             else "hello not received yet; the plugin retries in the background"
         ),
     }
+    if io_info is not None:
+        result["io"] = io_info
+    return result
 
 
 @tool(core=True, capability="host")

@@ -48,6 +48,8 @@ ERROR_CODES = frozenset(
         "NO_RESULT",
         "NO_LOG",
         "NOT_LAUNCHED",
+        "POLICY_CANCELLED",
+        "READONLY",
         "EXITED",
     }
 )
@@ -83,8 +85,6 @@ SERVER_CAPABILITIES = frozenset(
         "checkpoints",
         "policies",
         "io",
-        "static",
-        "observer-roles",
     }
 )
 
@@ -100,6 +100,7 @@ VERBS = frozenset(
         "disasm",
         "evaluate",
         "threads",
+        "thread_select",
         "frame_select",
         "breakpoints",
         "break",

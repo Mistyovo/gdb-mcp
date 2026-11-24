@@ -1,6 +1,6 @@
 # 12 — 增加 select_thread 工具
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: state / threads

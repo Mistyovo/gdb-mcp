@@ -347,21 +347,21 @@ bench 的关键问题不是"大"，而是**测错了东西**：576/576 参考解
 | # | 标题 | 状态 |
 |---|---|---|
 | 01 | [campaign cyclic 命中按来源归因](issues/01-campaign-cyclic-attribution.md) | resolved |
-| 02 | [README 与 CLI 帮助的失准点](issues/02-readme-cli-consistency.md) | ready-for-agent |
-| 03 | [core file 的停止上下文与内存映射](issues/03-core-file-memory-map.md) | ready-for-agent |
-| 04 | [长 policy 的取消语义](issues/04-policy-cancellation.md) | ready-for-agent |
-| 05 | [范围决策：Ghidra 静态分析族是否外移](issues/05-scope-decision-ghidra-static.md) | needs-triage |
-| 06 | [范围决策：内核 QEMU 与宿主侧 pwn 助手](issues/06-scope-decision-kernel-and-helpers.md) | needs-triage |
-| 07 | [范围决策：Docker / SSH launcher 的冻结或补测](issues/07-scope-decision-docker-ssh.md) | needs-triage |
-| 08 | [范围决策：部署安全设施降级](issues/08-scope-decision-deployment-security.md) | needs-triage |
-| 09 | [bench 收缩并对准 pwn 闭环](issues/09-bench-shrink-and-pwn-families.md) | needs-triage |
-| 10 | [工具面合并：triage_crash / batch_commands / diff_sessions](issues/10-tool-surface-consolidation.md) | ready-for-agent |
+| 02 | [README 与 CLI 帮助的失准点](issues/02-readme-cli-consistency.md) | resolved |
+| 03 | [core file 的停止上下文与内存映射](issues/03-core-file-memory-map.md) | resolved |
+| 04 | [长 policy 的取消语义](issues/04-policy-cancellation.md) | resolved |
+| 05 | [范围决策：Ghidra 静态分析族是否外移](issues/05-scope-decision-ghidra-static.md) | resolved |
+| 06 | [范围决策：内核 QEMU 与宿主侧 pwn 助手](issues/06-scope-decision-kernel-and-helpers.md) | resolved |
+| 07 | [范围决策：Docker / SSH launcher 的冻结或补测](issues/07-scope-decision-docker-ssh.md) | resolved |
+| 08 | [范围决策：部署安全设施降级](issues/08-scope-decision-deployment-security.md) | resolved |
+| 09 | [bench 收缩并对准 pwn 闭环](issues/09-bench-shrink-and-pwn-families.md) | resolved |
+| 10 | [工具面合并：triage_crash / batch_commands / diff_sessions](issues/10-tool-surface-consolidation.md) | resolved |
 | 11 | [heap 时间线补齐分配身份与 chunk 视图](issues/11-heap-allocation-identity.md) | resolved |
-| 12 | [增加 select_thread 工具](issues/12-select-thread.md) | ready-for-agent |
-| 13 | [campaign 证据硬化：verify_pc_control + checksec 自动识别](issues/13-campaign-evidence-hardening.md) | ready-for-agent |
-| 14 | [默认档 inferior I/O 的去留](issues/14-default-inferior-io.md) | needs-triage |
-| 15 | [agent 可用性与工具 schema token 预算](issues/15-agent-usability-schema-budget.md) | needs-triage |
-| 16 | [ADR：用户态动态调试范围守则](issues/16-adr-scope-gate.md) | ready-for-agent |
+| 12 | [增加 select_thread 工具](issues/12-select-thread.md) | resolved |
+| 13 | [campaign 证据硬化：verify_pc_control + checksec 自动识别](issues/13-campaign-evidence-hardening.md) | resolved |
+| 14 | [默认档 inferior I/O 的去留](issues/14-default-inferior-io.md) | resolved |
+| 15 | [agent 可用性与工具 schema token 预算](issues/15-agent-usability-schema-budget.md) | resolved |
+| 16 | [ADR：用户态动态调试范围守则](issues/16-adr-scope-gate.md) | resolved |
 | 17 | [kill_session(force=True) 与文档/e2e 的语义不一致](issues/17-kill-session-force-semantics.md) | resolved |
 
 ## 7. 附：证据与复现

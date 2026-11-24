@@ -36,3 +36,6 @@ Single-context layout (`GLOSSARY.md` + `docs/adr/`, created lazily);
   the containing frame before creating `gdb.FinishBreakpoint`.
 - Experimental features are CLI-gated only (`--experimental`); never add
   environment-variable paths for them.
+- Scope gate: every new tool or subsystem must satisfy
+  `docs/adr/0001-userland-dynamic-debugging-scope.md` (live Linux userland
+  gdb only; stay within `TestDocumentedCounts.PWN_SCHEMA_BYTE_BUDGET`).

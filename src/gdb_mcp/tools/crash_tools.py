@@ -16,7 +16,6 @@ from gdb_mcp.campaign import (
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.output import parse_proc_mappings
 from gdb_mcp.results import store_result
-from gdb_mcp.roles import CURRENT_ROLE
 from gdb_mcp.sessions import Session
 
 from ._common import (
@@ -134,57 +133,34 @@ async def _collect_crash_report(
 @tool(core=True)
 async def crash_report(
     max_frames: int = 16,
-    session_id: str | None = None,
-    ctx: Context = None,
-) -> dict:
-    """One-call crash triage: signal, fault address, PC, registers,
-    backtrace, disassembly around PC, memory at PC/SP/fault address
-    and the head of the memory map. Use after wait_for_stop (or after
-    a stop notification). Best-effort: unreadable pieces are reported
-    in `warnings` instead of failing the whole call."""
-    cfg = config_from(ctx)
-    session = resolve_gdb(ctx, session_id)
-    check_stopped(session)
-    return await _collect_crash_report(
-        session,
-        cfg,
-        registry_from(ctx),
-        session.stop_info or {},
-        max_frames,
-        record_campaign=not cfg.readonly and CURRENT_ROLE.get() != "observer",
-    )
-
-
-@tool(capability="target")
-async def triage_crash(
     payload_hex: str = "",
     buffer_addr: str | None = None,
     stop_location: str | None = None,
     snapshot_id: str | None = None,
     minimize: bool = False,
-    max_frames: int = 16,
+    store_evidence: bool = False,
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """D3 crash→report pipeline: verify that a crashing payload
-    (e.g. the payload_index entry of a run_policy(fuzz_loop) crash
-    list) still crashes when replayed from the checkpoint, collect
-    the full crash_report on the reproduced stop, optionally
-    minimize the payload, and store the whole package as evidence
-    (result file + campaign note). With empty payload/buffer/
-    stop_location, triages whatever stop the session is in right
-    now. The checkpoint restore gives the replay a fresh process
-    image — the deterministic equivalent of a dedicated debug
-    session, and unlike stdin replay it also reproduces payloads
-    that were delivered by direct memory writes."""
+    """One-call crash triage: signal, fault address, PC, registers,
+    backtrace, disassembly, memory at PC/SP/fault, and memory map.
+    When payload_hex + buffer_addr + stop_location are supplied, first
+    replays the payload from snapshot_id (via crash_check), collects the
+    report on the reproduced stop, optionally minimizes it, and stores
+    the evidence package."""
     cfg = config_from(ctx)
     registry = registry_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
-    can_verify = bool(payload_hex and buffer_addr and stop_location)
+    can_replay = bool(payload_hex and buffer_addr and stop_location)
+    if can_replay and cfg.readonly:
+        raise GdbMcpError(
+            "READONLY", "crash_report replay is disabled in --readonly mode"
+        )
     verify = None
     verify_error = None
-    if can_verify:
+    reproduced = None
+    if can_replay:
         params: dict = {
             "kind": "crash_check",
             "buffer_addr": buffer_addr,
@@ -199,49 +175,49 @@ async def triage_crash(
             )
         except GdbMcpError as exc:
             verify_error = str(exc)
-    reproduced = None
-    if verify is not None:
-        reproduced = bool(
-            not verify.get("survived") and verify.get("error") is None
-        )
-        if not reproduced:
-            return {
-                "reproduced": False,
-                "verify": verify,
-                "verify_error": verify_error,
-                "note": (
-                    "payload did not crash from the checkpoint; "
-                    "nothing to triage"
-                ),
-            }
+        if verify is not None:
+            reproduced = bool(
+                not verify.get("survived") and verify.get("error") is None
+            )
+            if not reproduced:
+                return {
+                    "reproduced": False,
+                    "verify": verify,
+                    "verify_error": verify_error,
+                    "note": (
+                        "payload did not crash from the checkpoint; "
+                        "nothing to triage"
+                    ),
+                }
     stop_info = (verify or {}).get("stop") or session.stop_info or {}
     report = await _collect_crash_report(
-        session, cfg, registry, stop_info, max_frames
+        session,
+        cfg,
+        registry,
+        stop_info,
+        max_frames,
+        record_campaign=not cfg.readonly,
     )
-    result = {
-        "reproduced": reproduced,
-        "verify_error": verify_error,
-        "signal": report.get("signal"),
-        "fault_addr": report.get("fault_addr"),
-        "pc": report.get("pc"),
-        "cyclic_match": report.get("cyclic_match"),
-        "report": report,
-    }
-    if minimize and can_verify:
-        params = {
+    if not can_replay and not store_evidence:
+        return report
+    report["reproduced"] = reproduced
+    if verify_error is not None:
+        report["verify_error"] = verify_error
+    if minimize and can_replay:
+        mparams: dict = {
             "kind": "minimize",
             "buffer_addr": buffer_addr,
             "payload": payload_hex,
             "stop_location": stop_location,
         }
         if snapshot_id:
-            params["snapshot_id"] = snapshot_id
+            mparams["snapshot_id"] = snapshot_id
         try:
-            result["minimized"] = await session.request(
-                "policy", params, timeout=_POLICY_TIMEOUT
+            report["minimized"] = await session.request(
+                "policy", mparams, timeout=_POLICY_TIMEOUT
             )
         except GdbMcpError as exc:
-            result["minimize_error"] = str(exc)
+            report["minimize_error"] = str(exc)
     evidence = {
         "session_id": session.session_id,
         "reproduced": reproduced,
@@ -250,17 +226,18 @@ async def triage_crash(
         "pc": report.get("pc"),
         "fault_addr": report.get("fault_addr"),
         "cyclic_match": report.get("cyclic_match"),
-        "minimized": result.get("minimized"),
+        "minimized": report.get("minimized"),
         "report": report,
     }
     stored = store_result(
         cfg.log_dir, json.dumps(evidence, ensure_ascii=False, indent=1)
     )
-    result["evidence_file"] = stored["path"]
-    campaign_note(
-        session.campaign,
-        "crash triaged: signal=%s pc=%s evidence=%s"
-        % (report.get("signal"), report.get("pc"), stored["path"]),
-    )
-    registry.save()
-    return result
+    report["evidence_file"] = stored["path"]
+    if not cfg.readonly:
+        campaign_note(
+            session.campaign,
+            "crash triaged: signal=%s pc=%s evidence=%s"
+            % (report.get("signal"), report.get("pc"), stored["path"]),
+        )
+        registry.save()
+    return report

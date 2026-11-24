@@ -1,6 +1,6 @@
 # 08 — 范围决策：部署安全设施降级
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P1
 Area: security / scope

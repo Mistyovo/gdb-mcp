@@ -28,68 +28,49 @@ CRASHER_SOURCE = ROOT / "examples" / "crasher.c"
 CHILD_GDB_SCRIPT = ROOT / "tests" / "integration" / "launch_child_gdb.py"
 PLUGIN = ROOT / "src" / "gdb_mcp" / "plugin" / "gdb_mcp_plugin.py"
 
-#: Everything the server must register under the full tool profile
-#: (the e2e run passes --tool-profile full). Experimental tools are gated
-#: behind --experimental and stay out.
+#: Everything the server must register under the default pwn tool profile.
 REGISTERED_TOOLS = frozenset(
     {
-        "analyze_binary",
-        "annotate_code",
-        "batch_commands",
         "campaign",
         "checkpoint",
         "continue_execution",
         "crash_report",
-        "decompile_function",
-        "diff_sessions",
         "disassemble",
         "evaluate",
         "execute_command",
         "export_session_script",
-        "get_analysis_status",
         "get_backtrace",
-        "get_binary_overview",
-        "get_call_graph",
         "get_events",
         "get_memory_map",
         "get_process_output",
-        "get_static_disassembly",
-        "get_xrefs",
         "heap_bins",
         "heap_chunk",
         "interrupt",
         "kill_session",
         "launch_gdb",
         "launch_script",
-        "list_analyses",
         "list_breakpoints",
-        "list_functions",
-        "list_sections",
         "list_sessions",
-        "list_strings",
-        "list_symbols",
         "list_threads",
         "load_target",
         "manage_breakpoint",
         "read_memory",
+        "read_output",
         "read_registers",
         "read_result",
-        "remove_code_annotation",
         "run_policy",
-        "search_decompiled_code",
         "select_frame",
+        "select_thread",
+        "send_input",
         "session_status",
         "set_breakpoint",
-        "triage_crash",
         "wait_for_stop",
         "write_memory",
         "write_register",
     }
 )
 
-#: Tools the walkthrough below must actually exercise (cheap, deterministic
-#: subset — static_* needs Ghidra, heap_bins needs pwndbg, triage/policy
-#: flows are covered by the bench selfcheck instead).
+#: Tools the walkthrough below must actually exercise.
 WALKTHROUGH_TOOLS = frozenset(
     {
         "list_sessions",
@@ -99,7 +80,6 @@ WALKTHROUGH_TOOLS = frozenset(
         "launch_script",
         "kill_session",
         "execute_command",
-        "batch_commands",
         "get_events",
         "export_session_script",
         "campaign",
@@ -114,6 +94,7 @@ WALKTHROUGH_TOOLS = frozenset(
         "disassemble",
         "evaluate",
         "list_threads",
+        "select_thread",
         "select_frame",
         "get_memory_map",
         "heap_chunk",
@@ -310,6 +291,11 @@ async def exercise_all(
         require(disassembly["instructions"], "disassembly is empty")
         threads = await runner.call("list_threads", {"session_id": main_session})
         require(threads["threads"], "thread list is empty")
+        selected_thr = await runner.call(
+            "select_thread",
+            {"session_id": main_session, "number": threads["threads"][0]["num"]},
+        )
+        require(selected_thr["selected"], "thread was not selected")
         selected = await runner.call(
             "select_frame", {"session_id": main_session, "level": 0}
         )
@@ -357,19 +343,6 @@ async def exercise_all(
         )
         report = await runner.call("crash_report", {"session_id": main_session})
         require(report.get("signal") == "SIGSEGV", "crash report missed SIGSEGV")
-
-        batch = await runner.call(
-            "batch_commands",
-            {
-                "session_id": main_session,
-                "commands": ["echo batch-a\\n", "echo batch-b\\n"],
-            },
-        )
-        require(
-            len(batch.get("results", [])) == 2
-            and all(r.get("ok") for r in batch["results"]),
-            "batch_commands did not run both commands",
-        )
         events = await runner.call(
             "get_events", {"session_id": main_session, "last": 10}
         )
@@ -473,7 +446,7 @@ async def async_main(args: argparse.Namespace) -> int:
             )
             server = StdioServerParameters(
                 command=sys.executable,
-                args=["-m", "gdb_mcp", "--tool-profile", "full"],
+                args=["-m", "gdb_mcp", "--tool-profile", "pwn"],
                 env=env,
                 cwd=str(ROOT),
             )

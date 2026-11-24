@@ -1,6 +1,6 @@
 # 15 — agent 可用性与工具 schema token 预算
 
-Status: needs-triage
+Status: resolved
 Type: research
 Priority: P2
 Area: agent ergonomics / token budget

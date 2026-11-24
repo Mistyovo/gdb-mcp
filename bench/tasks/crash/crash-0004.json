@@ -36,7 +36,7 @@
     "O2"
   ],
   "target": {
-    "binary_sha256": "3a097f734aa34f3eda4b3b05546ef00cd67848f450b41c137f7c1f2a2c7f982f",
+    "binary_sha256": "9582511f8f98b33c31e852ecfc0746c1e0ec5356f2e518bd1ed35e89a759a366",
     "build": {
       "core": false,
       "flags": [
@@ -68,7 +68,7 @@
       "_dl_relocate_static_pie$end": "0x4010a1",
       "_edata": "0x404018",
       "_end": "0x404020",
-      "_fini": "0x4011ac",
+      "_fini": "0x4011a4",
       "_init": "0x401000",
       "_start": "0x401070",
       "_start$end": "0x401092",
@@ -83,7 +83,7 @@
       "main$end": "0x401068",
       "register_tm_clones": "0x4010e0",
       "trigger": "0x401180",
-      "trigger$end": "0x4011aa"
+      "trigger$end": "0x4011a1"
     }
   }
 }

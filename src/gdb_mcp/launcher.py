@@ -40,9 +40,6 @@ _PLUGIN_WIN_PATH = (
 
 _MARKER_PREFIX = "gdbmcp_"
 
-#: where the mounted plugin lives inside docker launcher containers
-DOCKER_PLUGIN_PATH = "/opt/gdb-mcp/gdb_mcp_plugin.py"
-
 #: the plugin's own configuration: a caller-supplied env must never be able
 #: to redirect a launched gdb to another session/port or lift a limit
 _RESERVED_PLUGIN_ENV = frozenset(
@@ -178,66 +175,17 @@ def build_gdb_argv(
     return argv
 
 
-def build_ssh_argv(host: str, remote_command: str) -> list[str]:
-    """argv running ``remote_command`` through a single shell on ``host``."""
-    return [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        host,
-        remote_command,
-    ]
-
-
-def build_docker_run_argv(
-    image: str,
-    session_id: str,
-    bash_cmd: str,
-    cwd: str | None,
-    plugin_host_path: str | None,
-) -> list[str]:
-    """``docker run`` argv for an ephemeral debugging container.
-
-    SYS_PTRACE + a relaxed seccomp profile are the minimum for
-    ptrace-based debugging; the container is named after the session so
-    termination is a single ``docker kill``.
-    """
-    argv = [
-        "docker",
-        "run",
-        "--rm",
-        "--name",
-        _MARKER_PREFIX + session_id,
-        "--cap-add=SYS_PTRACE",
-        "--security-opt",
-        "seccomp=unconfined",
-    ]
-    if plugin_host_path:
-        argv += ["-v", "%s:%s:ro" % (plugin_host_path, DOCKER_PLUGIN_PATH)]
-    if cwd:
-        argv += ["-v", "%s:%s" % (cwd, cwd), "-w", cwd]
-    argv += [image, "bash", "-lc", bash_cmd]
-    return argv
-
-
 def build_terminate_argv(
     launcher: str,
     session_id: str,
     force: bool,
     distro: str | None = None,
-    ssh_host: str | None = None,
 ) -> list[str]:
     """argv that terminates a launched session for the given backend."""
-    if launcher == "docker":
-        return ["docker", "kill", _MARKER_PREFIX + session_id]
     cmd = build_pkill_command(session_id, force)
     if launcher == "wsl":
         return ["wsl.exe", "-d", distro, "--", "bash", "-lc", cmd]
-    if launcher == "native":
-        return ["bash", "-lc", cmd]
-    return build_ssh_argv(ssh_host, cmd)
+    return ["bash", "-lc", cmd]
 
 
 # --- the launcher -----------------------------------------------------------
@@ -296,11 +244,6 @@ class Launcher:
         distro_override: str | None = None,
     ) -> Session:
         launcher = self.config.launcher
-        if launcher == "docker":
-            argv = [
-                DOCKER_PLUGIN_PATH if a == self.plugin_wsl_path() else a
-                for a in argv
-            ]
         bash_cmd = build_bash_command(
             argv,
             env,
@@ -314,18 +257,8 @@ class Launcher:
         wsl_distro = await self.distro(distro_override) if launcher == "wsl" else None
         if launcher == "wsl":
             exec_argv = ["wsl.exe", "-d", wsl_distro, "--", "bash", "-lc", bash_cmd]
-        elif launcher == "native":
+        else:  # native
             exec_argv = ["bash", "-lc", bash_cmd]
-        elif launcher == "docker":
-            exec_argv = build_docker_run_argv(
-                self.config.docker_image,
-                session_id,
-                bash_cmd,
-                cwd_wsl,
-                self.config.plugin_wsl_path or str(_PLUGIN_WIN_PATH),
-            )
-        else:  # ssh
-            exec_argv = build_ssh_argv(self.config.ssh_host, bash_cmd)
         session = self.registry.reserve(
             session_id, kind=kind, log_file=str(log_file)
         )
@@ -500,7 +433,6 @@ class Launcher:
             session_id,
             force,
             distro=distro,
-            ssh_host=self.config.ssh_host,
         )
         try:
             proc = await asyncio.create_subprocess_exec(

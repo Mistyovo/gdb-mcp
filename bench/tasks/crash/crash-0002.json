@@ -46,7 +46,7 @@
     "O1"
   ],
   "target": {
-    "binary_sha256": "9f4354a4f9e7b3fc8c621471d32e8f97a65862c43013dfe15652c9533948985a",
+    "binary_sha256": "71d8e08909c3727b634e6a8af6c35f52dd5beb5e8cf82a67cca9d2379c7436bf",
     "build": {
       "core": false,
       "flags": [
@@ -75,7 +75,7 @@
       "__frame_dummy_init_array_entry": "0x3dd0",
       "_edata": "0x4018",
       "_end": "0x4020",
-      "_fini": "0x11ac",
+      "_fini": "0x11a4",
       "_init": "0x1000",
       "_start": "0x1050",
       "_start$end": "0x1072",
@@ -83,14 +83,14 @@
       "completed.0$end": "0x4019",
       "data_start": "0x4008",
       "deref": "0x1139",
-      "deref$end": "0x1150",
+      "deref$end": "0x114f",
       "deregister_tm_clones": "0x1080",
       "frame_dummy": "0x1130",
-      "main": "0x117a",
-      "main$end": "0x11ab",
+      "main": "0x1170",
+      "main$end": "0x11a1",
       "register_tm_clones": "0x10b0",
-      "trigger": "0x1150",
-      "trigger$end": "0x117a"
+      "trigger": "0x114f",
+      "trigger$end": "0x1170"
     }
   }
 }

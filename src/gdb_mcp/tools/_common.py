@@ -31,23 +31,8 @@ def registry_from(ctx: Any) -> SessionRegistry:
     return server_ctx(ctx).registry
 
 
-def analysis_from(ctx: Any):
-    """The 3.5 static-bridge analysis manager (Ghidra headless cache)."""
-    return server_ctx(ctx).analysis
-
-
 def config_from(ctx: Any) -> Config:
     return server_ctx(ctx).config
-
-
-def audit_from(ctx: Any):
-    """The hash-chained security audit log (no-op instance when disabled)."""
-    audit = getattr(server_ctx(ctx), "audit", None)
-    if audit is None:
-        from gdb_mcp.audit import disabled
-
-        audit = disabled()
-    return audit
 
 
 def launcher_from(ctx: Any):

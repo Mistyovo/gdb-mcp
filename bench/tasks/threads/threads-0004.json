@@ -58,7 +58,7 @@
     "concurrency"
   ],
   "target": {
-    "binary_sha256": "3439e51cfbbf33499afb0e765ea6dbb2e5842b6fff151156505a2a979279a8b3",
+    "binary_sha256": "d13d3d1a00325a1e8ab1c9227e83e31305c2e7e277f9f94b08aed85738303315",
     "build": {
       "core": false,
       "flags": [
@@ -92,12 +92,12 @@
       "_dl_relocate_static_pie$end": "0x401101",
       "_edata": "0x404028",
       "_end": "0x404038",
-      "_fini": "0x401238",
+      "_fini": "0x401218",
       "_init": "0x401000",
       "_start": "0x4010d0",
       "_start$end": "0x4010f2",
-      "bump": "0x401200",
-      "bump$end": "0x401210",
+      "bump": "0x4011e0",
+      "bump$end": "0x4011e8",
       "completed.0": "0x404028",
       "completed.0$end": "0x404029",
       "data_start": "0x404018",
@@ -111,9 +111,9 @@
       "tb": "0x40402c",
       "tb$end": "0x404030",
       "worker_a": "0x4011c0",
-      "worker_a$end": "0x4011f7",
-      "worker_b": "0x401210",
-      "worker_b$end": "0x401237"
+      "worker_a$end": "0x4011df",
+      "worker_b": "0x4011f0",
+      "worker_b$end": "0x401217"
     }
   }
 }

@@ -1,6 +1,6 @@
 # 16 — ADR：用户态动态调试范围守则
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: process / docs

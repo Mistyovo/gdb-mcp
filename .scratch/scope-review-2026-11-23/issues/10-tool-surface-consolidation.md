@@ -1,6 +1,6 @@
 # 10 — 工具面合并：triage_crash / batch_commands / diff_sessions
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: tools / surface

@@ -1,0 +1,83 @@
+{
+  "bench_version": "1.0.0",
+  "checks": [
+    {
+      "op": "variable_value",
+      "spec": {
+        "expr": "*(unsigned int *)&target_word",
+        "value": 287454020
+      }
+    },
+    {
+      "op": "session_alive",
+      "spec": {}
+    }
+  ],
+  "difficulty": "medium",
+  "family": "pwn_workflow",
+  "id": "pwn_workflow-0004",
+  "kind": "state",
+  "max_steps": 8,
+  "params": {
+    "expected": 287454020,
+    "shape": "checkpoint"
+  },
+  "prompt": "Break at gate, create a checkpoint, mutate target_word, then restore the checkpoint so target_word returns to its original value.",
+  "schema_version": "1.0.0",
+  "tags": [
+    "pwn",
+    "checkpoint",
+    "-O2"
+  ],
+  "target": {
+    "binary_sha256": "94f2fede32336c2849f7ff7f021ed5c00fb64481253cdef09392942a418f3b23",
+    "build": {
+      "core": false,
+      "flags": [
+        "-O2",
+        "-no-pie"
+      ],
+      "ldflags": [],
+      "strip": false
+    },
+    "name": "pwn_workflow_0004",
+    "source": "#include <stdint.h>\n#include <stdio.h>\n\nvolatile uint32_t target_word = 0x11223344;\n\n__attribute__((noinline)) void gate(void) {\n    target_word ^= 0x55aa55aa;\n}\n\nint main(void) {\n    gate();\n    printf(\"%u\\n\", target_word);\n    return 0;\n}\n",
+    "symbols": {
+      "_DYNAMIC": "0x403e08",
+      "_GLOBAL_OFFSET_TABLE_": "0x403fe8",
+      "_IO_stdin_used": "0x402000",
+      "_IO_stdin_used$end": "0x402004",
+      "__FRAME_END__": "0x4020ec",
+      "__GNU_EH_FRAME_HDR": "0x402008",
+      "__TMC_END__": "0x404020",
+      "__abi_tag": "0x402110",
+      "__abi_tag$end": "0x402130",
+      "__bss_start": "0x40401c",
+      "__data_start": "0x404008",
+      "__do_global_dtors_aux": "0x401120",
+      "__do_global_dtors_aux_fini_array_entry": "0x403e00",
+      "__dso_handle": "0x404010",
+      "__frame_dummy_init_array_entry": "0x403df8",
+      "_dl_relocate_static_pie": "0x4010a0",
+      "_dl_relocate_static_pie$end": "0x4010a1",
+      "_edata": "0x40401c",
+      "_end": "0x404020",
+      "_fini": "0x40116c",
+      "_init": "0x401000",
+      "_start": "0x401070",
+      "_start$end": "0x401092",
+      "completed.0": "0x40401c",
+      "completed.0$end": "0x40401d",
+      "data_start": "0x404008",
+      "deregister_tm_clones": "0x4010b0",
+      "frame_dummy": "0x401150",
+      "gate": "0x401160",
+      "gate$end": "0x40116b",
+      "main": "0x401040",
+      "main$end": "0x401064",
+      "register_tm_clones": "0x4010e0",
+      "target_word": "0x404018",
+      "target_word$end": "0x40401c"
+    }
+  }
+}

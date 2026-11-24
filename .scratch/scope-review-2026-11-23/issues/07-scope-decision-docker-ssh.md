@@ -1,6 +1,6 @@
 # 07 — 范围决策：Docker / SSH launcher 的冻结或补测
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P2
 Area: launcher / scope

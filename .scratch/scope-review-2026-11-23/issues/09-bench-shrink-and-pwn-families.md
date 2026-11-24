@@ -1,6 +1,6 @@
 # 09 — bench 收缩并对准 pwn 闭环
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P1
 Area: bench / CI

@@ -33,7 +33,7 @@
     "memory-write"
   ],
   "target": {
-    "binary_sha256": "f3b2d95660ebb332ffa53253859926af6e328d3653d5750890ea324ce9cb1055",
+    "binary_sha256": "58d538ae0820231fd5d439fe716072b261516404e68a01413d1fce77acaa4ded",
     "build": {
       "core": false,
       "flags": [

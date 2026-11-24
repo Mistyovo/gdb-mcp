@@ -1,6 +1,6 @@
 # 05 — 范围决策：Ghidra 静态分析族是否外移
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P1
 Area: scope / static analysis

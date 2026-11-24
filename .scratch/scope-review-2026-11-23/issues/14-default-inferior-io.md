@@ -1,6 +1,6 @@
 # 14 — 默认档 inferior I/O 的去留
 
-Status: needs-triage
+Status: resolved
 Type: grilling
 Priority: P1
 Area: pwn workflow / stdio

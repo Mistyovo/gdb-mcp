@@ -2,8 +2,7 @@
 
 One :class:`ServerContext` is created in :func:`server.build_app` and
 handed to FastMCP's lifespan, so every tool handler reaches the registry,
-config, analysis manager and launcher through
-``ctx.request_context.lifespan_context`` — the only sanctioned channel
+config, and launcher through ``ctx.request_context.lifespan_context``
 (see :mod:`gdb_mcp.tools._common` for the accessors).
 """
 
@@ -20,10 +19,6 @@ from gdb_mcp.sessions import SessionRegistry
 class ServerContext:
     config: Config
     registry: SessionRegistry
-    analysis: Any = None
-    #: hash-chained security audit log (a no-op instance when disabled);
-    #: attached by build_app, read via tools._common.audit_from
-    audit: Any = None
     _launcher: Any = field(default=None, repr=False)
 
     def launcher(self) -> Any:

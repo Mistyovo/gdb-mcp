@@ -13,25 +13,17 @@ class TestPhase3Options:
         with pytest.raises(ValueError):
             Config(launcher="telnet").validate()
         with pytest.raises(ValueError):
-            Config(launcher="ssh").validate()  # ssh_host required
-        Config(launcher="ssh", ssh_host="box").validate()
-        Config(launcher="native").validate()
-        Config(launcher="docker").validate()
-
-    def test_http_nonloopback_requires_token(self):
+            Config(launcher="ssh").validate()
         with pytest.raises(ValueError):
-            Config(mcp_http=True, mcp_host="0.0.0.0").validate()
-        Config(mcp_http=True, mcp_host="0.0.0.0", token="secret").validate()
-        Config(mcp_http=True, mcp_host="127.0.0.1").validate()
+            Config(launcher="docker").validate()
+        Config(launcher="native").validate()
 
     def test_bool_env_flags(self, monkeypatch):
         monkeypatch.setenv("GDB_MCP_READONLY", "1")
         monkeypatch.setenv("GDB_MCP_ALLOW_UNSAFE", "true")
-        monkeypatch.setenv("GDB_MCP_MCP_HTTP", "on")
         cfg = Config.from_env()
         assert cfg.readonly is True
         assert cfg.allow_unsafe is True
-        assert cfg.mcp_http is True
 
     def test_experimental_never_from_env(self, monkeypatch):
         """Regression: experimental tools are --experimental-only. A stray
@@ -46,11 +38,9 @@ class TestPhase3Options:
         assert Config.from_env().experimental is False
 
     def test_launcher_env(self, monkeypatch):
-        monkeypatch.setenv("GDB_MCP_LAUNCHER", "docker")
-        monkeypatch.setenv("GDB_MCP_DOCKER_IMAGE", "gdb-mcp:dev")
+        monkeypatch.setenv("GDB_MCP_LAUNCHER", "native")
         cfg = Config.from_env()
-        assert cfg.launcher == "docker"
-        assert cfg.docker_image == "gdb-mcp:dev"
+        assert cfg.launcher == "native"
 
 
 class TestPhase1Options:
@@ -141,31 +131,7 @@ class TestFromEnv:
         assert cfg.token is None
 
 
-class TestE4Options:
-    def test_tls_material_pairs(self):
-        with pytest.raises(ValueError):
-            Config(mcp_tls_cert="a.pem").validate()
-        with pytest.raises(ValueError):
-            Config(mcp_tls_key="a.key").validate()
-        with pytest.raises(ValueError):
-            Config(mcp_tls_client_ca="ca.pem").validate()
-        Config(mcp_tls_cert="a.pem", mcp_tls_key="a.key").validate()
-        Config(
-            mcp_tls_cert="a.pem", mcp_tls_key="a.key", mcp_tls_client_ca="ca.pem"
-        ).validate()
-
-    def test_observer_tokens_validation(self):
-        with pytest.raises(ValueError):
-            Config(token="m", observer_tokens=("m",)).validate()
-        with pytest.raises(ValueError):
-            Config(observer_tokens=("",)).validate()
-        Config(token="m", observer_tokens=("o",)).validate()
-
-    def test_observer_tokens_env_comma_list(self, monkeypatch):
-        monkeypatch.setenv("GDB_MCP_OBSERVER_TOKENS", "a, b ,")
-        assert Config.from_env().observer_tokens == ("a", "b")
-
-
+class TestArchiveOptions:
     def test_archive_retention_validation(self):
         Config(archive_retention=20).validate()
         Config(archive_retention=0).validate()
@@ -183,29 +149,21 @@ class TestPathFields:
         inside ensure_dirs() is a trap for embedders."""
         cfg = Config(
             log_dir=str(tmp_path / "logs"),
-            analysis_dir=str(tmp_path / "analyses"),
             archive_dir=str(tmp_path / "archive"),
         )
         assert cfg.log_dir == tmp_path / "logs"
-        assert cfg.analysis_dir == tmp_path / "analyses"
         assert cfg.archive_dir == tmp_path / "archive"
         cfg.ensure_dirs()
         assert cfg.log_dir.is_dir()
 
     def test_none_stays_none(self):
         cfg = Config()
-        assert cfg.analysis_dir is None and cfg.archive_dir is None
+        assert cfg.archive_dir is None
 
 
 class TestCliOverridesDoNotEraseEnv:
     """Precedence is CLI > env > default, and "flag absent" must not read as
     "flag set to false".
-
-    Regression: argparse's store_true default (False) and store:append
-    default ([]) used to be merged into the env-derived Config, so
-    GDB_MCP_READONLY=1 / GDB_MCP_MCP_HTTP=1 / GDB_MCP_OBSERVER_TOKENS=...
-    were silently dropped for every CLI-launched server -- including the
-    read-only guarantee an operator relied on.
     """
 
     @pytest.fixture
@@ -215,8 +173,6 @@ class TestCliOverridesDoNotEraseEnv:
                 monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("GDB_MCP_READONLY", "1")
         monkeypatch.setenv("GDB_MCP_ALLOW_UNSAFE", "true")
-        monkeypatch.setenv("GDB_MCP_MCP_HTTP", "1")
-        monkeypatch.setenv("GDB_MCP_OBSERVER_TOKENS", "tok-a, tok-b")
         monkeypatch.setenv("GDB_MCP_TOOL_PROFILE", "core")
 
     def _config(self, argv, tmp_path):
@@ -229,8 +185,6 @@ class TestCliOverridesDoNotEraseEnv:
         cfg = self._config([], tmp_path)
         assert cfg.readonly is True
         assert cfg.allow_unsafe is True
-        assert cfg.mcp_http is True
-        assert cfg.observer_tokens == ("tok-a", "tok-b")
         assert cfg.tool_profile == "core"
 
     def test_explicit_flag_still_wins(self, env, tmp_path):

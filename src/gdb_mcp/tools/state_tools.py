@@ -180,6 +180,25 @@ async def list_threads(
 
 
 @tool(capability="debug")
+async def select_thread(
+    number: int,
+    session_id: str | None = None,
+    ctx: Context = None,
+) -> dict:
+    """Select an inferior thread by gdb thread number (see list_threads)
+    for subsequent register/backtrace/frame inspection."""
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise GdbMcpError("BAD_PARAMS", "number must be a positive int")
+    session = resolve_gdb(ctx, session_id)
+    check_stopped(session)
+    return await session.request(
+        "thread_select",
+        {"number": number},
+        timeout=config_from(ctx).request_timeout,
+    )
+
+
+@tool(capability="debug")
 async def select_frame(
     level: int,
     session_id: str | None = None,

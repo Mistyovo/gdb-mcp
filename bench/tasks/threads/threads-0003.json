@@ -58,7 +58,7 @@
     "concurrency"
   ],
   "target": {
-    "binary_sha256": "d31b8035d92794f589789b162ed3fb931188e3479234240e6d8c4e8e8a78e545",
+    "binary_sha256": "41374bcd9163b8c50ec96ad04520b23a440fb4cbc8cad7a04d063122d4c7a6fd",
     "build": {
       "core": false,
       "flags": [
@@ -83,34 +83,34 @@
       "__abi_tag$end": "0x2170",
       "__bss_start": "0x4028",
       "__data_start": "0x4018",
-      "__do_global_dtors_aux": "0x1190",
+      "__do_global_dtors_aux": "0x1180",
       "__do_global_dtors_aux_fini_array_entry": "0x3dd8",
       "__dso_handle": "0x4020",
       "__frame_dummy_init_array_entry": "0x3dd0",
       "_edata": "0x4028",
       "_end": "0x4038",
-      "_fini": "0x1258",
+      "_fini": "0x1228",
       "_init": "0x1000",
-      "_start": "0x10f0",
-      "_start$end": "0x1112",
-      "bump": "0x1220",
-      "bump$end": "0x1230",
+      "_start": "0x10e0",
+      "_start$end": "0x1102",
+      "bump": "0x11f0",
+      "bump$end": "0x11f8",
       "completed.0": "0x4028",
       "completed.0$end": "0x4029",
       "data_start": "0x4018",
-      "deregister_tm_clones": "0x1120",
-      "frame_dummy": "0x11d0",
-      "main": "0x1080",
-      "main$end": "0x10e4",
-      "register_tm_clones": "0x1150",
+      "deregister_tm_clones": "0x1110",
+      "frame_dummy": "0x11c0",
+      "main": "0x1070",
+      "main$end": "0x10d4",
+      "register_tm_clones": "0x1140",
       "ta": "0x4030",
       "ta$end": "0x4034",
       "tb": "0x402c",
       "tb$end": "0x4030",
-      "worker_a": "0x11e0",
-      "worker_a$end": "0x1217",
-      "worker_b": "0x1230",
-      "worker_b$end": "0x1257"
+      "worker_a": "0x11d0",
+      "worker_a$end": "0x11ef",
+      "worker_b": "0x1200",
+      "worker_b$end": "0x1227"
     }
   }
 }

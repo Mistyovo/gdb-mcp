@@ -36,7 +36,7 @@
     "O3"
   ],
   "target": {
-    "binary_sha256": "156fd9baaa1e4d834d74a00337e8592ced816e421e9d9854ae0ecdeb770e7958",
+    "binary_sha256": "66c5c07eb27385546f0e4bf2ff0fee521b1c4fb1c0bac33a3aff2e892b6c06a3",
     "build": {
       "core": false,
       "flags": [
@@ -65,7 +65,7 @@
       "__frame_dummy_init_array_entry": "0x3dd0",
       "_edata": "0x4018",
       "_end": "0x4020",
-      "_fini": "0x11bc",
+      "_fini": "0x11b4",
       "_init": "0x1000",
       "_start": "0x1080",
       "_start$end": "0x10a2",
@@ -80,7 +80,7 @@
       "main$end": "0x1078",
       "register_tm_clones": "0x10e0",
       "trigger": "0x1190",
-      "trigger$end": "0x11ba"
+      "trigger$end": "0x11b1"
     }
   }
 }

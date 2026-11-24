@@ -1,6 +1,6 @@
 # 02 — README 与 CLI 帮助的失准点
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: docs / config

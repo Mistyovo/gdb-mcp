@@ -5,11 +5,12 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import Context
 
+from gdb_mcp.campaign import campaign_set
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.heap import parse_heap_chunk
 from gdb_mcp.output import parse_pwndbg_bins
 
-from ._common import check_stopped, config_from, resolve_gdb
+from ._common import check_stopped, config_from, registry_from, resolve_gdb
 from .registry import tool
 
 _SNAPSHOT_ACTIONS = ("create", "list", "restore", "diff")
@@ -68,15 +69,11 @@ async def heap_chunk(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Decode one glibc malloc chunk (x86_64 layout), read-only and
-    pwndbg-independent. `address` is the chunk header address (the form
-    heap_bins returns); set `user_ptr=True` when it is a malloc/calloc/
-    realloc return pointer (16 bytes before the header). Returns
-    size/flags/prev_size, the next chunk's PREV_INUSE bit (this chunk's
-    in-use state), fd/bk when the chunk looks free, tcache next/key plus
-    the safe-linked next decoded (glibc >= 2.32), and a user-data
-    preview. Unreadable or implausible fields are reported in warnings,
-    never guessed."""
+    """Decode one glibc malloc chunk (x86_64 layout, no pwndbg).
+    Pass chunk header address (or `user_ptr=True` for a malloc return
+    pointer). Returns size/flags/prev_size, next-chunk PREV_INUSE
+    (`in_use`), fd/bk and safe-linking decoded tcache next when free,
+    plus user-data preview."""
     if (
         isinstance(data_length, bool)
         or not isinstance(data_length, int)
@@ -155,46 +152,42 @@ async def run_policy(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """Delegate a bounded loop to the plugin so it runs at native
-    speed; the response is a constant-size summary regardless of
-    iterations. Kinds (all need a stopped inferior):
-    - trace: {max_steps} single-steps, returns unique PCs in order.
-    - heap_arm: arm allocation-symbol probes {symbols, max_events,
-      capture_returns, return_symbols} that record args (raw plus a
-      named size/ptr/nmemb view) and, for allocation functions, the
-      pointer they return; every hit auto-continues invisibly.
-      heap_read accumulates the timeline; heap_disarm removes them.
-      Use heap_chunk to decode a chunk header on its own.
-    - fuzz_loop: per payload — restore checkpoint, write payload at
-      buffer_addr, resume; stops at stop_location (a guaranteed-stop
-      marker, e.g. the caller of the function under test) count as
-      survived, anything else is a deduped crash. params:
-      snapshot_id, buffer_addr, payloads (hex list), stop_location,
-      max_rounds.
-    - crash_check: single-payload verdict {survived, stop}.
-    - minimize: delta-debug a crashing payload down to its minimal
-      crashing form (params: snapshot_id, payload, buffer_addr,
-      stop_location, max_rounds); removals that change the crash
-      signal are rejected so the minimizer cannot drift to another
-      bug.
-    - bp_stats: hit-count probes at locations (auto-continue) plus
-      a temporary marker at stop_location; resumes until the hit
-      budget (max_hits), max_passes marker hits, or the inferior's
-      own stop — then reports per-location counts. The long-run
-      version of manual breakpoint hit counting.
-    The heap timeline is a three-call flow: heap_arm (arm probes),
-    heap_read (drain events), heap_disarm (remove probes)."""
+    """Delegate a bounded loop to run inside gdb at native speed; returns
+    a constant-size summary. Kinds (require stopped inferior):
+    - trace: {max_steps} single-steps -> unique PCs.
+    - heap_arm/heap_read/heap_disarm: probe {symbols, max_events,
+      capture_returns, return_symbols} -> raw/named args + return ptr.
+    - fuzz_loop: {snapshot_id, buffer_addr, payloads, stop_location} ->
+      deduped crashes.
+    - crash_check: single-payload {survived, stop}.
+    - minimize: delta-debug crashing payload {snapshot_id, payload,
+      buffer_addr, stop_location, max_rounds}.
+    - bp_stats: {locations, stop_location, max_hits, max_passes}.
+    - verify_pc_control: replay canary at offset -> verified pc_control."""
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
     policy_params = dict(params or {})
     policy_params["kind"] = kind
     # policies loop plugin-side; a large fuzz sweep can legitimately
     # run for minutes, so the default request timeout does not apply
-    return await session.request(
+    result = await session.request(
         "policy",
         policy_params,
         timeout=max(config_from(ctx).request_timeout, 600.0),
     )
+    if kind == "verify_pc_control" and result.get("verified") is True:
+        target = result.get("target", "pc")
+        prim = "pc_control" if target == "pc" else "fault_addr_controlled"
+        campaign_set(
+            session.campaign,
+            "primitives",
+            prim,
+            "verified",
+            evidence="%s == %s at offset %s"
+            % (target, result.get("expected"), result.get("offset")),
+        )
+        registry_from(ctx).save()
+    return result
 
 
 @tool(capability="target")

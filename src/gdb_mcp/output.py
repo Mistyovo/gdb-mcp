@@ -78,54 +78,98 @@ _PERMS_RE = re.compile(r"^[r-][w-][x-][psa-]?$")
 
 
 def parse_proc_mappings(text: str) -> list[dict]:
-    """Parse ``info proc mappings`` output into structured segments.
+    """Parse ``info proc mappings`` (or core-file ``info files`` /
+    ``maintenance info sections`` fallback) into structured segments.
 
     Accepts the common gdb column layouts (start end size offset perms
-    [objfile], with or without size/perms); non-conforming lines (banner,
-    header) are skipped. Addresses come back as hex strings, size in bytes.
+    [objfile], with or without size/perms) as well as core-file section
+    lines like ``0x00401000 - 0x00402000 is .text`` or
+    ``[0] 0x00401000->0x00402000 at ...: .text ALLOC LOAD CODE``.
     """
     segments: list[dict] = []
     for raw in text.splitlines():
         parts = raw.strip().split()
         if (
-            len(parts) < 2
-            or not parts[0].startswith("0x")
-            or not parts[1].startswith("0x")
+            len(parts) >= 2
+            and parts[0].startswith("0x")
+            and parts[1].startswith("0x")
         ):
-            continue
-        try:
-            start = int(parts[0], 16)
-            end = int(parts[1], 16)
-        except ValueError:
-            continue
-        hex_vals: list[int] = []
-        perms = None
-        rest: list[str] = []
-        for tok in parts[2:]:
-            if len(hex_vals) < 2 and perms is None and tok.startswith("0x"):
-                try:
-                    hex_vals.append(int(tok, 16))
-                    continue
-                except ValueError:
-                    pass
-            if perms is None and _PERMS_RE.match(tok):
-                perms = tok
+            try:
+                start = int(parts[0], 16)
+                end = int(parts[1], 16)
+            except ValueError:
                 continue
-            rest.append(tok)
-        size = hex_vals[0] if hex_vals else end - start
-        segment: dict = {
-            "start": fmt_addr(start),
-            "end": fmt_addr(end),
-            "size": size,
-        }
-        if len(hex_vals) > 1:
-            segment["offset"] = fmt_addr(hex_vals[1])
-        if perms:
-            segment["perms"] = perms
-        if rest:
-            segment["objfile"] = " ".join(rest)
-        segments.append(segment)
+            hex_vals: list[int] = []
+            perms = None
+            rest: list[str] = []
+            for tok in parts[2:]:
+                if len(hex_vals) < 2 and perms is None and tok.startswith("0x"):
+                    try:
+                        hex_vals.append(int(tok, 16))
+                        continue
+                    except ValueError:
+                        pass
+                if perms is None and _PERMS_RE.match(tok):
+                    perms = tok
+                    continue
+                rest.append(tok)
+            size = hex_vals[0] if hex_vals else end - start
+            segment: dict = {
+                "start": fmt_addr(start),
+                "end": fmt_addr(end),
+                "size": size,
+            }
+            if len(hex_vals) > 1:
+                segment["offset"] = fmt_addr(hex_vals[1])
+            if perms:
+                segment["perms"] = perms
+            if rest:
+                segment["objfile"] = " ".join(rest)
+            segments.append(segment)
+            continue
+        # core-file fallback: `0x401000 - 0x402000 is .text`
+        m = _CORE_INFO_FILES_RE.match(raw.strip())
+        if m is not None:
+            start = int(m.group(1), 16)
+            end = int(m.group(2), 16)
+            if end > start:
+                segments.append(
+                    {
+                        "start": fmt_addr(start),
+                        "end": fmt_addr(end),
+                        "size": end - start,
+                        "objfile": m.group(3).strip(),
+                    }
+                )
+            continue
+        # core-file fallback: `[0] 0x401000->0x402000 at 0x...: .text ALLOC LOAD CODE`
+        m2 = _CORE_MAINT_SEC_RE.match(raw.strip())
+        if m2 is not None:
+            start = int(m2.group(1), 16)
+            end = int(m2.group(2), 16)
+            if end > start:
+                flags_text = m2.group(4) or ""
+                r = "r" if "ALLOC" in flags_text or "LOAD" in flags_text else "-"
+                w = "w" if "READONLY" not in flags_text and "DATA" in flags_text else "-"
+                x = "x" if "CODE" in flags_text else "-"
+                segments.append(
+                    {
+                        "start": fmt_addr(start),
+                        "end": fmt_addr(end),
+                        "size": end - start,
+                        "perms": "%s%s%s-" % (r, w, x),
+                        "objfile": m2.group(3).strip(),
+                    }
+                )
     return segments
+
+
+_CORE_INFO_FILES_RE = re.compile(
+    r"^(0x[0-9a-fA-F]+)\s*-\s*(0x[0-9a-fA-F]+)\s+is\s+(.+)$"
+)
+_CORE_MAINT_SEC_RE = re.compile(
+    r"^(?:\[\d+\]\s+)?(0x[0-9a-fA-F]+)->(0x[0-9a-fA-F]+)\s+at\s+0x[0-9a-fA-F]+:\s+(\S+)(?:\s+(.*))?$"
+)
 
 
 _BIN_SECTION_NAMES = {

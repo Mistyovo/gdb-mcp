@@ -1027,6 +1027,72 @@ class TestPolicyDeferred:
         pump(plugin)
         assert [m for m in drain(plugin) if m.get("type") == "response"] == []
 
+    def test_thread_select_switches_and_validates(self, plugin):
+        set_inferior()
+        t2 = mock_gdb.MockThread(2, "worker")
+        mock_gdb.state.threads.append(t2)
+        r = call(plugin, "thread_select", {"number": 2})["result"]
+        assert r["number"] == 2
+        assert r["selected"] is True
+        assert call(plugin, "thread_select", {"number": 99})["error"]["code"] == "BAD_PARAMS"
+        assert call(plugin, "thread_select", {"number": 0})["error"]["code"] == "BAD_PARAMS"
+
+    def test_mem_map_falls_back_for_core_files(self, plugin):
+        set_inferior()
+        mock_gdb.state.output_map["info proc mappings"] = ""
+        mock_gdb.state.output_map["maintenance info sections"] = (
+            "[0] 0x00401000->0x00402000 at 0x00001000: .text ALLOC LOAD CODE\n"
+        )
+        r = call(plugin, "mem_map", {})["result"]
+        assert ".text" in r["output"]
+
+    def test_policy_interrupt_returns_partial_summary(self, plugin):
+        set_inferior()
+        mock_gdb.state.async_posted_resume = True
+        self._start_policy(plugin, 41, {"kind": "trace", "max_steps": 10})
+        assert plugin._policy_active is not None
+        plugin._do_interrupt()
+        msgs = drain(plugin)
+        resp = [m for m in msgs if m.get("type") == "response" and m.get("id") == 41]
+        assert len(resp) == 1
+        assert resp[0]["ok"] is True
+        assert resp[0]["result"]["cancelled"] is True
+        assert plugin._policy_active is None
+
+    def test_verify_pc_control_policy(self, plugin):
+        plugin._connect_events()
+        inf = set_inferior()
+        inf.memory[0x1000:0x3000] = b"\x00" * 0x2000
+        mock_gdb.state.output_map["info proc mappings"] = SNAP_MAPPINGS
+        call(plugin, "snapshot_create", {})
+        canary = 0x4142434445464748
+
+        def fake_resume(cmd):
+            if cmd == "continue":
+                mock_gdb.state.newest_frame._pc = canary
+                mock_gdb.events.stop.fire(
+                    mock_gdb.FakeStopEvent("SIGSEGV", {"reason": "signal-received"})
+                )
+                return True
+            return False
+
+        mock_gdb.state.resume_hook = fake_resume
+        r = call(
+            plugin,
+            "policy",
+            {
+                "kind": "verify_pc_control",
+                "snapshot_id": "ck-1",
+                "buffer_addr": "0x1000",
+                "stop_location": "main",
+                "offset": 16,
+                "canary": "0x%x" % canary,
+            },
+        )["result"]
+        assert r["verified"] is True
+        assert r["expected"] == "0x%x" % canary
+        assert r["observed"] == "0x%x" % canary
+
     def test_stale_drive_aborted_by_new_policy(self, plugin):
         set_inferior()
         mock_gdb.state.async_posted_resume = True

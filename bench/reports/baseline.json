@@ -2,301 +2,339 @@
   "bench_version": "1.0.0",
   "by_difficulty": {
     "easy": {
-      "n": 180,
+      "n": 19,
       "rate": 1.0
     },
     "hard": {
-      "n": 110,
+      "n": 11,
       "rate": 1.0
     },
     "medium": {
-      "n": 286,
+      "n": 42,
       "rate": 1.0
     }
   },
   "by_family": {
     "breakpoints": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "crash": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "inspect": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "lifecycle": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "multistep": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "optimize": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "pie": {
-      "n": 72,
+      "n": 8,
+      "rate": 1.0
+    },
+    "pwn_workflow": {
+      "n": 8,
       "rate": 1.0
     },
     "threads": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     }
   },
   "by_tag": {
+    "-O0": {
+      "n": 3,
+      "rate": 1.0
+    },
+    "-O1": {
+      "n": 1,
+      "rate": 1.0
+    },
+    "-O2": {
+      "n": 3,
+      "rate": 1.0
+    },
+    "-O3": {
+      "n": 1,
+      "rate": 1.0
+    },
     "O0": {
-      "n": 105,
+      "n": 15,
       "rate": 1.0
     },
     "O1": {
-      "n": 55,
+      "n": 5,
       "rate": 1.0
     },
     "O2": {
-      "n": 150,
+      "n": 15,
       "rate": 1.0
     },
     "O2-plus": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "O3": {
-      "n": 50,
+      "n": 5,
       "rate": 1.0
     },
     "SIGINT": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "argv": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "aslr": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "backtrace": {
-      "n": 24,
+      "n": 2,
       "rate": 1.0
     },
     "breakpoints": {
-      "n": 48,
+      "n": 5,
+      "rate": 1.0
+    },
+    "checkpoint": {
+      "n": 4,
       "rate": 1.0
     },
     "concurrency": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "conditional": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "conditional-bp": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "crash": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "crash_facts": {
-      "n": 36,
+      "n": 4,
       "rate": 1.0
     },
     "dynamic-decision": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "exit": {
-      "n": 24,
+      "n": 2,
       "rate": 1.0
     },
     "exit-code": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "facts": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "fault-addr": {
-      "n": 72,
+      "n": 8,
+      "rate": 1.0
+    },
+    "heap_chunk": {
+      "n": 4,
       "rate": 1.0
     },
     "inspect": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "interrupt": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "lcg": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "lifecycle": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "memory": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     },
     "memory-write": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "multistep": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "no-dwarf": {
-      "n": 48,
+      "n": 6,
       "rate": 1.0
     },
     "optimization": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "pie": {
-      "n": 72,
+      "n": 8,
+      "rate": 1.0
+    },
+    "pwn": {
+      "n": 8,
       "rate": 1.0
     },
     "registers": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "report_globals": {
-      "n": 36,
+      "n": 4,
       "rate": 1.0
     },
     "segfault": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "software-bp": {
-      "n": 24,
+      "n": 2,
       "rate": 1.0
     },
     "state-machine": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "threads": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "vmmap": {
-      "n": 72,
+      "n": 8,
       "rate": 1.0
     },
     "watchpoint": {
-      "n": 24,
+      "n": 3,
       "rate": 1.0
     }
   },
   "label": "selfcheck",
   "latency": {
-    "median_ms": 2.58,
-    "p50_ms": 2.58,
-    "p95_ms": 1089.562,
-    "p99_ms": 1115.9,
+    "median_ms": 2.627,
+    "p50_ms": 2.627,
+    "p95_ms": 915.704,
+    "p99_ms": 1059.652,
     "per_tool": {
+      "checkpoint": {
+        "n": 8,
+        "p50_ms": 29.631,
+        "p95_ms": 55.899,
+        "p99_ms": 56.253
+      },
       "continue_execution": {
-        "n": 476,
-        "p50_ms": 52.454,
-        "p95_ms": 56.55,
-        "p99_ms": 57.905
+        "n": 54,
+        "p50_ms": 43.627,
+        "p95_ms": 46.159,
+        "p99_ms": 48.701
       },
       "evaluate": {
-        "n": 896,
-        "p50_ms": 4.261,
-        "p95_ms": 15.01,
-        "p99_ms": 15.977
+        "n": 116,
+        "p50_ms": 3.514,
+        "p95_ms": 13.144,
+        "p99_ms": 13.713
       },
       "execute_command": {
-        "n": 696,
-        "p50_ms": 71.791,
-        "p95_ms": 75.478,
-        "p99_ms": 79.539
+        "n": 90,
+        "p50_ms": 70.479,
+        "p95_ms": 76.486,
+        "p99_ms": 77.294
       },
       "get_backtrace": {
-        "n": 200,
-        "p50_ms": 8.776,
-        "p95_ms": 58.142,
-        "p99_ms": 82.816
+        "n": 22,
+        "p50_ms": 7.793,
+        "p95_ms": 9.439,
+        "p99_ms": 9.698
       },
-      "get_stop_reason": {
-        "n": 3247,
-        "p50_ms": 1.802,
-        "p95_ms": 2.773,
-        "p99_ms": 3.263
+      "heap_chunk": {
+        "n": 4,
+        "p50_ms": 3.025,
+        "p95_ms": 3.433,
+        "p99_ms": 3.489
       },
       "interrupt": {
-        "n": 24,
-        "p50_ms": 2.569,
-        "p95_ms": 3.881,
-        "p99_ms": 3.96
+        "n": 3,
+        "p50_ms": 3.085,
+        "p95_ms": 3.356,
+        "p99_ms": 3.38
       },
       "kill_session": {
-        "n": 576,
-        "p50_ms": 252.323,
-        "p95_ms": 381.345,
-        "p99_ms": 398.421
+        "n": 72,
+        "p50_ms": 106.76,
+        "p95_ms": 121.273,
+        "p99_ms": 126.81
       },
       "launch_gdb": {
-        "n": 576,
-        "p50_ms": 1102.972,
-        "p95_ms": 1207.137,
-        "p99_ms": 1308.332
+        "n": 72,
+        "p50_ms": 936.226,
+        "p95_ms": 1086.01,
+        "p99_ms": 1142.767
       },
       "list_threads": {
-        "n": 72,
-        "p50_ms": 2.142,
-        "p95_ms": 2.972,
-        "p99_ms": 3.181
+        "n": 8,
+        "p50_ms": 1.49,
+        "p95_ms": 2.605,
+        "p99_ms": 2.67
       },
       "read_memory": {
-        "n": 776,
-        "p50_ms": 2.565,
-        "p95_ms": 6.687,
-        "p99_ms": 14.851
+        "n": 88,
+        "p50_ms": 2.006,
+        "p95_ms": 4.181,
+        "p99_ms": 12.702
       },
       "read_registers": {
-        "n": 108,
-        "p50_ms": 2.71,
-        "p95_ms": 3.687,
-        "p99_ms": 3.954
+        "n": 12,
+        "p50_ms": 1.648,
+        "p95_ms": 2.118,
+        "p99_ms": 2.277
       },
       "session_status": {
-        "n": 576,
-        "p50_ms": 1.02,
-        "p95_ms": 1.702,
-        "p99_ms": 2.181
+        "n": 319,
+        "p50_ms": 1.54,
+        "p95_ms": 2.437,
+        "p99_ms": 2.566
       },
       "set_breakpoint": {
-        "n": 276,
-        "p50_ms": 5.872,
-        "p95_ms": 7.449,
-        "p99_ms": 8.502
+        "n": 38,
+        "p50_ms": 4.608,
+        "p95_ms": 5.71,
+        "p99_ms": 29.918
       },
       "write_memory": {
-        "n": 548,
-        "p50_ms": 2.341,
-        "p95_ms": 5.106,
-        "p99_ms": 5.742
+        "n": 66,
+        "p50_ms": 1.865,
+        "p95_ms": 3.745,
+        "p99_ms": 3.955
       }
     },
-    "total_calls": 9047
+    "total_calls": 972
   },
-  "passed": 576,
+  "passed": 72,
   "success_rate": 1.0,
-  "total": 576
+  "total": 72
 }

@@ -9,6 +9,7 @@ primitive claim carries an evidence timestamp.
 
 from __future__ import annotations
 
+import re
 import string
 import time
 
@@ -154,6 +155,37 @@ def campaign_detect(
                 }
             return {"source": source, **match}
     return None
+
+
+_CHECKSEC_FIELDS = (
+    ("relro", re.compile(r"RELRO\s*:\s*(.+)", re.IGNORECASE)),
+    ("canary", re.compile(r"Canary\s*:\s*(.+)", re.IGNORECASE)),
+    ("nx", re.compile(r"NX\s*:\s*(.+)", re.IGNORECASE)),
+    ("pie", re.compile(r"PIE\s*:\s*(.+)", re.IGNORECASE)),
+    ("fortify", re.compile(r"FORTIFY\s*:\s*(.+)", re.IGNORECASE)),
+)
+
+
+def parse_checksec(text: str) -> dict[str, dict[str, str]]:
+    """Parse pwndbg ``checksec`` output into {field: {value, evidence}}.
+
+    Returns an empty dict when no recognized checksec lines are present
+    (callers must report detected=False instead of guessing).
+    """
+    found: dict[str, dict[str, str]] = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        for key, pattern in _CHECKSEC_FIELDS:
+            if key in found:
+                continue
+            match = pattern.search(line)
+            if match is not None:
+                val = match.group(1).strip()
+                if val:
+                    found[key] = {"value": val, "evidence": line[:256]}
+    return found
 
 
 def campaign_summary(data: dict) -> list[str]:

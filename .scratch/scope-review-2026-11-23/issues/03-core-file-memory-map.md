@@ -1,6 +1,6 @@
 # 03 — core file 的停止上下文与内存映射
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 Priority: P1
 Area: crash triage / state

@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from . import breakpoints, crash, inspect, lifecycle, multistep, optimize, pie, threads
+from . import (
+    breakpoints,
+    crash,
+    inspect,
+    lifecycle,
+    multistep,
+    optimize,
+    pie,
+    pwn_workflow,
+    threads,
+)
 
 FAMILY_MODULES = {
     breakpoints.FAMILY: breakpoints,
@@ -12,6 +22,7 @@ FAMILY_MODULES = {
     multistep.FAMILY: multistep,
     optimize.FAMILY: optimize,
     pie.FAMILY: pie,
+    pwn_workflow.FAMILY: pwn_workflow,
     threads.FAMILY: threads,
 }
 
