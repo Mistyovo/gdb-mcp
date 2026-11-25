@@ -43,6 +43,44 @@ def _disconnected(session: Session) -> bool:
     return session.state == DISCONNECTED
 
 
+def _termination(
+    session: Session, force: bool, *, always: bool = False, had_writer: bool | None = None
+) -> dict:
+    """Explicit close semantics instead of one ambiguous "killed" flag."""
+    connected = session.writer is not None if had_writer is None else had_writer
+    if always or (force and session.launched):
+        return {
+            "process_termination": "terminate_requested",
+            "termination_note": (
+                "termination of the launched process tree was requested; "
+                "this result does not confirm that gdb has exited"
+            ),
+        }
+    if force and not connected and not session.launched:
+        return {
+            "process_termination": "record_only",
+            "termination_note": (
+                "no live plugin connection and the gdb was not launched by "
+                "this server; only the session record changed"
+            ),
+        }
+    if force:
+        return {
+            "process_termination": "terminate_requested_via_plugin",
+            "termination_note": (
+                "the attached gdb was asked to quit through the plugin; it "
+                "was not launched by this server, so verify the process yourself"
+            ),
+        }
+    return {
+        "process_termination": "detach_only",
+        "termination_note": (
+            "plugin detached; gdb and the inferior keep running; pass "
+            "force=True to request termination"
+        ),
+    }
+
+
 def _with_attach(gdb_args: list[str] | None, attach_pid: int | None) -> list[str] | None:
     if attach_pid is None:
         return gdb_args
@@ -166,16 +204,31 @@ async def launch_gdb(
             await session.request(
                 "eval", {"command": "run"}, timeout=cfg.request_timeout
             )
+    connected = session.state != RESERVED
     result = {
         "session_id": session.session_id,
         "state": session.state,
+        "plugin_connected": connected,
         "log_file": session.log_file,
         "distro": session.distro,
         "note": (
-            "plugin connected" if session.state != RESERVED
+            "plugin connected" if connected
             else "hello not received yet; the plugin retries in the background"
         ),
     }
+    if not connected:
+        if session.proc_returncode is not None:
+            result["diagnosis"] = (
+                "gdb exited (code %s) before the plugin connected; inspect log_file"
+                % session.proc_returncode
+            )
+        else:
+            result["diagnosis"] = (
+                "gdb is running but the plugin has not connected; check that "
+                "gdb loaded the plugin (init files, Python support) and that "
+                "%s:%d is reachable from gdb's namespace"
+                % (cfg.host_bind, cfg.port)
+            )
     if io_info is not None:
         result["io"] = io_info
     return result
@@ -188,9 +241,11 @@ async def kill_session(
     session_id: str | None = None,
     ctx: Context = None,
 ) -> dict:
-    """End a session. Default detaches plugin and keeps gdb/record alive;
-    `force=True` terminates the gdb process tree (keeping a disconnected
-    record until GC); `forget=True` also drops the record."""
+    """End a session. Default detaches the plugin and keeps gdb/record
+    alive; `force=True` requests termination of the gdb process tree
+    (launched sessions) or asks an attached gdb to quit; `forget=True`
+    also drops the record. The result says whether termination was
+    requested; it does not confirm that the process exited."""
     registry = registry_from(ctx)
     session = resolve_any(ctx, session_id)
     if session.kind == "gdb":
@@ -207,11 +262,16 @@ async def kill_session(
                 "force": force,
                 "forget": True,
                 "record_kept": False,
+                "launched": session.launched,
                 "log_file": session.log_file,
+                **_termination(session, force, always=session.launched),
             }
         if session.writer is not None:
+            had_writer = True
             await session.send_quit(kill_gdb=force)
             await session.wait_for_state(_disconnected, 2.0)
+        else:
+            had_writer = False
         if force and session.launched:
             await launcher_from(ctx).pkill_marker(
                 session.session_id, True, distro=session.distro
@@ -226,7 +286,9 @@ async def kill_session(
             "force": force,
             "forget": forget,
             "record_kept": keep_record,
+            "launched": session.launched,
             "log_file": session.log_file,
+            **_termination(session, force, had_writer=had_writer),
         }
     if not session.launched:
         raise GdbMcpError(
@@ -245,5 +307,7 @@ async def kill_session(
         "force": force,
         "forget": True,
         "record_kept": False,
+        "launched": session.launched,
         "log_file": session.log_file,
+        **_termination(session, force, always=True),
     }

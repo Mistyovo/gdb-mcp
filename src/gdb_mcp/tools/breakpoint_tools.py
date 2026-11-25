@@ -13,7 +13,7 @@ from .registry import tool
 _BP_TYPES = ("breakpoint", "hw", "watch", "hw_watch")
 
 
-@tool(core=True, capability="debug")
+@tool(core=True, capability="debug", readonly=True)
 async def breakpoint(
     action: str = "set",
     location: str | None = None,
@@ -32,12 +32,17 @@ async def breakpoint(
     - set: create at `location` (`type`: breakpoint|hw|watch|hw_watch;
       optional condition/temporary/pending/thread/commands/auto_continue).
     - list: list all breakpoints/watchpoints.
-    - delete / enable / disable: operate on breakpoint `number`."""
+    - delete / enable / disable: operate on breakpoint `number`.
+    Under --readonly only `list` is available."""
     cfg = config_from(ctx)
     session = resolve_gdb(ctx, session_id)
     check_stopped(session)
     if action == "list":
         return await session.request("breakpoints", {}, timeout=cfg.request_timeout)
+    if cfg.readonly:
+        raise GdbMcpError(
+            "READONLY", "breakpoint %s is disabled in --readonly mode" % action
+        )
     if action in ("delete", "enable", "disable"):
         if isinstance(number, bool) or not isinstance(number, int):
             raise GdbMcpError("BAD_PARAMS", "number must be an int")

@@ -134,6 +134,13 @@ class TestBuildGdbArgv:
             "arg1",
         ]
 
+    def test_gdb_binary_override(self):
+        argv = build_gdb_argv(
+            "/mnt/c/plugin.py", None, None, None, run=False,
+            gdb_binary="/usr/bin/gdb-multiarch",
+        )
+        assert argv[0] == "/usr/bin/gdb-multiarch"
+
     def test_gdb_args_and_run(self):
         argv = build_gdb_argv(
             "/mnt/c/plugin.py", None, None, ["-nh"], run=True
@@ -174,6 +181,28 @@ class TestLogTail:
 
 
 class TestLauncherLifecycle:
+    @pytest.mark.asyncio
+    async def test_spawn_error_names_the_actual_launcher(self, monkeypatch, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.errors import LaunchError
+        from gdb_mcp.launcher import Launcher
+        from gdb_mcp.sessions import SessionRegistry
+
+        config = Config(launcher="native", log_dir=tmp_path)
+        registry = SessionRegistry(config)
+        launcher = Launcher(config, registry)
+
+        async def missing_bash(*args, **kwargs):
+            raise FileNotFoundError("bash")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", missing_bash)
+        with pytest.raises(LaunchError) as error:
+            await launcher._spawn(
+                ["gdb"], {}, None, "s-err", tmp_path / "err.log", "gdb", True
+            )
+        assert "via the native launcher" in str(error.value)
+        assert registry.list_all() == []
+
     @pytest.mark.asyncio
     async def test_session_reserved_before_process_spawn(self, monkeypatch, tmp_path):
         from gdb_mcp.config import Config

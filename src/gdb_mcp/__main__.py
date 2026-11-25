@@ -44,7 +44,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--launcher",
         choices=("wsl", "native"),
         default=None,
-        help="where launch_* run processes: wsl (default) or native",
+        help="where launch_* run processes: wsl (default on Windows) or "
+        "native (default on Linux)",
+    )
+    p.add_argument(
+        "--gdb-path",
+        default=None,
+        help="gdb executable to launch (default: gdb from PATH)",
+    )
+    p.add_argument(
+        "--selfcheck",
+        action="store_true",
+        default=False,
+        help="check launcher prerequisites (gdb, embedded Python, plugin, "
+        "port) and exit; prints JSON",
     )
     p.add_argument(
         "--readonly",
@@ -83,6 +96,7 @@ def _overrides(args) -> dict:
         "mcp_transport": None if args.no_mcp is None else not args.no_mcp,
         "tool_profile": args.tool_profile,
         "launcher": args.launcher,
+        "gdb_path": args.gdb_path,
         "readonly": args.readonly,
         "allow_unsafe": args.allow_unsafe,
         "experimental": args.experimental,
@@ -99,6 +113,14 @@ def main(argv: list[str] | None = None) -> int:
         cfg = Config.from_env(overrides=_overrides(args))
     except ValueError as exc:
         parser.error(str(exc))
+    if args.selfcheck:
+        import json
+
+        from gdb_mcp.selfcheck import run_selfcheck
+
+        result = asyncio.run(run_selfcheck(cfg))
+        print(json.dumps(result, indent=2))
+        return 0 if result["ready"] else 1
     from gdb_mcp.server import serve
 
     try:

@@ -163,9 +163,10 @@ def build_gdb_argv(
     args: list[str] | None,
     gdb_args: list[str] | None,
     run: bool,
+    gdb_binary: str = "gdb",
 ) -> list[str]:
     """Assemble the gdb command line for a launch (WSL paths)."""
-    argv = ["gdb", "-q"]
+    argv = [gdb_binary, "-q"]
     argv += list(gdb_args or [])
     argv += ["-x", plugin_wsl_path]
     if run:
@@ -287,7 +288,10 @@ class Launcher:
                 log_fh.close()
         except (OSError, asyncio.TimeoutError) as exc:
             self.registry.remove(session_id)
-            raise LaunchError("failed to start %s in WSL: %s" % (kind, exc)) from exc
+            raise LaunchError(
+                "failed to start %s via the %s launcher: %s"
+                % (kind, launcher, exc)
+            ) from exc
         session.proc = proc
         session.proc_task = asyncio.create_task(self._watch_process(session))
         session.update_seen()
@@ -330,7 +334,14 @@ class Launcher:
         if program:
             program_wsl = win_to_wsl(program)
         plugin = self.plugin_wsl_path()
-        argv = build_gdb_argv(plugin, program_wsl, args, gdb_args, run)
+        argv = build_gdb_argv(
+            plugin,
+            program_wsl,
+            args,
+            gdb_args,
+            run,
+            gdb_binary=self.config.gdb_path or "gdb",
+        )
         env_vars = build_plugin_env(
             self.config,
             session_id,

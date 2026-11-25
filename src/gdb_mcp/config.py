@@ -6,7 +6,9 @@ Environment variables (all optional, prefixed ``GDB_MCP_``):
 * ``GDB_MCP_HOST_BIND``       - bind address for that TCP listener (default 127.0.0.1)
 * ``GDB_MCP_TOKEN``           - optional shared token the plugin must present
 * ``GDB_MCP_WSL_DISTRO``      - WSL distro used by launch tools (default: auto)
-* ``GDB_MCP_LAUNCHER``        - where launch_* run processes: wsl | native (default: wsl)
+* ``GDB_MCP_LAUNCHER``        - where launch_* run processes: wsl | native
+                                (default: wsl on Windows, native elsewhere)
+* ``GDB_MCP_GDB_PATH``        - gdb executable to launch (default: gdb on PATH)
 * ``GDB_MCP_LOG_DIR``         - log directory for launched processes
 * ``GDB_MCP_REQUEST_TIMEOUT`` - per-request timeout in seconds (default 30)
 * ``GDB_MCP_HEARTBEAT_SEC``   - heartbeat interval in seconds (default 30)
@@ -36,7 +38,8 @@ DEFAULTS = {
     "launch_timeout_ms": 10_000,
     "tool_profile": "pwn",
     "result_inline_limit": 16_000,
-    "launcher": "wsl",
+    "launcher": None,
+    "gdb_path": None,
     "readonly": False,
     "allow_unsafe": False,
     "experimental": False,
@@ -48,6 +51,11 @@ DEFAULTS = {
 def _default_log_dir() -> Path:
     base = os.environ.get("USERPROFILE") or str(Path.home())
     return Path(base) / ".gdb-mcp" / "logs"
+
+
+def platform_default_launcher() -> str:
+    """WSL is only meaningful on Windows; Linux hosts run gdb natively."""
+    return "wsl" if os.name == "nt" else "native"
 
 
 @dataclass
@@ -72,7 +80,9 @@ class Config:
     #: tool outputs longer than this are stored on disk and previewed
     result_inline_limit: int = DEFAULTS["result_inline_limit"]
     #: where launch_* run processes: "wsl" | "native"
-    launcher: str = DEFAULTS["launcher"]
+    launcher: str | None = DEFAULTS["launcher"]
+    #: gdb executable to launch (default: "gdb" from PATH)
+    gdb_path: str | None = DEFAULTS["gdb_path"]
     #: keep only observe-capability tools (drops execution, breakpoints,
     #: launches, writes, policies, etc.)
     readonly: bool = DEFAULTS["readonly"]
@@ -96,6 +106,8 @@ class Config:
             value = getattr(self, name)
             if isinstance(value, str):
                 setattr(self, name, Path(value))
+        if self.launcher is None:
+            self.launcher = platform_default_launcher()
 
     def ensure_dirs(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -126,6 +138,8 @@ class Config:
             raise ValueError("result_inline_limit must be a positive integer")
         if self.launcher not in ("wsl", "native"):
             raise ValueError("launcher must be 'wsl' or 'native'")
+        if self.gdb_path is not None and not str(self.gdb_path).strip():
+            raise ValueError("gdb_path must not be empty")
         minimum_line_size = max(self.eval_output_limit, self.max_mem_read * 2) + 4096
         if self.max_async_line < minimum_line_size:
             raise ValueError(
@@ -187,7 +201,8 @@ class Config:
             tool_profile=env("TOOL_PROFILE", str) or DEFAULTS["tool_profile"],
             result_inline_limit=env("RESULT_INLINE_LIMIT", int)
             or DEFAULTS["result_inline_limit"],
-            launcher=env("LAUNCHER", str) or DEFAULTS["launcher"],
+            launcher=env("LAUNCHER", str),
+            gdb_path=env("GDB_PATH", str),
             readonly=env_bool("READONLY") or DEFAULTS["readonly"],
             allow_unsafe=env_bool("ALLOW_UNSAFE") or DEFAULTS["allow_unsafe"],
             # experimental is deliberately NOT env-configurable

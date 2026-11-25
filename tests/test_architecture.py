@@ -9,7 +9,11 @@ mechanically instead of by review.
 """
 
 import ast
+import inspect
+import re
 from pathlib import Path
+
+import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "gdb_mcp"
 
@@ -113,6 +117,79 @@ class TestMcpBoundary:
         assert "ctx.request_context.lifespan_context" in common
         assert 'lifespan_context["' not in common
         assert "ServerContext" in _source("server.py")
+
+
+MCP_CALL_BLOCK = re.compile(
+    r"<!-- mcp-calls:start -->\s*```python\n(.*?)\n```\s*<!-- mcp-calls:end -->",
+    re.DOTALL,
+)
+
+
+def _check_mcp_calls(source: str, handlers: dict) -> set[str]:
+    """Bind documented MCP arguments without executing any tool or target.
+
+    Context is injected by MCP, never a client argument. Keep the notation
+    deliberately narrow: named tool calls with literal keyword arguments.
+    """
+    names = set()
+    for statement in ast.parse(source).body:
+        assert isinstance(statement, ast.Expr), "expected a tool call expression"
+        call = statement.value
+        assert isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        name = call.func.id
+        assert name in handlers, "unregistered MCP tool: %s" % name
+        assert not call.args, "MCP examples must use named arguments"
+        assert all(keyword.arg is not None for keyword in call.keywords)
+        kwargs = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+        assert len(kwargs) == len(call.keywords), "duplicate keyword argument"
+        signature = inspect.signature(handlers[name])
+        signature = signature.replace(
+            parameters=[p for p in signature.parameters.values() if p.name != "ctx"]
+        )
+        signature.bind(**kwargs)
+        names.add(name)
+    assert names, "empty MCP call block"
+    return names
+
+
+class TestDocumentedMcpCalls:
+    @pytest.mark.parametrize("readme", ["README.md", "README.zh-CN.md"])
+    def test_quickstart_calls_match_registered_handlers(self, readme, tmp_path):
+        from gdb_mcp.config import Config
+        from gdb_mcp.server import build_app
+        from gdb_mcp.sessions import SessionRegistry
+        from gdb_mcp.tools import registered_tools
+        from gdb_mcp.tools.registry import SPECS
+
+        cfg = Config(tool_profile="pwn", log_dir=tmp_path / "logs")
+        registered = registered_tools(build_app(cfg, SessionRegistry(cfg)))
+        handlers = {spec.name: spec.fn for spec in SPECS if spec.name in registered}
+        text = (SRC.parent.parent / readme).read_text(encoding="utf-8")
+        blocks = MCP_CALL_BLOCK.findall(text)
+        assert len(blocks) == text.count("<!-- mcp-calls:start -->")
+        assert len(blocks) == text.count("<!-- mcp-calls:end -->")
+        assert blocks, "%s has no marked MCP examples" % readme
+        names = set()
+        for source in blocks:
+            names.update(_check_mcp_calls(source, handlers))
+        assert {
+            "launch_gdb", "control_execution", "inferior_io", "heap", "load_target"
+        } <= names
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'continue_execution()',
+            'load_target(action="core", path="/tmp/core")',
+            'load_target()',
+            'load_target(path="/tmp/core", ctx=None)',
+        ],
+    )
+    def test_contract_rejects_stale_names_and_wrong_arguments(self, source):
+        from gdb_mcp.tools.state_tools import load_target
+
+        with pytest.raises((AssertionError, TypeError)):
+            _check_mcp_calls(source, {"load_target": load_target})
 
 
 class TestDocumentedCounts:

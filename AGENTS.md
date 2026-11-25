@@ -18,8 +18,9 @@ See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context layout (`GLOSSARY.md` + `docs/adr/`, created lazily);
-`ROADMAP_V2.md` decision sections count as ADRs. See `docs/agents/domain.md`.
+Single-context layout (`GLOSSARY.md` + `docs/adr/`, created lazily).
+Read the existing scope ADR and the plugin's `_policy_drive` docstring for
+verified gdb facts. See `docs/agents/domain.md`.
 
 ## Repo ground rules (mirror of README/CI)
 
@@ -27,6 +28,8 @@ Single-context layout (`GLOSSARY.md` + `docs/adr/`, created lazily);
   (exit code must be checked explicitly — never trust a piped tail).
 - `ruff check src tests bench` must stay clean.
 - Real-gdb suites live under `tests/integration/` and run in WSL2 or CI;
+  on a Linux host, `gdb-mcp --selfcheck` is the first check when a launch
+  cannot find gdb, embedded Python, the plugin, or a free port.
   the policy family's resume/stop semantics are pinned by
   `run_policy_smoke.sh` (see `src/gdb_mcp/plugin/gdb_mcp_plugin.py`,
   `_policy_drive` docstring, for the three verified gdb facts).

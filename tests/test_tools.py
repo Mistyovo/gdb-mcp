@@ -12,7 +12,7 @@ from gdb_mcp.config import Config
 from gdb_mcp.context import ServerContext
 from gdb_mcp.errors import GdbMcpError
 from gdb_mcp.server import build_app
-from gdb_mcp.sessions import DISCONNECTED, EXITED, RUNNING, SessionRegistry
+from gdb_mcp.sessions import DISCONNECTED, EXITED, RUNNING, STOPPED, SessionRegistry
 from gdb_mcp.tools import CORE_TOOLS, registered_tools
 
 from test_sessions import FakeWriter, hello
@@ -43,6 +43,13 @@ def env(tmp_path):
     app = build_app(cfg, registry)
     tools = registered_tools(app)
     return registry, cfg, tools
+
+
+@pytest.fixture
+def readonly_env(tmp_path):
+    cfg = Config(readonly=True, log_dir=tmp_path / "readonly-logs")
+    registry = SessionRegistry(cfg)
+    return registry, cfg, registered_tools(build_app(cfg, registry))
 
 
 def ctx_for(env):
@@ -141,7 +148,148 @@ class TestToolProfile:
         cfg = Config(log_dir=tmp_path / "l", readonly=True)
         names = set(registered_tools(build_app(cfg, SessionRegistry(cfg))))
         assert {"session_info", "inspect_code", "crash_report", "heap"} <= names
+        # the breakpoint tool stays registered for its read-only list action
+        assert "breakpoint" in names
         assert not names & {"launch_gdb", "kill_session", "execute_command", "memory", "registers"}
+
+    def test_readonly_registration_matches_the_declared_surface(self, tmp_path):
+        from gdb_mcp.tools.registry import readonly_tool_names
+
+        cfg = Config(log_dir=tmp_path / "l", readonly=True)
+        names = set(registered_tools(build_app(cfg, SessionRegistry(cfg))))
+        assert names == set(readonly_tool_names())
+
+
+class TestReadonlyActions:
+    @pytest.mark.asyncio
+    async def test_session_observations_remain_available(self, readonly_env, tmp_path):
+        registry, _, tools = readonly_env
+        session = add_gdb_session(registry)
+        await session.push_notification("stop", {"pc": "0x401000", "signal": "SIGTRAP"})
+        log = tmp_path / "inferior.log"
+        log.write_text("observed output\n", encoding="utf-8")
+        session.log_file = str(log)
+        ctx = ctx_for(readonly_env)
+
+        listed = await run_tool(tools["session_info"], {"action": "list"}, ctx)
+        assert listed["sessions"][0]["session_id"] == session.session_id
+        args = {"session_id": session.session_id}
+        status = await run_tool(tools["session_info"], {"action": "status", **args}, ctx)
+        assert status["state"] == STOPPED
+        assert status["uptime_sec"] >= 0
+        events = await run_tool(tools["session_info"], {"action": "events", **args}, ctx)
+        assert events["events"][-1]["event"] == "stop"
+        output = await run_tool(tools["session_info"], {"action": "output", **args}, ctx)
+        assert output["output"] == "observed output\n"
+        assert session.writer.sent == []
+
+    @pytest.mark.asyncio
+    async def test_export_is_denied_without_creating_files(self, readonly_env):
+        registry, cfg, tools = readonly_env
+        session = add_gdb_session(registry)
+        # A populated journal ensures READONLY, not NO_JOURNAL, blocks export.
+        session.journal.append(
+            "request", {"verb": "break", "params": {"location": "main"}, "ok": True}
+        )
+        before = set(cfg.log_dir.rglob("*"))
+        with pytest.raises(GdbMcpError) as error:
+            await run_tool(
+                tools["session_info"],
+                {"action": "export", "session_id": session.session_id},
+                ctx_for(readonly_env),
+            )
+        assert error.value.code == "READONLY"
+        assert set(cfg.log_dir.rglob("*")) == before
+        assert not (cfg.log_dir / "scripts").exists()
+        assert session.writer.sent == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("action", "params", "verb", "response"),
+        [
+            ("backtrace", {"max_frames": 2}, "backtrace", {"frames": [{"function": "main"}]}),
+            ("disassemble", {"count": 2}, "disasm", {"instructions": [{"asm": "nop"}]}),
+        ],
+    )
+    async def test_inspect_observations_reach_gdb(
+        self, readonly_env, action, params, verb, response
+    ):
+        registry, _, tools = readonly_env
+        session = add_gdb_session(registry)
+        session.set_state(STOPPED)
+        task = asyncio.create_task(
+            run_tool(
+                tools["inspect_code"],
+                {"action": action, "session_id": session.session_id, **params},
+                ctx_for(readonly_env),
+            )
+        )
+        request = await respond_to(session, session.writer, response)
+        assert request["verb"] == verb
+        assert request["params"] == params
+        assert await task == response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "arguments"),
+        [
+            ("inspect_code", {"action": "evaluate", "expression": "(int) puts(\"mutate\")"}),
+            (
+                "crash_report",
+                {"payload_hex": "41", "buffer_addr": "0x1000", "stop_location": "main"},
+            ),
+        ],
+    )
+    async def test_mutating_actions_are_denied_before_dispatch(
+        self, readonly_env, name, arguments
+    ):
+        registry, _, tools = readonly_env
+        session = add_gdb_session(registry)
+        session.set_state(STOPPED)
+        with pytest.raises(GdbMcpError) as error:
+            await run_tool(
+                tools[name], {"session_id": session.session_id, **arguments}, ctx_for(readonly_env)
+            )
+        assert error.value.code == "READONLY"
+        assert session.writer.sent == []
+
+    @pytest.mark.asyncio
+    async def test_breakpoint_list_is_observable_but_mutations_are_denied(
+        self, readonly_env
+    ):
+        registry, _, tools = readonly_env
+        session = add_gdb_session(registry)
+        session.set_state(STOPPED)
+        ctx = ctx_for(readonly_env)
+        task = asyncio.create_task(
+            run_tool(
+                tools["breakpoint"],
+                {"action": "list", "session_id": session.session_id},
+                ctx,
+            )
+        )
+        request = await respond_to(
+            session,
+            session.writer,
+            {"breakpoints": [{"number": 1, "location": "main", "enabled": True}]},
+        )
+        assert request["verb"] == "breakpoints"
+        assert (await task)["breakpoints"][0]["number"] == 1
+
+        for action, extra in (
+            ("set", {"location": "main"}),
+            ("delete", {"number": 1}),
+            ("enable", {"number": 1}),
+            ("disable", {"number": 1}),
+        ):
+            with pytest.raises(GdbMcpError) as error:
+                await run_tool(
+                    tools["breakpoint"],
+                    {"action": action, "session_id": session.session_id, **extra},
+                    ctx,
+                )
+            assert error.value.code == "READONLY"
+        assert session.writer.sent == []
 
 
 class TestSessionInfoAndKill:
@@ -195,6 +343,8 @@ class TestSessionInfoAndKill:
         await s.on_disconnect()
         res = await task
         assert res["killed"] is True and res["record_kept"] is True
+        assert res["launched"] is False
+        assert res["process_termination"] == "terminate_requested_via_plugin"
         assert registry.has_session(s.session_id) and s.state == DISCONNECTED
 
         s2 = add_gdb_session(registry, pid=2222)
@@ -205,6 +355,30 @@ class TestSessionInfoAndKill:
         await s2.on_disconnect()
         res2 = await task2
         assert res2["record_kept"] is False and not registry.has_session(s2.session_id)
+        assert res2["process_termination"] == "detach_only"
+        assert "keep running" in res2["termination_note"]
+
+
+class TestLaunchDiagnosis:
+    @pytest.mark.asyncio
+    async def test_unconnected_plugin_is_reported(self, env, tmp_path):
+        registry, _, tools = env
+        session = registry.reserve(
+            "s-wait", kind="gdb", log_file=str(tmp_path / "g.log")
+        )
+
+        class FakeLauncher:
+            async def launch_gdb(self, **kwargs):
+                return session
+
+        context = ctx_for(env)
+        context.request_context.lifespan_context._launcher = FakeLauncher()
+        result = await run_tool(
+            tools["launch_gdb"], {"program": "/tmp/hello"}, context
+        )
+        assert result["plugin_connected"] is False
+        assert "namespace" in result["diagnosis"]
+        assert result["log_file"].endswith("g.log")
 
 
 class TestExecutionAndIO:

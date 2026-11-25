@@ -19,14 +19,15 @@ jobs:
 
   gdb-integration:
     # gdb compatibility matrix: the plugin's gdb.* API usage must hold
-    # across gdb majors, not just the 17.2 used in local WSL2 testing.
+    # across gdb majors, not just the 18.1 used in local WSL2 testing.
     # ubuntu-22.04 apt ships gdb 12.1, ubuntu-24.04 ships gdb 15.x;
-    # local WSL2 validation covers gdb 17.2.
+    # local WSL2 validation covers gdb 18.1.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y gdb gcc
@@ -47,6 +48,41 @@ jobs:
       # keeps the unsafe gate's command-resolution premises true on every
       # gdb major in the matrix (abbreviations, s/r/p/d, newline injection)
       - run: bash tests/integration/run_unsafe_gate_probe.sh
+
+  native-wheel:
+    # Installed-package MCP stdio regression. Older Ubuntu pairs the oldest
+    # gdb in the matrix with Python 3.10; the newer runner also covers the
+    # newest supported Python. The smoke itself asserts that the installed
+    # wheel (not the checkout) is loaded and drives the gdb-mcp console script.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            python: "3.10"
+          - os: ubuntu-24.04
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y gdb gcc
+      - run: gdb --version | head -1
+      - name: Installed-wheel MCP stdio smoke (native Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          python -m pip wheel . --no-deps --wheel-dir "$work/wheels"
+          python -m venv "$work/venv"
+          "$work/venv/bin/python" -m pip install "$work"/wheels/*.whl
+          cd "$work"
+          timeout --kill-after=10s 120s "$work/venv/bin/python" -I \
+            "$GITHUB_WORKSPACE/tests/integration/run_native_install_smoke.py"
 
   bench:
     # Goal §9 regression gate: the committed selfcheck baseline is the floor.

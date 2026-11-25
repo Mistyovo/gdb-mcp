@@ -4,12 +4,12 @@ import os
 
 import pytest
 
-from gdb_mcp.config import Config, DEFAULTS
+from gdb_mcp.config import Config, DEFAULTS, platform_default_launcher
 
 
 class TestPhase3Options:
     def test_launcher_validation(self):
-        assert Config().launcher == "wsl"
+        assert Config().launcher == platform_default_launcher()
         with pytest.raises(ValueError):
             Config(launcher="telnet").validate()
         with pytest.raises(ValueError):
@@ -17,6 +17,28 @@ class TestPhase3Options:
         with pytest.raises(ValueError):
             Config(launcher="docker").validate()
         Config(launcher="native").validate()
+
+    def test_launcher_defaults_to_platform(self, monkeypatch):
+        monkeypatch.delenv("GDB_MCP_LAUNCHER", raising=False)
+        monkeypatch.setattr(
+            "gdb_mcp.config.platform_default_launcher", lambda: "native"
+        )
+        assert Config.from_env().launcher == "native"
+        assert Config().launcher == "native"
+        assert platform_default_launcher() == (
+            "wsl" if os.name == "nt" else "native"
+        )
+
+    def test_gdb_path_env_and_override(self, monkeypatch):
+        monkeypatch.setenv("GDB_MCP_GDB_PATH", "gdb-multiarch")
+        assert Config.from_env().gdb_path == "gdb-multiarch"
+        assert (
+            Config.from_env(overrides={"gdb_path": "/usr/bin/gdb"}).gdb_path
+            == "/usr/bin/gdb"
+        )
+        with pytest.raises(ValueError, match="gdb_path"):
+            Config(gdb_path="  ").validate()
+        assert Config().gdb_path is None
 
     def test_bool_env_flags(self, monkeypatch):
         monkeypatch.setenv("GDB_MCP_READONLY", "1")
@@ -213,3 +235,4 @@ class TestCliOverridesDoNotEraseEnv:
         assert not names & {"memory", "registers", "execute_command", "launch_gdb"}
         assert "session_info" in names
         assert "inspect_code" in names
+        assert "breakpoint" in names

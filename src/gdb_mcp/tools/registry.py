@@ -32,6 +32,9 @@ class ToolSpec:
     capability: str = "observe"
     #: only registered when the server runs with --experimental
     experimental: bool = False
+    #: remains registered under --readonly even though the tool has a
+    #: mutating capability; the handler must reject every mutating action
+    readonly: bool = False
 
 
 SPECS: list[ToolSpec] = []
@@ -42,6 +45,7 @@ def tool(
     core: bool = False,
     capability: str = "observe",
     experimental: bool = False,
+    readonly: bool = False,
 ) -> Callable:
     """Declare an MCP tool. Returns the function unchanged; the
     declaration (not the app) is the source of truth for visibility."""
@@ -49,6 +53,10 @@ def tool(
     if capability not in CAPABILITIES:
         raise ValueError(
             "capability must be one of %s" % ", ".join(sorted(CAPABILITIES))
+        )
+    if readonly and capability == "observe":
+        raise ValueError(
+            "readonly=True is only meaningful for a mutating-capability tool"
         )
 
     def deco(fn: Callable) -> Callable:
@@ -59,6 +67,7 @@ def tool(
                 core=core,
                 capability=capability,
                 experimental=experimental,
+                readonly=readonly,
             )
         )
         return fn
@@ -77,12 +86,23 @@ def observe_tool_names() -> frozenset[str]:
     return frozenset(spec.name for spec in SPECS if spec.capability == "observe")
 
 
+def readonly_tool_names() -> frozenset[str]:
+    """The --readonly surface: observe tools plus explicitly safe views.
+    Experimental tools stay behind their CLI gate."""
+    return frozenset(
+        spec.name
+        for spec in SPECS
+        if not spec.experimental
+        and (spec.capability == "observe" or spec.readonly)
+    )
+
+
 def _visible(spec: ToolSpec, config: Config) -> bool:
     if spec.experimental and not config.experimental:
         return False
     if config.tool_profile == "core" and not spec.core:
         return False
-    if config.readonly and spec.capability != "observe":
+    if config.readonly and spec.capability != "observe" and not spec.readonly:
         return False
     return True
 

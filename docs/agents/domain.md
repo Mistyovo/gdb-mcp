@@ -10,10 +10,11 @@ How the engineering skills should consume this repo's domain documentation when 
 
 If any of these files do not exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
 
-Note for this repo: durable design decisions and verified environment
-facts also live in `ROADMAP_V2.md` (§5.5's "真机事实" and §9's decision
-log are the canonical records) — treat those sections like ADRs when
-they touch your area.
+Note for this repo: durable scope decisions live in
+`docs/adr/0001-userland-dynamic-debugging-scope.md`. For verified gdb
+resume/stop facts, read the `_policy_drive` docstring in
+`src/gdb_mcp/plugin/gdb_mcp_plugin.py`; those facts are pinned by
+`tests/integration/run_policy_smoke.sh`.
 
 ## File structure
 

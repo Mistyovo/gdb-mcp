@@ -127,9 +127,9 @@ class McpDriver:
     def server_env(self) -> dict[str, str]:
         """The env the bench server must see.
 
-        ``--distro ""`` is the native-Linux selector: without an explicit
-        launcher the server would default to ``wsl`` and fail on a Linux
-        runner. A real distro pins the wsl launcher for the same reason.
+        ``--distro ""`` selects native Linux; a real distro pins the WSL
+        launcher. The launcher is explicit so the bench does not depend on
+        the host's platform default (``native`` on Linux, ``wsl`` on Windows).
         """
         env = dict(os.environ)
         # The gdb plugin connects back from inside WSL via the NAT gateway,
